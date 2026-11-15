@@ -3,7 +3,7 @@
 //! See docs/features/capture-tool.md.
 
 use anyhow::{anyhow, bail, Context, Result};
-use mega_render::{paths, DebugView, HatchLod, Renderer, StrokeVisibility, StylePreset, Sun};
+use mega_render::{paths, DebugView, HatchLod, Renderer, ShadowFilter, StrokeVisibility, StylePreset, Sun};
 use std::time::Instant;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,13 +34,15 @@ OPTIONS:
     --metrics        print the mean absolute difference between consecutive frames, at
                      full resolution and after a 4x4 box downsample (0..255 grey levels)
                      and after reprojecting the previous frame into the current one by
-                     depth. Paper grain is switched off while measuring.
+                     depth, and the temporal second difference (for a still camera).
+                     Paper grain is switched off while measuring.
     --no-png         do not write PNG files (with --metrics); --out is then optional
     --error-png      with --metrics, also write the blurred reprojection error of each
                      frame, times 8, as error_NNNN.png (white = no difference)
     --hatch-lod <M>  diagnostic hatch octave selection: directional (default), isotropic,
                      fixed
     --stroke-vis <M> diagnostic stroke visibility test: block (default), centreline, pixel
+    --shadow-filter <M>  diagnostic shadow map filter: smooth (default), bilinear, hard
     --depth-tol <X>  override the preset's stroke depth tolerance
     --bench <N>      render one frame N times without readback and print ms per frame
     --width <W>      image width in pixels, default 1280
@@ -48,6 +50,17 @@ OPTIONS:
     --list-paths     print the available path names (with their scenes) and exit
     --list-scenes    print the available scene names and exit
     --preset <name>  style preset instead of the scene's own: nihei, nihei_vast
+    --set <f>=<v>    override one preset field (repeatable), e.g. --set shadow_light_max=0.2
+                     or --set sky_tone=none; --list-fields prints the names
+    --list-fields    print the preset field names and exit
+    --sun-elev <D>   sun elevation in degrees (default: the scene's sun)
+    --sun-azim <D>   sun azimuth in degrees from +Z towards +X (default: the scene's sun)
+    --sun-elev-end <D>, --sun-azim-end <D>
+                     animate the sun linearly to this elevation/azimuth over the sequence
+                     (combine with --t0 T --t1 T to hold the camera still)
+    --sun-dist <M>   a near sun this many metres from the centre of the scene bounds, with
+                     perspective shadows (default: remote)
+    --sun-intensity <X>  sun intensity, 0 switches the sun and its shadow pass off
     -h, --help       print this help
 
 With --frames N, frame i uses t = t0 + (t1 - t0) * i / (N - 1).
@@ -75,6 +88,36 @@ struct Args {
     hatch_lod: HatchLod,
     stroke_vis: StrokeVisibility,
     depth_tol: Option<f32>,
+    sets: Vec<(String, String)>,
+    sun: SunArgs,
+    shadow_filter: ShadowFilter,
+}
+
+#[derive(Default)]
+struct SunArgs {
+    elev: Option<f32>,
+    azim: Option<f32>,
+    elev_end: Option<f32>,
+    azim_end: Option<f32>,
+    dist: Option<f32>,
+    intensity: Option<f32>,
+}
+
+impl SunArgs {
+    /// The sun for sequence position `frac` (0..1), starting from the scene's own.
+    fn at(&self, base: Sun, centre: glam::Vec3, frac: f32) -> Sun {
+        let (e0, a0) = Sun::angles_of(base.position);
+        let e = self.elev.unwrap_or(e0);
+        let a = self.azim.unwrap_or(a0);
+        let e = e + (self.elev_end.unwrap_or(e) - e) * frac;
+        let a = a + (self.azim_end.unwrap_or(a) - a) * frac;
+        let dir = Sun::direction_from_angles(e, a);
+        let position = match self.dist {
+            Some(d) => centre + dir * d,
+            None => dir * base.position.length(),
+        };
+        Sun { position, intensity: self.intensity.unwrap_or(base.intensity), ..base }
+    }
 }
 
 fn parse_args() -> Result<Option<Args>> {
@@ -85,6 +128,9 @@ fn parse_args() -> Result<Option<Args>> {
     let (mut stroke_vis, mut depth_tol) = (StrokeVisibility::CentrelineBlock, None);
     let mut scene: Option<String> = None;
     let mut preset: Option<StylePreset> = None;
+    let mut sets = Vec::new();
+    let mut sun = SunArgs::default();
+    let mut shadow_filter = ShadowFilter::Smooth;
     fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
         it.next().ok_or_else(|| anyhow!("{flag} needs a value"))
     }
@@ -110,6 +156,25 @@ fn parse_args() -> Result<Option<Args>> {
                 return Ok(None);
             }
             "--scene" => scene = Some(value(&mut it, &a)?),
+            "--list-fields" => {
+                for n in StylePreset::FIELDS {
+                    println!("{n}");
+                }
+                return Ok(None);
+            }
+            "--set" => {
+                let v = value(&mut it, &a)?;
+                let (k, x) = v.split_once('=').ok_or_else(|| anyhow!("--set takes field=value, got '{v}'"))?;
+                // Validate now so a typo fails before any GPU work.
+                StylePreset::default().set(k, x).map_err(|e| anyhow!("--set: {e}"))?;
+                sets.push((k.to_string(), x.to_string()));
+            }
+            "--sun-elev" => sun.elev = Some(number(&value(&mut it, &a)?, &a)?),
+            "--sun-azim" => sun.azim = Some(number(&value(&mut it, &a)?, &a)?),
+            "--sun-elev-end" => sun.elev_end = Some(number(&value(&mut it, &a)?, &a)?),
+            "--sun-azim-end" => sun.azim_end = Some(number(&value(&mut it, &a)?, &a)?),
+            "--sun-dist" => sun.dist = Some(number(&value(&mut it, &a)?, &a)?),
+            "--sun-intensity" => sun.intensity = Some(number(&value(&mut it, &a)?, &a)?),
             "--preset" => {
                 let v = value(&mut it, &a)?;
                 preset = Some(StylePreset::by_name(&v).ok_or_else(|| anyhow!("unknown preset '{v}'; available: {}", StylePreset::NAMES.join(", ")))?);
@@ -135,6 +200,10 @@ fn parse_args() -> Result<Option<Args>> {
             "--stroke-vis" => {
                 let v = value(&mut it, &a)?;
                 stroke_vis = StrokeVisibility::from_name(&v).ok_or_else(|| anyhow!("unknown stroke visibility '{v}'; use block, centreline or pixel"))?;
+            }
+            "--shadow-filter" => {
+                let v = value(&mut it, &a)?;
+                shadow_filter = ShadowFilter::from_name(&v).ok_or_else(|| anyhow!("unknown shadow filter '{v}'; use smooth, bilinear or hard"))?;
             }
             "--depth-tol" => depth_tol = Some(number(&value(&mut it, &a)?, &a)?),
             "--hatch-lod" => {
@@ -181,7 +250,12 @@ fn parse_args() -> Result<Option<Args>> {
             bail!("--t must be within 0..1, got {t}");
         }
     }
-    Ok(Some(Args { path, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol }))
+    if let Some(d) = sun.dist {
+        if !(d > 0.0) {
+            bail!("--sun-dist must be positive");
+        }
+    }
+    Ok(Some(Args { path, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol, sets, sun, shadow_filter }))
 }
 
 fn main() {
@@ -248,10 +322,18 @@ fn run() -> Result<()> {
     );
     renderer.upload_scene(&scene.mesh);
     renderer.set_preset(args.preset.clone().unwrap_or_else(|| StylePreset::for_scene(&args.scene)));
-    renderer.set_sun(Sun::for_scene(&args.scene));
+    let base_sun = Sun::for_scene(&args.scene);
+    let centre = scene.mesh.bounds().map(|(lo, hi)| (glam::Vec3::from(lo) + glam::Vec3::from(hi)) * 0.5).unwrap_or_default();
+    renderer.set_sun(args.sun.at(base_sun, centre, 0.0));
+    for (k, v) in &args.sets {
+        let mut p = renderer.preset().clone();
+        p.set(k, v).map_err(|e| anyhow!("--set: {e}"))?;
+        renderer.set_preset(p);
+    }
     renderer.set_view(args.view);
     renderer.set_hatch_lod(args.hatch_lod);
     renderer.set_stroke_visibility(args.stroke_vis);
+    renderer.set_shadow_filter(args.shadow_filter);
     if let Some(tol) = args.depth_tol {
         renderer.set_preset(StylePreset { stroke_depth_tol: tol, ..renderer.preset().clone() });
     }
@@ -321,6 +403,8 @@ fn run() -> Result<()> {
     }
 
     let mut prev: Option<Frame> = None;
+    let mut prev2: Option<Vec<f32>> = None;
+    let mut second = Vec::new();
     let (mut mad_full, mut mad_down, mut rmad, mut rpop) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut rblur, mut ink) = (Vec::new(), Vec::new());
     for i in 0..args.frames {
@@ -330,6 +414,8 @@ fn run() -> Result<()> {
             args.t0 + (args.t1 - args.t0) * i as f32 / (args.frames - 1) as f32
         };
         let camera = cam_fn(t);
+        let frac = if args.frames == 1 { 0.0 } else { i as f32 / (args.frames - 1) as f32 };
+        renderer.set_sun(args.sun.at(base_sun, centre, frac));
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
         renderer.render(&mut encoder, &target_view, &camera);
@@ -401,6 +487,13 @@ fn run() -> Result<()> {
             ink.push(grey.iter().map(|g| 255.0 - g).sum::<f32>() / grey.len() as f32);
             let blurred = box_blur(&grey, w, h, 2);
             let cur = Frame { grey, blurred, depth, view_proj: camera.view_proj(aspect) };
+            if let (Some(p2), Some(p1)) = (&prev2, &prev) {
+                // Temporal second difference of the blurred image: near zero for ink that
+                // moves (or changes) at a steady rate, large for ink that jumps. Only
+                // meaningful with a still camera (for example a moving sun).
+                let n = cur.blurred.len() as f32;
+                second.push(cur.blurred.iter().zip(&p1.blurred).zip(p2).map(|((c, b), a)| (c - 2.0 * b + a).abs()).sum::<f32>() / n);
+            }
             if let Some(prev) = &prev {
                 mad_full.push(mad(&prev.grey, &cur.grey));
                 mad_down.push(mad(&downsample4(&prev.grey, w, h), &downsample4(&cur.grey, w, h)));
@@ -415,6 +508,7 @@ fn run() -> Result<()> {
                 rmad.push(m);
                 rpop.push(pop);
             }
+            prev2 = prev.take().map(|p| p.blurred);
             prev = Some(cur);
         }
         if let (true, Some(out)) = (args.png, &args.out) {
@@ -449,6 +543,14 @@ fn run() -> Result<()> {
             pm * 100.0,
             px_ * 100.0
         );
+        if !second.is_empty() {
+            let (sm, sx) = stats(&second);
+            println!(
+                "metrics {} view {}: temporal second difference after 5x5 blur mean {sm:.4} max {sx:.4} (still camera only)",
+                args.path,
+                args.view.name()
+            );
+        }
         println!(
             "metrics {} view {} frames {} t {}..{}: consecutive MAD full mean {fm:.3} max {fx:.3}; 4x4-down mean {dm:.3} max {dx:.3}; ratio {:.2}",
             args.path,

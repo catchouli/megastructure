@@ -2,7 +2,7 @@
 
 ## Status
 
-Working, 2026-11-15. Milestone M1 scene: generated from a seed, registered as `"shaft"`, walkable route checked in collider space, eleven camera paths. The walking controller that will consume the colliders is not built. Shadows, sky and screentone are out of scope.
+Working, 2026-11-15. Milestone M1 scene: generated from a seed, registered as `"shaft"`, walkable route checked in collider space, eleven camera paths, sun shadows (E011). The walking controller that will consume the colliders is not built. The sky pass and screentone are out of scope.
 
 ## What it is
 
@@ -59,7 +59,7 @@ Times local occlusion from the colliders at 70% strength (`kit-of-parts.md`, E00
 
 ### Look
 
-`StylePreset::nihei_vast` (`ink-renderer.md`) and `Sun::for_scene("shaft")`: a remote sun towards (-0.55, 0.8, -0.2), about 54 degrees up in the west, scaled by ao (`sun_occlusion` 1). `mega_capture` picks both from the scene name. The game currently uses `nihei` and the default sun.
+`StylePreset::nihei_vast` (`ink-renderer.md`) and `Sun::for_scene("shaft")`: a remote sun 74 degrees up at azimuth -110 (west-south-west), with cast shadows. The east wall is lit from the rim down to about 220 m deep, just below the spawn level, so the stair crosses a white field; below that the west rim's shadow cuts across it, and bridges throw black bars on the walls below them. Cast shadow is solid black with white ink inside it, faces turned away from the sun are toned by depth (E011 to E019). Until E011 the sun was 54 degrees up at (-0.55, 0.8, -0.2) and scaled by ao; with real shadows that sun lit only the top 87 m of the east wall and the spawn view went black. `mega_capture` and the game pick preset and sun from the scene name.
 
 ### Camera paths
 
@@ -97,10 +97,10 @@ cargo run --release --bin mega_capture -- --path shaft_spawn --bench 200 --width
 | Strokes | 6,126; 330 to 1,135 drawn per view |
 | Colliders | 1,288 |
 | Build (`scenes::by_name("shaft")`, including AO bake) | 23 to 37 ms |
-| Frame, 1280x720 (`--bench 200`, six shaft paths) | 0.51 to 0.58 ms (test scene 0.49 ms) |
-| Frame, 2560x1440 | 1.60 to 1.73 ms |
+| Frame, 1280x720 (`--bench 300`, five shaft paths, with shadows) | 0.96 to 1.53 ms (0.51 to 0.58 ms before shadows) |
+| Frame, 2560x1440 | 2.85 to 4.13 ms (1.60 to 1.73 ms before) |
 
-Temporal stability, 30 frames, blurred reprojected MAD per unit of ink and pops (method E001):
+Temporal stability before shadows, 30 frames, blurred reprojected MAD per unit of ink and pops (method E001); the figures with shadows are in `ink-renderer.md` and E018:
 
 | Path, stretch | final | hatching | strokes | contours |
 |---|---|---|---|---|
@@ -128,10 +128,10 @@ Same range as the test scene (0.012 to 0.022). The hall has the most pops (0.75%
 
 - Scale reads in the spawn and stair views (stair against an empty lit wall) and when looking straight down; it reads less well from the bridge, where every wall is ruled at the same density and nothing says how far away it is.
 - Looking up from the floor the walls are a dense radial burst of rules; strong, but close to noise near the camera. Openness might fall off faster near the bottom so the lowest walls go solid black.
-- Shadows would carry the composition further: sun through the rim cutting a lit band down one wall, bridges casting bands on the walls below. The references use exactly that. Not built; see the report in E010.
+- Shadows are in (E011): the rim cuts a lit band down the east wall and bridges cast bars. Looking up from the floor the whole lower shaft is in shadow, a black field with white rules; whether the sun should be higher, or the camera path should see more sky, is open.
 - Debris, cables, pipes and decay are absent; the walls are too clean compared with the references.
 - The route is checked against colliders, not by a controller. The walking controller should be run along it when it exists.
 
 ## Related experiments
 
-E008 (distance), E009 (AO), E010 (tone and light).
+E008 (distance), E009 (AO), E010 (tone and light), E011 to E019 (shadows and tone composition).

@@ -2,6 +2,7 @@
 //!
 //! See docs/features/ink-renderer.md.
 
+use crate::shadow::{self, Cascades, SHADOW_CASCADES, SHADOW_SIZE};
 use crate::style::{StyleGpu, StylePreset};
 use crate::Camera;
 use bytemuck::{Pod, Zeroable};
@@ -14,10 +15,13 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub const ID_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Uint;
 /// Octahedral world normal.
 pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
-/// Palette index, tone band, ao, flags.
+/// Palette index, tone band, ao, solid black coverage.
 pub const FILL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// R black ink, G white ink.
-pub const INK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
+/// R black ink (hatching and solid black), G white ink, B line ink (strokes and contours,
+/// turned white inside solid black by the composite), A unused.
+pub const INK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Sun shadow map array, one layer per cascade.
+pub const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Contour strength before anti-aliasing.
 pub const CONTOUR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
@@ -44,10 +48,12 @@ pub enum DebugView {
     Contours,
     /// Final without hatching (strokes and contours with atmosphere).
     Lines,
+    /// Sun shadow amount in black over a tint showing the cascade used.
+    Shadow,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 9] = [
+    pub const ALL: [DebugView; 10] = [
         DebugView::Final,
         DebugView::Id,
         DebugView::Normals,
@@ -57,6 +63,7 @@ impl DebugView {
         DebugView::Strokes,
         DebugView::Contours,
         DebugView::Lines,
+        DebugView::Shadow,
     ];
 
     pub fn name(self) -> &'static str {
@@ -70,6 +77,7 @@ impl DebugView {
             DebugView::Strokes => "strokes",
             DebugView::Contours => "contours",
             DebugView::Lines => "lines",
+            DebugView::Shadow => "shadow",
         }
     }
 
@@ -138,8 +146,35 @@ impl StrokeVisibility {
     }
 }
 
-/// The sun as a positioned body (see docs/features/sun-and-sky.md). Only a fixed sun is used
-/// for now, and there is no shadow pass yet.
+/// How the shadow map is filtered before its edge is thresholded. Only `Smooth` is meant for
+/// use; the others exist so the shadow edge experiment (E012) can be repeated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShadowFilter {
+    /// 3x3 bilinear comparison taps weighted 1-2-1 (a smooth 4x4-texel kernel).
+    #[default]
+    Smooth,
+    /// One bilinear comparison tap (2x2 PCF).
+    Bilinear,
+    /// One comparison at the nearest texel.
+    Hard,
+}
+
+impl ShadowFilter {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "smooth" => Some(Self::Smooth),
+            "bilinear" => Some(Self::Bilinear),
+            "hard" => Some(Self::Hard),
+            _ => None,
+        }
+    }
+}
+
+/// The sun as a positioned body (see docs/features/sun-and-sky.md). It may change every
+/// frame: the shadow cascades are refitted in each `render`. Farther than
+/// `DIRECTIONAL_DISTANCE` from the camera it is a direction with orthographic shadow maps;
+/// nearer, a point with perspective ones. Zero intensity, or a remote sun below the horizon,
+/// skips the shadow pass.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sun {
     pub position: Vec3,
@@ -157,12 +192,35 @@ impl Sun {
         Self { position: dir.normalize() * 1.5e11, ..Self::default() }
     }
 
+    /// Direction towards a sun at `elevation` above the horizon and `azimuth` measured from
+    /// +Z towards +X, both in degrees.
+    pub fn direction_from_angles(elevation: f32, azimuth: f32) -> Vec3 {
+        let (se, ce) = elevation.to_radians().sin_cos();
+        let (sa, ca) = azimuth.to_radians().sin_cos();
+        Vec3::new(ce * sa, se, ce * ca)
+    }
+
+    /// Elevation and azimuth in degrees of the direction `dir` (inverse of
+    /// [`Sun::direction_from_angles`]).
+    pub fn angles_of(dir: Vec3) -> (f32, f32) {
+        let d = dir.normalize();
+        (d.y.asin().to_degrees(), d.x.atan2(d.z).to_degrees())
+    }
+
+    /// Whether the sun lights anything (and so whether the shadow pass runs), seen from
+    /// `from`.
+    pub fn is_up(&self, from: Vec3) -> bool {
+        let to_sun = self.position - from;
+        self.intensity > 0.0 && (to_sun.length() <= Self::DIRECTIONAL_DISTANCE || to_sun.y > 0.0)
+    }
+
     /// The sun a named scene is lit for (the default for anything unknown). The shaft has a
-    /// high sun from the west, so the blank east wall is the lit one and the stair crosses
-    /// it as a dark line.
+    /// high sun from the west-south-west (74 degrees up), so the blank east wall is lit from
+    /// the rim down to about 220 m, past the spawn level, and the stair crosses it as a dark
+    /// line; below that the west rim's shadow cuts across it (E011).
     pub fn for_scene(scene: &str) -> Self {
         match scene {
-            "shaft" => Self::remote(Vec3::new(-0.55, 0.8, -0.2)),
+            "shaft" => Self::remote(Self::direction_from_angles(74.0, -110.0)),
             _ => Self::default(),
         }
     }
@@ -189,6 +247,18 @@ struct Globals {
     screen: [f32; 4],
     misc: [f32; 4],
     flags: [u32; 4],
+}
+
+/// Width in NDC units of the zone at a cascade's edge where it blends into the next.
+const SHADOW_BLEND_NDC: f32 = 0.1;
+
+/// Mirrors `struct ShadowU` in `shaders/forward.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ShadowGpu {
+    mats: [[[f32; 4]; 4]; SHADOW_CASCADES],
+    texel: [f32; 4],
+    params: [f32; 4],
 }
 
 const VERTEX_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
@@ -300,6 +370,7 @@ pub struct Renderer {
     view: DebugView,
     hatch_lod: HatchLod,
     stroke_vis: StrokeVisibility,
+    shadow_filter: ShadowFilter,
 
     globals_buf: wgpu::Buffer,
     style_buf: wgpu::Buffer,
@@ -318,6 +389,16 @@ pub struct Renderer {
     contour_group: wgpu::BindGroup,
     resolve_group: wgpu::BindGroup,
     composite_group: wgpu::BindGroup,
+
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_layers: Vec<wgpu::TextureView>,
+    shadow_mats: Vec<wgpu::Buffer>,
+    shadow_mat_groups: Vec<wgpu::BindGroup>,
+    shadow_uniform: wgpu::Buffer,
+    shadow_group: wgpu::BindGroup,
+    shadow_maps_on: bool,
+    cascades: Option<Cascades>,
+    bounds: Option<(Vec3, Vec3)>,
 
     vertex_buf: Option<wgpu::Buffer>,
     index_buf: Option<wgpu::Buffer>,
@@ -395,11 +476,141 @@ impl Renderer {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(label), bind_group_layouts: &groups, immediate_size: 0 })
         };
 
+        // Sun shadow maps: a depth array with one layer per cascade, a comparison sampler,
+        // and one small uniform buffer per cascade for the shadow pass.
+        let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sun shadow maps"),
+            size: wgpu::Extent3d { width: SHADOW_SIZE, height: SHADOW_SIZE, depth_or_array_layers: SHADOW_CASCADES as u32 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SHADOW_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_layers: Vec<wgpu::TextureView> = (0..SHADOW_CASCADES as u32)
+            .map(|i| {
+                shadow_tex.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("sun shadow cascade"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: i,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let shadow_array = shadow_tex.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("sun shadow array"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sun shadow compare"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let shadow_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sun shadow uniform"),
+            size: std::mem::size_of::<ShadowGpu>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let forward_shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("forward shadow"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: DEPTH, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                buffer_entry(2, wgpu::BufferBindingType::Uniform, wgpu::ShaderStages::FRAGMENT),
+            ],
+        });
+        let shadow_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("forward shadow"),
+            layout: &forward_shadow_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&shadow_array) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: shadow_uniform.as_entire_binding() },
+            ],
+        });
+        let shadow_mat_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow cascade"),
+            entries: &[buffer_entry(0, wgpu::BufferBindingType::Uniform, wgpu::ShaderStages::VERTEX)],
+        });
+        let shadow_mats: Vec<wgpu::Buffer> = (0..SHADOW_CASCADES)
+            .map(|_| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("shadow cascade matrix"),
+                    size: 64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+        let shadow_mat_groups = shadow_mats
+            .iter()
+            .map(|b| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("shadow cascade"),
+                    layout: &shadow_mat_layout,
+                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: b.as_entire_binding() }],
+                })
+            })
+            .collect();
+        let shadow_src = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow.wgsl").into()),
+        });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("shadow"),
+                bind_group_layouts: &[Some(&shadow_mat_layout)],
+                immediate_size: 0,
+            })),
+            vertex: wgpu::VertexState {
+                module: &shadow_src,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &VERTEX_ATTRS[..1],
+                })],
+            },
+            // Both sides: generated walls are mostly single-sided and must still block the sun.
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: SHADOW_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 0, slope_scale: 1.5, clamp: 0.0 },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: None,
+            multiview_mask: None,
+            cache: None,
+        });
+
         // Forward MRT.
         let forward_src = shader(&device, "forward", include_str!("../shaders/forward.wgsl"));
         let forward_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("forward"),
-            layout: Some(&layout("forward", None)),
+            layout: Some(&layout("forward", Some(&forward_shadow_layout))),
             vertex: wgpu::VertexState {
                 module: &forward_src,
                 entry_point: Some("vs_main"),
@@ -499,6 +710,7 @@ impl Renderer {
             view: DebugView::Final,
             hatch_lod: HatchLod::Directional,
             stroke_vis: StrokeVisibility::CentrelineBlock,
+            shadow_filter: ShadowFilter::Smooth,
             globals_buf,
             style_buf,
             frame_group,
@@ -515,6 +727,15 @@ impl Renderer {
             contour_group,
             resolve_group,
             composite_group,
+            shadow_pipeline,
+            shadow_layers,
+            shadow_mats,
+            shadow_mat_groups,
+            shadow_uniform,
+            shadow_group,
+            shadow_maps_on: false,
+            cascades: None,
+            bounds: None,
             vertex_buf: None,
             index_buf: None,
             index_count: 0,
@@ -638,9 +859,25 @@ impl Renderer {
         self.hatch_lod = lod;
     }
 
+    /// Diagnostic: change how the shadow map is filtered (E012).
+    pub fn set_shadow_filter(&mut self, filter: ShadowFilter) {
+        self.shadow_filter = filter;
+    }
+
     /// Diagnostic: change the stroke visibility test.
     pub fn set_stroke_visibility(&mut self, vis: StrokeVisibility) {
         self.stroke_vis = vis;
+    }
+
+    /// Whether the sun shadow maps were drawn in the last `render` (false when the sun is
+    /// off or below the horizon, the preset's `sun_shadow` is 0, or there is no scene).
+    pub fn shadows_drawn(&self) -> bool {
+        self.shadow_maps_on
+    }
+
+    /// The shadow cascades fitted in the last `render`, if the shadow pass ran.
+    pub fn shadow_cascades(&self) -> Option<&Cascades> {
+        self.cascades.as_ref()
     }
 
     /// Depth buffer (reversed-Z, `Depth32Float`), for later passes that read it.
@@ -686,6 +923,7 @@ impl Renderer {
             }));
             self.index_count = mesh.indices.len() as u32;
         }
+        self.bounds = mesh.bounds().map(|(lo, hi)| (Vec3::from(lo), Vec3::from(hi)));
         self.strokes = mesh.strokes.clone();
         self.stroke_buf = storage_buffer(&self.device, "strokes", &mesh.strokes);
         let zeros = vec![0u32; mesh.strokes.len()];
@@ -742,14 +980,50 @@ impl Renderer {
             camera_pos: camera.position.extend(crate::camera::NEAR).to_array(),
             camera_fwd: camera.forward().extend(0.0).to_array(),
             sun: sun.to_array(),
-            sun_params: [self.sun.radius, self.sun.intensity, 0.0, 0.0],
+            // A remote sun below the horizon lights nothing (and casts no shadow).
+            sun_params: [self.sun.radius, if self.sun.is_up(camera.position) { self.sun.intensity } else { 0.0 }, 0.0, 0.0],
             screen: [w, h, 1.0 / w, 1.0 / h],
-            misc: [h / REFERENCE_HEIGHT, 2.0 * (camera.fov_y * 0.5).tan() / h, 0.0, 0.0],
+            misc: [h / REFERENCE_HEIGHT, 2.0 * (camera.fov_y * 0.5).tan() / h, self.shadow_filter as u32 as f32, 0.0],
             flags: [self.view.index(), self.color_format.is_srgb() as u32, self.hatch_lod as u32, self.stroke_vis as u32],
         };
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         self.queue.write_buffer(&self.style_buf, 0, bytemuck::bytes_of(&self.preset.to_gpu()));
         self.cull_strokes(view_proj, camera.position);
+
+        // 0. Sun shadow maps, refitted every frame so the sun may move.
+        self.shadow_maps_on = self.sun.is_up(camera.position) && self.vertex_buf.is_some() && self.preset.sun_shadow > 0.0;
+        self.cascades = self.shadow_maps_on.then(|| shadow::fit(camera, w / h, sun.truncate(), sun.w == 0.0, self.bounds));
+        let mut sg = ShadowGpu::zeroed();
+        if let Some(c) = &self.cascades {
+            for i in 0..SHADOW_CASCADES {
+                sg.mats[i] = c.view_proj[i].to_cols_array_2d();
+                self.queue.write_buffer(&self.shadow_mats[i], 0, bytemuck::cast_slice(&c.view_proj[i].to_cols_array()));
+            }
+            sg.texel = c.texel;
+            sg.params = [1.0, c.perspective as u32 as f32, SHADOW_BLEND_NDC, 0.0];
+        }
+        self.queue.write_buffer(&self.shadow_uniform, 0, bytemuck::bytes_of(&sg));
+        if let (true, Some(vb), Some(ib)) = (self.shadow_maps_on, &self.vertex_buf, &self.index_buf) {
+            for i in 0..SHADOW_CASCADES {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("sun shadow"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.shadow_layers[i],
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.shadow_pipeline);
+                pass.set_bind_group(0, &self.shadow_mat_groups[i], &[]);
+                pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.index_count, 0, 0..1);
+            }
+        }
 
         let clear = |view| {
             Some(wgpu::RenderPassColorAttachment {
@@ -777,6 +1051,7 @@ impl Renderer {
             if let (Some(vb), Some(ib)) = (&self.vertex_buf, &self.index_buf) {
                 pass.set_pipeline(&self.forward_pipeline);
                 pass.set_bind_group(0, &self.frame_group, &[]);
+                pass.set_bind_group(1, &self.shadow_group, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
@@ -863,13 +1138,16 @@ mod tests {
         // The shader constants VIEW_* in common.wgsl follow this order.
         assert_eq!(DebugView::Final.index(), 0);
         assert_eq!(DebugView::Lines.index(), 8);
+        assert_eq!(DebugView::Shadow.index(), 9);
     }
 
     #[test]
     fn uniform_layouts_match_wgsl() {
-        // struct Globals: two mat4x4 and seven vec4. struct Style: seventeen vec4.
+        // struct Globals: two mat4x4 and seven vec4. struct Style: twenty-five vec4.
+        // struct ShadowU: four mat4x4 and two vec4.
         assert_eq!(std::mem::size_of::<Globals>(), 2 * 64 + 7 * 16);
-        assert_eq!(std::mem::size_of::<StyleGpu>(), 17 * 16);
+        assert_eq!(std::mem::size_of::<StyleGpu>(), 25 * 16);
+        assert_eq!(std::mem::size_of::<ShadowGpu>(), 4 * 64 + 2 * 16);
     }
 
     #[test]

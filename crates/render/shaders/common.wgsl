@@ -13,7 +13,8 @@ struct Globals {
     sun_params: vec4<f32>,
     // width, height, 1/width, 1/height.
     screen: vec4<f32>,
-    // x pixel scale (height / 720), y radians per pixel at the centre.
+    // x pixel scale (height / 720), y radians per pixel at the centre, z shadow filter
+    // (diagnostic: 0 smooth, 1 bilinear, 2 hard).
     misc: vec4<f32>,
     // x debug view, y 1 if the output target is sRGB, z hatch LOD mode,
     // w stroke visibility mode (both diagnostic).
@@ -28,7 +29,7 @@ struct Style {
     fog: vec4<f32>,             // start, density, max, darkening by (1 - ao)
     light: vec4<f32>,           // sun strength, ambient, band jitter, band jitter length
     bands: vec4<f32>,           // hatch below, cross below, black below, sun occlusion by ao
-    cross: vec4<f32>,           // crosshatch pitch scale, width scale
+    cross: vec4<f32>,           // crosshatch pitch scale, width scale, angle (rad), angle jitter (rad)
     hatch: vec4<f32>,           // spacing (m), target pitch (px), line width (px), width jitter
     hatch2: vec4<f32>,          // break length (m), gap fraction, max octave, width gain
     stroke: vec4<f32>,          // width px, min px, depth ref, depth exponent
@@ -39,6 +40,14 @@ struct Style {
     rank_min_len: vec4<f32>,
     contour: vec4<f32>,         // fine near, fine far, depth k, N.V min
     contour2: vec4<f32>,        // strength, fade start, fade end, fine-id strength
+    shadow: vec4<f32>,          // ambient in shadow, light min, light max, attached
+    shadow2: vec4<f32>,         // edge jitter (m), jitter length (m), indication, indication radius (m)
+    tone: vec4<f32>,            // tone noise, its length (m), hatch density gain, sky tone (< 0: fog)
+    blacks: vec4<f32>,          // pool ao, pool width, underside black, white lines
+    speckle: vec4<f32>,         // density, radius px, cell px, crosshatch angle per panel
+    fog2: vec4<f32>,            // fog darkening over solid black, sun shadow, white line max rank
+    white: vec4<f32>,           // white hatch strength, its pitch scale, panel tone, cross break gap
+    strokes: vec4<f32>,         // hatch patch amount, patch width (lines), patch length, taper px
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;
@@ -53,6 +62,7 @@ const VIEW_HATCHING: u32 = 5u;
 const VIEW_STROKES: u32 = 6u;
 const VIEW_CONTOURS: u32 = 7u;
 const VIEW_LINES: u32 = 8u;
+const VIEW_SHADOW: u32 = 9u;
 
 fn pcg(v: u32) -> u32 {
     let s = v * 747796405u + 2891336453u;
@@ -76,6 +86,22 @@ fn vnoise(key: u32, x: f32) -> f32 {
     let a = u01(hash2(key, ii));
     let b = u01(hash2(key, ii + 1u));
     return mix(a, b, f * f * (3.0 - 2.0 * f));
+}
+
+fn hash3(key: u32, c: vec3<i32>) -> u32 {
+    return pcg(key ^ pcg(bitcast<u32>(c.x) ^ pcg(bitcast<u32>(c.y) ^ pcg(bitcast<u32>(c.z)))));
+}
+
+// 3D value noise in 0..1, smooth (C1) in x, one independent field per key.
+fn vnoise3(key: u32, x: vec3<f32>) -> f32 {
+    let i = vec3<i32>(floor(x));
+    let f = x - floor(x);
+    let w = f * f * (3.0 - 2.0 * f);
+    let a = mix(u01(hash3(key, i)), u01(hash3(key, i + vec3<i32>(1, 0, 0))), w.x);
+    let b = mix(u01(hash3(key, i + vec3<i32>(0, 1, 0))), u01(hash3(key, i + vec3<i32>(1, 1, 0))), w.x);
+    let c = mix(u01(hash3(key, i + vec3<i32>(0, 0, 1))), u01(hash3(key, i + vec3<i32>(1, 0, 1))), w.x);
+    let d = mix(u01(hash3(key, i + vec3<i32>(0, 1, 1))), u01(hash3(key, i + vec3<i32>(1, 1, 1))), w.x);
+    return mix(mix(a, b, w.y), mix(c, d, w.y), w.z);
 }
 
 // Length of the overlap of a one-pixel box centred at distance d from a line's centre with a

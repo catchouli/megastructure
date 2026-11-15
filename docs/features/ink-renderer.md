@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress, 2026-11-15. Milestone M0 frame working on the test scene: forward MRT pass with ruled hatching and tone bands, stroke pass, contour pass with its own anti-aliasing resolve, composite with atmosphere, nine debug views. Black-and-white presets `nihei` (test scene) and `nihei_vast` (the One Shaft, M1; see `one-shaft.md`). Not yet built: shadow maps, sky, light shafts, screentone, the compute cull prepass, world-keyed contour wobble, colour presets.
+In progress, 2026-11-15. Milestone M0 frame working on the test scene: forward MRT pass with ruled hatching and tone bands, stroke pass, contour pass with its own anti-aliasing resolve, composite with atmosphere, ten debug views. Sun shadow pass (cascaded, orthographic or perspective, refitted every frame) feeding the light before band quantisation, and tone composition (solid black shadows, white ink inside black, per-panel tone, patch hatching with tapered ends, angled crosshatch) working on the One Shaft (E011 to E019). Black-and-white presets `nihei` (test scene; shadows off) and `nihei_vast` (the One Shaft, M1; see `one-shaft.md`). Not yet built: the sky pass, light shafts, screentone, the far-field shadow ray march, the compute cull prepass, world-keyed contour wobble, colour presets.
 
 ## What it is
 
@@ -25,11 +25,13 @@ The frame that turns the generator's triangles and ink strokes into a page that 
 | # | Pass | Kind | Reads | Writes |
 |---|---|---|---|---|
 | 0 | CPU stroke cull | CPU | strokes, camera, preset | `visible` index list (storage buffer) |
-| 1 | Forward | raster, MRT, depth test | vertices | depth, id, normal, fill, ink |
+| 0a | Cascade fit | CPU | camera, sun, scene bounds | four light matrices (`shadow::fit`) |
+| 0b | Sun shadow | depth-only raster, four passes, no culling | vertex positions | shadow map array (four layers) |
+| 1 | Forward | raster, MRT, depth test | vertices, shadow maps | depth, id, normal, fill, ink |
 | 2 | Contours | fullscreen fragment | id, depth, normal | contour mask |
 | 3 | Ink lines | two draws in one pass, max blend | `visible`, strokes, depth; contour mask | ink |
-| 3a | Strokes | instanced quads, 6 vertices per stroke, vertex pulling | | ink R (G for white strokes) |
-| 3b | Contour resolve | fullscreen fragment | contour mask | ink R |
+| 3a | Strokes | instanced quads, 6 vertices per stroke, vertex pulling | | ink B and A (G for white strokes) |
+| 3b | Contour resolve | fullscreen fragment | contour mask | ink B and A |
 | 4 | Composite | fullscreen fragment | fill, ink, depth (id, normal for debug) | caller's colour target |
 
 The contour pass is a fullscreen fragment pass, not compute. It writes a fragment per pixel, its only neighbourhood is 3x3, and a fragment pass can write the R8 mask and later max-blend into the `Rg8Unorm` ink target through fixed-function blending; compute would need a storage-texture write path and a separate merge. The split into detection (2) and resolve (3b) exists so the binary mask can be anti-aliased before it is merged (E005).
@@ -41,31 +43,76 @@ The contour pass is a fullscreen fragment pass, not compute. It writes a fragmen
 | depth | `Depth32Float` | reversed-Z, infinite far plane; cleared to 0, test `Greater` |
 | id | `Rg32Uint` | R `id_fine`, G `id_coarse`; 0 is background |
 | normal | `Rg16Float` | octahedral world normal |
-| fill | `Rgba8Unorm` | R palette index / 255 (always 0 in black and white), G tone band / 3, B ao, A flags / 255 (unused) |
-| ink | `Rg8Unorm` | R black ink, G white ink |
+| fill | `Rgba8Unorm` | R palette index / 255 (always 0 in black and white), G tone band / 3, B ao, A solid black coverage (read by the composite for white lines and `fog_black`) |
+| ink | `Rgba8Unorm` | R black ink from the forward pass (hatching, solid black), G white ink (white strokes, specks, white rules), B line ink (strokes and contours), A the major lines among B (contours and strokes of rank up to `white_line_rank`) |
+| sun shadow | `Depth32Float`, 2048 x 2048 x 4 layers | one cascade per layer; not resized with the frame |
 | contour mask | `R8Unorm` | contour strength before the resolve |
 
-All are recreated on `resize`. Only the composite writes to the caller's target, which may be any colour format; if it is sRGB the composite pre-linearises so the stored values stay display values.
+All but the shadow maps are recreated on `resize`. The line passes write B and A rather than R so the composite can tell lines from hatching: where a line falls inside solid black, its major part (A) is drawn in white ink by `white_lines` and the rest (B) vanishes into the black. Only the composite writes to the caller's target, which may be any colour format; if it is sRGB the composite pre-linearises so the stored values stay display values.
 
 ### Light and bands
 
+Two light values are computed per fragment, the light with the sun unobstructed and the light inside a shadow:
+
 ```
-L = sun_strength * intensity * max(N . S, 0) * mix(1, ao, sun_occlusion) + ambient * ao
+n       = 1 - underside_black * max(-N.y, 0)          (times smoothstep(pool_ao -+ pool_width, ao) if pool_ao > 0)
+noise   = tone_noise * (2 vnoise3(P / tone_noise_len) - 1) + panel_tone * (2 hash(id_fine) - 1)
+lit     = (sun_strength * intensity * max(N.S, 0) * mix(1, ao, sun_occlusion) + ambient * ao + noise) * n
+dark    = clamp((ambient * ao * shadow_ambient + noise) * n, shadow_light_min, shadow_light_max)
+facing  = 1 if N.S > 0.05 (per face; 1 for every face when there is no sun)
+lit     = mix(lit, dark, shadow_attached * (1 - facing))        faces turned away: a light blend
+amount  = (1 - vis) * sun_shadow * facing                       cast shadow, anti-aliased (below)
+ink     = mix(tone(lit), tone(dark), amount)                    two drawings, blended only at the edge
+band    = 0 if L >= band_hatch, 1 if >= band_cross, 2 if >= band_black, else 3
 S = normalize(sun_position - P)     (positioned sun)
 S = sun_direction                   (beyond 1e5 m from the camera)
-band = 0 if L >= band_hatch, 1 if >= band_cross, 2 if >= band_black, else 3
 ```
 
-No shadow term yet. `sun_occlusion` (0 in `nihei`, 1 in `nihei_vast`) scales the sun term by the baked ao, the only thing that keeps sunlight off the bottom of a 600 m shaft without shadows (E010). Packed in `bands.w`. The sun uniform already carries position, radius and intensity (`Sun` in `renderer.rs`, set with `Renderer::set_sun`), with the switch to a pure direction done on the CPU when the sun is farther than `Sun::DIRECTIONAL_DISTANCE`. The default sun is remote, about 32 degrees up, direction `(0.6, 0.53, -0.6)`.
+`tone(L)` is the hatching and solid black for one light value (below). Drawing the lit and the shadowed side separately and blending their ink by the anti-aliased shadow mask gives an exact one-pixel edge whatever the two sides are drawn as; blending the light values instead would put thin strips of every band in between, an outline around each shadow. Both are computed only where `0 < amount < 1`, so the cost is at edges. `fwidth` for the band edges is taken from the smooth `lit` only. The sun uniform carries position, radius and intensity (`Sun`, set with `Renderer::set_sun`), switched to a pure direction on the CPU beyond `Sun::DIRECTIONAL_DISTANCE`; a remote sun below the horizon is uploaded with intensity 0. The default sun is remote, about 32 degrees up, direction `(0.6, 0.53, -0.6)`; the shaft's is 74 degrees up at azimuth -110 (E011).
+
+### Shadow pass
+
+`crates/render/src/shadow.rs` fits four cascades on the CPU in every `render`, so the sun may move every frame:
+
+- **Cascades 0 to 2** follow the camera: the bounding sphere of the view-frustum slice 0.1..8 m, 8..30 m and 30..110 m. A sphere does not change size as the camera turns, and for a remote sun its centre is snapped to whole texels in light space, so the maps do not shimmer as the camera moves (unit test `camera_cascades_are_texel_snapped`). Texels are about 1.1, 4.2 and 15 cm.
+- **Cascade 3** is fitted to the scene's bounds (from `MeshData::bounds` in `upload_scene`), so every shadow in the 600 m shaft is held at any range: about 12 cm texels for the shaft at the default sun, finer than a 720p pixel beyond about 60 m. With no bounds it falls back to the camera slice 110..1000 m.
+- **Remote sun**: orthographic, depth range the scene bounds along the light (everything in the scene can cast). **Near sun** (closer than `Sun::DIRECTIONAL_DISTANCE`): perspective from the sun's position, a square frustum around each cascade's sphere (the last one around the scene bounds' sphere), near plane at the distance from the sun to the scene; half-angle capped at 1.2 rad for a sun inside or very near a cascade. No cube map.
+- **Skipped** (no passes, visibility 1) when the intensity is 0, a remote sun is below the horizon, the preset's `sun_shadow` is 0 or there is no scene. `Renderer::shadows_drawn` and `shadow_cascades` report what happened.
+
+Choice: a scene-fitted cascade over more camera cascades because the M1 scenes are a few hundred metres across and seen whole; one 2048 map over the bounds is finer than the pixel grid beyond 60 m, and the camera cascades cover the near field where the scene map is far too coarse (12 cm against a 1.5 cm pixel at 8 m). When the world is kilometres across a scene-fitted map is impossible: the camera cascades would extend to a few hundred metres, and beyond them the plan's ray march through the 32 m occupancy grid towards the sun takes over (not built, queued). Its hand-over needs the same thresholding as below, applied to the ray march's coverage, or the far field will have soft shadows next to hard near ones.
+
+The pass draws the whole mesh into each layer with no face culling: generated walls are single-sided and must block the sun from both sides. Hardware slope-scaled bias 1.5.
+
+Lookup in the forward pass, per fragment:
+
+1. **Cascade**: the first whose light-space square contains the point with a 3-texel margin; within 0.1 NDC of its edge it is blended with the next one so the edge does not jump.
+2. **Offsets**: normal offset `t * (1.5 + 2 sin(theta))` and `t` towards the light, `t` the cascade's texel size (times the distance to the sun for a perspective cascade), and with `shadow_jitter > 0` a world-anchored offset in the receiver's plane, `2 * shadow_jitter * (vnoise3(P / shadow_jitter_len) - 0.5)` on two axes across the light, which makes the edge slightly irregular, like a hand-cut edge. Keeping it in the receiver's plane matters: an offset off the surface on a face grazed by the light makes it shadow itself in blobs (E013).
+3. **Filter**: 3x3 bilinear comparison taps weighted 1-2-1, an effective smooth 4x4-texel kernel, spread to the pixel's footprint in the map (up to 2 texels) where one pixel covers more than a texel. Each tap compares against the receiver's own depth at that tap (receiver-plane depth bias, from the screen derivatives of the world position), so a wide kernel on a face grazed by the light does not shadow itself.
+4. **Edge**: the filtered visibility `v` is turned into a hard edge at its 0.5 iso-line, anti-aliased over one pixel from its own gradient: `vis = saturate((v - 0.5) / |grad v| + 0.5)`. The iso-line of a smooth kernel is a smooth curve, so the edge has no texel steps, and its position moves continuously as the sun moves (E012).
+
+Debug: `--view shadow` shows the cast-shadow amount in black over a tint for the cascade used (white 0, blue 1, green 2, red 3); `--shadow-filter bilinear|hard` (`Renderer::set_shadow_filter`) replaces step 3 with one bilinear tap or one nearest-texel comparison.
+
+Openings: nothing in the pass assumes closed geometry. A hole or break in a wall casts light down to about two texels of the cascade in use (the kernel is 4 texels wide and thresholded at half): about 2 cm near the camera, about 25 cm through a wall seen at 100 m or more. Thinner occluders (railings, under about one texel) cast dotted shadows at long range; that is the one artefact seen at the edges (E012).
+
+### Tone composition
+
+After the light, in the forward pass and the composite (E014 to E019):
+
+- **Solid black and white ink.** The solid black coverage is written to fill A. In the composite, major lines (contours and strokes up to `white_line_rank`) that fall inside it are drawn in white ink (`white_lines`); `white_hatch` scratches sparse white rules along the first hatch direction into the black, `white_hatch_pitch` times the hatch pitch; `speckle` puts white specks in it: one candidate dot per world-anchored cell on the face, cells kept near `speckle_cell_px` pixels by octaves crossfaded like the hatching, dot radius `speckle_px`. These specks, and the broken white rules, are the "sparkles in the shadows". `fog_black` darkens the atmosphere over black so a black shape stays black into the distance.
+- **Per-panel tone** (`panel_tone`): a random light offset per `id_fine`, so tone is decided panel by panel, aligned with the structure.
+- **Patch hatching** (`hatch_patch`, E019): see the next section.
+- **Crosshatch angle**: the second layer runs at `cross_angle` degrees from the first (90 is the old exact mesh), varied by `cross_angle_jitter` per element (`id_coarse`) or, with `cross_angle_by_panel`, per panel.
+- **Indication** (`indication`, off by default): lifts the light half of the single-hatch band to white away from shadow edges and draws lit surfaces near a shadow edge down into hatching, using the fraction of a ring of 12 taps of radius `indication_radius` around the point (in the scene cascade) that is lit.
+- **Sky**: `sky_tone` `Some(x)` paints the background a flat tone from paper (0) to ink (1); `None` keeps the fogged paper.
 
 ### Ruled hatching
 
 Per fragment, with face normal `N`, hatch axis `A` (from the vertex) and `B = normalize(N x A)`:
 
 - Layer 1: lines run along `A`. Spacing coordinate `u = dot(P, B)`, along-line coordinate `v = dot(P, A)`. Present when the jittered light is below `band_hatch`.
-- Layer 2 (crosshatch): lines run along `B`. `u = dot(P, A)`, `v = dot(P, B)`. Present below `band_cross`. Its target pitch is multiplied by `cross_pitch_scale` and its width by `cross_width_scale`.
+- Layer 2 (crosshatch): lines at angle `alpha = cross_angle + jitter` from layer 1, along `D2 = cos(alpha) A + sin(alpha) B`, spaced along `E2 = sin(alpha) A - cos(alpha) B` (at 90 degrees: along `B`, `u = dot(P, A)`, `v = dot(P, B)`). Present below `band_cross`. Its target pitch is multiplied by `cross_pitch_scale`, its width by `cross_width_scale`, its gap is `cross_break_gap`.
 
-Octave selection for one layer (`s = hatch_spacing`, `T = hatch_target_px * px_scale * pitch_scale`):
+Octave selection for one layer (`s = hatch_spacing`, `T = hatch_target_px * px_scale * pitch_scale / (1 + hatch_density_gain * d)`):
 
 ```
 g    = length(vec2(dpdx(u), dpdy(u)))            metres per pixel across the lines
@@ -82,8 +129,10 @@ With linear fading the mean ink density varies by at most 6% over an octave cycl
 Each line has a stable identity: its index `n` in units of the finest spacing, which is the same whichever octave it is drawn in. Its level is `ctz(n)` (how many octaves it survives). Per line, from `hash(n)`:
 
 - width `= hatch_line_px * px_scale * width_scale * (1 + (h - 0.5) * hatch_width_jitter) * (1 + hatch_width_gain * d)`, where `d = saturate((threshold - L) / (threshold - band_black))` is how far into the band the fragment is;
-- breakup: 1D value noise along `v` with segment length `hatch_break_len * 2^level`; the line is absent where the noise is below `hatch_break_gap` (a short soft step, no width taper; see E007). Because the segment length scales with the line's level, lines that survive to coarse octaves (seen far away) break up at a similar screen scale. When the breakup is minified (`dv/dpixel * 2 > segment length`) the threshold is replaced by its mean;
-- band jitter: `(noise(v / (band_jitter_len * 2^level)) - 0.5) * band_jitter` is added to `L` before the band test, so lines end raggedly near a band edge.
+- breakup, per line (`hatch_patch` 0): 1D value noise along `v` with segment length `hatch_break_len * 2^level`; the line is absent where the noise is below the layer's gap (`hatch_break_gap`, or `cross_break_gap` for the crosshatch). Because the segment length scales with the line's level, lines that survive to coarse octaves (seen far away) break up at a similar screen scale. When the breakup is minified (`dv/dpixel * 2 > segment length`) the threshold is replaced by its mean;
+- breakup in patches (`hatch_patch` 1, the default since E019): lines are grouped into columns `hatch_patch_lines` lines wide at the drawn octave, and each column is cut along the lines into runs about `hatch_patch_len * hatch_break_len * 2^k0` long, staggered from column to column. Every line of a run starts at the run's start (jitter 6% of the run) and stops at a shared end point (jitter 12%), leaving a gap of 0.4 to 1.6 times the layer's gap fraction before the next run. A group of parallel strokes is laid down together and stops together, as a hand hatches; the gaps line up into deliberate breaks. The layout is keyed to world positions and line identities. It changes size with the octave: the next octave's layout replaces it over the middle 30% of the octave crossfade (a crossfade over the whole octave left many strokes half drawn, grey);
+- ends: the distance in pixels to the end of a stroke is known (exactly for patch runs, to first order from the noise derivative for per-line breakup, from the light's change per pixel at a band edge), so every end is anti-aliased along the line and, with `hatch_taper_px > 0`, the width tapers to nothing over its last `hatch_taper_px` pixels; at the end where a stroke starts the taper is a quarter of that, so strokes are blunt where they start and trail off where they stop. The E007 spindles came from tapering over a fixed range of noise values; tapering over a distance in pixels does not have that problem;
+- band jitter: `(noise(v / (band_jitter_len * 2^level)) - 0.5) * band_jitter` is added to `L` before the band test, so lines end raggedly near a band edge. With patches on it is mostly one random value per run, so a band edge is a group of strokes stopping together rather than a sawtooth.
 
 Coverage across a line is the overlap of the line with a tent filter of radius one pixel at distance `|u - u_line| / g` pixels (`tent_cov` in `common.wgsl`). This is analytic in the derivative and smoother than a box, which matters for thin diagonal lines (E006).
 
@@ -135,8 +184,9 @@ Contour resolve: the 3x3 structure tensor of the mask gradient gives the line or
 ```
 dist  = euclidean distance from the camera (from depth and the pixel ray, so it does not change as the view turns)
 f     = fog_max * (1 - exp(-max(dist - fog_start, 0) * fog_density))      (fog_max for background)
-fog   = mix(fog_colour, ink, saturate(fog_ao * (1 - ao)))                (ao = 1 for background)
-base  = mix(paper, fog, f)
+fog   = mix(fog_colour, ink, saturate(max(fog_ao * (1 - ao), fog_black * black)))   (ao = 1 for background)
+base  = mix(paper, fog, f)                          (sky with sky_tone = Some(x): mix(paper, ink, x))
+ink.R = max(R, B * (1 - black * white_lines));  ink.G = max(G, A * black * white_lines)
 c     = mix(base, ink, ink.R * (1 - f))
 c     = mix(c, paper, ink.G * (1 - f))
 c    *= 1 + (hash(pixel) - 0.5) * paper_grain
@@ -160,9 +210,10 @@ Pixel-sized preset values are for a 720-pixel-high image and are multiplied by `
 | `fog_density` | 0.006 /m | Exponential density past the start |
 | `fog_max` | 0.85 | Largest fade |
 | `fog_ao` | 0 | Fog darkening towards ink by `1 - ao` |
+| `fog_black` | 0 | Fog darkening towards ink over solid black |
 | `sun_strength` | 0.5 | Weight of the sun term |
 | `ambient` | 0.5 | Weight of `ao` |
-| `sun_occlusion` | 0 | Sun term scaled by `mix(1, ao, x)` |
+| `sun_occlusion` | 0 | Sun term scaled by `mix(1, ao, x)` (a stand-in from before shadows) |
 | `band_hatch` | 0.62 | Light below this is hatched |
 | `band_cross` | 0.45 | Below this, crosshatched |
 | `band_black` | 0.30 | Below this, solid black |
@@ -176,8 +227,17 @@ Pixel-sized preset values are for a 720-pixel-high image and are multiplied by `
 | `hatch_break_gap` | 0.22 | Fraction of a line lost to gaps |
 | `hatch_max_octave` | 12 | Last octave before fading to mean tone |
 | `hatch_width_gain` | 0.8 | Width growth towards the next darker band |
+| `hatch_density_gain` | 0 | Pitch divided by `1 + gain * d`: darker is denser |
+| `hatch_patch` | 1 | Patch hatching on (1) or per-line breakup (0) (E019) |
+| `hatch_patch_lines` | 8 | Patch column width in lines |
+| `hatch_patch_len` | 4 | Patch run length in breakup lengths |
+| `hatch_taper_px` | 6 px | Width taper at a stroke's trailing end (a quarter at its start); 0 hard ends |
+| `cross_break_gap` | 0.45 | Crosshatch gap fraction (layer 1 uses `hatch_break_gap`) |
 | `cross_pitch_scale` | 1.6 | Crosshatch pitch relative to layer 1 |
 | `cross_width_scale` | 0.8 | Crosshatch width relative to layer 1 |
+| `cross_angle` | 90 deg | Angle between the layers |
+| `cross_angle_jitter` | 0 deg | Random variation of that angle, +- half |
+| `cross_angle_by_panel` | 0 | 0: per element, 1: per panel |
 | `stroke_width_px` | 1.6 px | Weight-1 stroke width at `stroke_depth_ref` |
 | `stroke_min_px` | 1.25 px | Minimum width (real pixels); coverage fades below it |
 | `stroke_depth_ref` | 6 m | Distance of falloff 1 |
@@ -200,6 +260,22 @@ Pixel-sized preset values are for a 720-pixel-high image and are multiplied by `
 | `contour_fine_strength` | 0.45 | Fine-id edge strength |
 | `contour_fade_start` | 150 m | Contours start fading |
 | `contour_fade_end` | 400 m | Contours gone |
+| `sun_shadow` | 0 | Shadow strength; 0 skips the shadow pass (the test scene is closed, so it would be one shadow) |
+| `shadow_ambient` | 1 | Ambient multiplier in shadow |
+| `shadow_light_min`, `shadow_light_max` | 0, 1 | Clamp of the light in shadow; below `band_black` every shadow is solid black |
+| `shadow_attached` | 0 | Light of faces turned away from the sun moved towards the shadow light |
+| `shadow_jitter`, `shadow_jitter_len` | 0 m, 1 m | Hand-cut edge: lookup offset amplitude and wavelength |
+| `tone_noise`, `tone_noise_len` | 0, 20 m | World noise added to the light |
+| `panel_tone` | 0 | Light offset per panel |
+| `indication`, `indication_radius` | 0, 3 m | See Tone composition |
+| `pool_ao`, `pool_width` | 0, 0.05 | Light goes to black below this ao |
+| `underside_black` | 0 | Down-facing faces darkened by `-N.y` |
+| `white_lines`, `white_line_rank` | 0, 1 | Lines inside black turned white, up to this stroke rank |
+| `white_hatch`, `white_hatch_pitch` | 0, 3 | White rules in black, strength and pitch scale |
+| `speckle`, `speckle_px`, `speckle_cell_px` | 0, 0.7 px, 9 px | White specks in black: share of cells, radius, cell pitch |
+| `sky_tone` | `None` | Background: fogged paper, or a flat tone 0..1 |
+
+`StylePreset::set(name, value)` sets any field from text (`StylePreset::FIELDS` lists them); `mega_capture --set name=value` uses it.
 
 ### The `nihei_vast` preset
 
@@ -218,6 +294,18 @@ Pixel-sized preset values are for a 720-pixel-high image and are multiplied by `
 | `rank_fade_end` | 900, 260, 80, 32 m | Rank 0 (massing, bridge decks, shaft corners) draws the whole 600 m; panel seams are gone by 80 m |
 | `rank_min_len_px` | 3, 5, 8, 12 px | |
 | `contour_fade_start`, `contour_fade_end` | 220 m, 650 m | Coarse-id contours outline elements all the way down the shaft |
+| `sun_occlusion` | 0 | Replaced by the shadow pass |
+| `sun_shadow` | 1 | Shadows on |
+| `shadow_ambient`, `shadow_light_min`, `shadow_light_max` | 0, 0, 0 | Cast shadow is solid black, placed as a shape (E011) |
+| `shadow_attached` | 0.3 | Faces turned away from the sun are toned by depth (ambient times 0.7), not black: the mix that kept interiors and the far walls legible (E011) |
+| `shadow_jitter`, `shadow_jitter_len` | 0.1 m, 1.2 m | Slightly hand-cut edge, visible near, invisible far (E013) |
+| `fog_black` | 1 | Black stays black into the distance |
+| `white_lines`, `white_line_rank` | 1, 1 | Contours, massing and major edges turn white inside black; panel seams vanish (E016) |
+| `white_hatch`, `white_hatch_pitch` | 0.6, 6 | Sparse white rules in black keep the direction of a black wall (E016) |
+| `speckle` | 0.1 | White specks in black (E016; the owner's "sparkles") |
+| `panel_tone` | 0.08 | Walls decided panel by panel (E014) |
+| `cross_angle`, `cross_angle_jitter` | 75 deg, 30 deg | Off-90 crosshatch varying per element (E015) |
+| `sky_tone` | `Some(0)` | The opening is a white shape against the black (E017) |
 
 See E008 for the comparison with `nihei` on the shaft.
 
@@ -236,31 +324,43 @@ Selected with `Renderer::set_view(DebugView)` or `mega_capture --view <name>`.
 | `strokes` | Stroke pass only, no atmosphere |
 | `contours` | Contours only (after the resolve), no atmosphere |
 | `lines` | Final without hatching: strokes and contours with atmosphere and grain |
+| `shadow` | Cast-shadow amount in black over a cascade tint (0 white, 1 blue, 2 green, 3 red) |
 
 ### Measured (Apple M3 Max, Metal)
 
-Frame time from `mega_capture --bench 200` (wall clock over back-to-back submits, so it includes the CPU cull and submission; an upper bound on GPU time): 0.47 to 0.51 ms at 1280x720 and 1.56 to 1.66 ms at 2560x1440 over `corridor_walk`, `still_hall` and `hall_orbit`, with 575 to 771 of 1568 strokes drawn.
+Frame time from `mega_capture --bench 300` (wall clock over back-to-back submits, so it includes the CPU cull, cascade fit and submission; an upper bound on GPU time): 0.96 to 1.53 ms at 1280x720 and 2.85 to 4.13 ms at 2560x1440 over `shaft_spawn`, `shaft_rim_down`, `shaft_look_up`, `shaft_bridge_walk`, `shaft_hall_enter` (shadows on, four 2048 cascades of 225k triangles each), and 0.66 and 1.99 ms for `still_hall` (shadows off). Before the shadow and tone work: 0.49 to 0.58 ms and 1.58 to 1.74 ms. Hatch layers are skipped where the light is clearly above their band or below black.
 
-Temporal stability (`--metrics`, 40 frames over a slow stretch of each path; blurred reprojected MAD per unit of mean ink, lower is steadier; see E001 for the method):
+Temporal stability (`--metrics`, blurred reprojected MAD per unit of mean ink, lower is steadier; pixels off by more than 64 levels; see E001 for the method; E018 has the before and after in absolute levels):
 
-| Path, stretch | final | hatching | strokes | contours | lines |
-|---|---|---|---|---|---|
-| `corridor_walk` t 0.05..0.062 | 0.020 | 0.019 | 0.005 | 0.006 | 0.011 |
-| `corridor_strafe` t 0.4..0.6 | 0.012 | 0.011 | 0.003 | 0.006 | 0.008 |
-| `hall_orbit` t 0..0.012 | 0.022 | 0.020 | 0.010 | 0.024 | 0.024 |
+| Path, stretch | final | pops |
+|---|---|---|
+| `corridor_walk` t 0.05..0.062 | 0.024 | 0.27% |
+| `corridor_strafe` t 0.4..0.6 | 0.011 | 0.09% |
+| `hall_orbit` t 0..0.012 | 0.023 | 0.41% |
+| `shaft_bridge_walk` t 0.3..0.33 | 0.003 | 0.18% |
+| `shaft_stair_climb` t 0.4..0.42 | 0.016 | 0.62% |
+| `shaft_rim_down` t 0..1 | 0.017 | 0.30% |
+| `shaft_spawn` t 0.4..0.6 | 0.004 | 0.16% |
+| `shaft_hall_enter` t 0.5..0.52 | 0.005 | 0.82% |
+| `shaft_look_up` t 0..0.1 | 0.003 | 0.24% |
 
 ### Files
 
 - `crates/render/src/style.rs`: `StylePreset`, `nihei()`, `nihei_vast()`, `for_scene`, `by_name`, GPU packing.
-- `crates/render/src/renderer.rs`: targets, pipelines, CPU stroke cull, `DebugView`, `Sun`, `HatchLod`, `StrokeVisibility`.
+- `crates/render/src/renderer.rs`: targets, pipelines, CPU stroke cull, shadow resources and passes, `DebugView`, `Sun`, `HatchLod`, `StrokeVisibility`, `ShadowFilter`.
+- `crates/render/src/shadow.rs`: cascade fitting (`fit`, `Cascades`, `SHADOW_SIZE`, `SHADOW_CASCADES`, `CAMERA_SPLITS`), with tests.
+- `crates/render/shaders/shadow.wgsl`: the depth-only shadow pass.
 - `crates/render/shaders/common.wgsl`: uniforms, hashes, noise, filtered coverage, octahedral encoding, fullscreen triangle. Prepended to every pass.
 - `crates/render/shaders/forward.wgsl`, `strokes.wgsl`, `contours.wgsl`, `contour_resolve.wgsl`, `composite.wgsl`: the passes.
-- `crates/capture/src/main.rs`: `--view`, `--metrics`, `--bench` and the diagnostic switches.
+- `crates/capture/src/main.rs`: `--view`, `--metrics`, `--bench`, `--set`, the sun options and the diagnostic switches.
 
 ## Open questions
 
 - Tone band edges followed per-vertex AO interpolated over 3 to 4 m panels. For generated scenes the kit now tessellates faces to 1.5 to 2 m and bakes a smooth AO (E009, `kit-of-parts.md`); the test scene is unchanged. Parts narrower than the tessellation still cannot occlude cleanly.
-- Without shadows, `sun_occlusion` and `fog_ao` are stand-ins that read the baked ao. A shadow pass would replace the first and could feed the second.
+- `fog_ao` still reads the baked ao; with shadows it could take the shadow state of the air instead (light shafts would need that anyway).
+- Thin occluders (railings) under one texel of the cascade in use cast dotted shadow edges at long range. Excluding rank-3 parts from the shadow pass, or a minimum-width rasterisation for the shadow pass, would fix it.
+- The patch layout changes size with the hatch octave; the switch is hidden in the middle of the octave crossfade but can be seen as a band on long grazing floors in motion (corridor walk pops 0.18% to 0.25%). A dyadic layout, where the next octave's runs are unions of this octave's, would remove it.
+- Light through small openings (decay milestone): works down to about two texels; the far-field ray march must carry openings in its occupancy grid or distant holes will go dark.
 - Whether the hatch octave crossfade should be eased (it is linear) after watching video at 60 fps; the metrics do not show octave banding.
 - Hatching on large lit-from-nowhere interiors reads as graph paper when the floor is lit and panelled; this is a scene and shadow question more than a renderer one, to revisit with shadows.
 - Contour depth edges at silhouettes are one pixel and binary before the resolve; in orbiting views they are the least stable contribution (0.75% of compared pixels off by more than 64 levels). A sub-pixel silhouette estimate from the depth planes would help.
@@ -281,4 +381,4 @@ Temporal stability (`--metrics`, 40 frames over a slow stretch of each path; blu
 
 ## Related experiments
 
-E001 (temporal metric), E002 (hatch octave selection), E003 (stroke depth tolerance), E004 (distance behaviour of lines), E005 (contour anti-aliasing), E006 (tent versus box coverage), E007 (tone and lighting for the test scene), E008 (distance on the 600 m shaft), E010 (tone and light for the shaft).
+E001 (temporal metric), E002 (hatch octave selection), E003 (stroke depth tolerance), E004 (distance behaviour of lines), E005 (contour anti-aliasing), E006 (tent versus box coverage), E007 (tone and lighting for the test scene), E008 (distance on the 600 m shaft), E010 (tone and light for the shaft), E011 (shadow treatment), E012 (shadow edge and moving sun), E013 (hand-cut edge), E014 (uneven hatching), E015 (crosshatch angle), E016 (graphic blacks and white ink), E017 (abyss and sky), E018 (before and after), E019 (hatch stroke ends and patches).

@@ -22,11 +22,11 @@ Constants that other systems depend on (for example, movement limits the generat
 | Feature | File | Status |
 |---|---|---|
 | Player movement | `features/player-movement.md` | Working (M1 shaft walkable; windowed untested) |
-| Sun and sky | `features/sun-and-sky.md` | Designed |
+| Sun and sky | `features/sun-and-sky.md` | In progress (sun and shadows working) |
 | Machinery | `features/machinery.md` | Designed in outline |
 | Capture tool | `features/capture-tool.md` | Working |
 | Headless mode | `features/headless-mode.md` | Working |
-| Ink renderer | `features/ink-renderer.md` | In progress (M0 frame working) |
+| Ink renderer | `features/ink-renderer.md` | In progress (M0 frame, shadows and tone composition working) |
 | Kit of parts | `features/kit-of-parts.md` | In progress (M1 kit) |
 | One Shaft | `features/one-shaft.md` | Working (M1 scene) |
 

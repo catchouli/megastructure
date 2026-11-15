@@ -29,7 +29,14 @@ Run from the workspace root: `cargo run --release -p mega_capture -- <options>`.
 | `--t <T>` | `t` in 0..1; only valid with `--frames 1` | 0.5 |
 | `--width`, `--height` | Image size in pixels | 1280, 720 |
 | `--t0`, `--t1` | Range of `t` for a sequence: frame `i` uses `t = t0 + (t1 - t0) * i / (N - 1)` | 0, 1 |
-| `--view <name>` | Debug view: `final`, `id`, `normals`, `depth`, `bands`, `hatching`, `strokes`, `contours`, `lines` | `final` |
+| `--view <name>` | Debug view: `final`, `id`, `normals`, `depth`, `bands`, `hatching`, `strokes`, `contours`, `lines`, `shadow` | `final` |
+| `--set <field>=<value>` | Override one style preset field, repeatable (`StylePreset::set`; colours and per-rank fields take comma-separated lists, `sky_tone` also `none`). Checked before any GPU work | |
+| `--list-fields` | Print the preset field names and exit | |
+| `--sun-elev <deg>`, `--sun-azim <deg>` | Sun elevation and azimuth (from +Z towards +X) | the scene's sun |
+| `--sun-elev-end <deg>`, `--sun-azim-end <deg>` | Animate the sun linearly to these over the sequence; with `--t0 T --t1 T` the camera stays still | |
+| `--sun-dist <m>` | A near sun this far from the centre of the scene bounds (perspective shadows) | remote |
+| `--sun-intensity <x>` | Sun intensity; 0 switches the sun and its shadow pass off | the scene's |
+| `--shadow-filter <m>` | Diagnostic: `smooth` (default), `bilinear`, `hard` (E012) | |
 | `--metrics` | Print temporal stability figures for the sequence (see below). Switches paper grain off | |
 | `--no-png` | Do not write frames (with `--metrics`); `--out` becomes optional | |
 | `--error-png` | With `--metrics`, also write `error_NNNN.png`: blurred reprojection residual times 8, white is none | |
@@ -50,7 +57,8 @@ With `--metrics` the tool also reads back the depth buffer. For each pair of con
 
 - consecutive MAD: mean absolute grey difference, at full resolution and after a 4x4 box downsample. Dominated by legitimate motion; kept for reference.
 - reprojected MAD: every pixel of the current frame is moved back into the previous frame through its depth and both cameras, pixels that were off screen or hidden (linear depth differs by more than 1%) are skipped, and the previous frame is sampled bilinearly. Raw and after a 5x5 box blur, plus the share of pixels off by more than 64 levels ("pops").
-- mean ink (255 minus mean grey) and both MADs divided by it, to compare views with different amounts of ink.
+- mean ink (255 minus mean grey) and both MADs divided by it, to compare views with different amounts of ink. With large solid blacks the mean ink is high and the per-ink figure small; compare the blurred MAD itself between such views.
+- temporal second difference: mean of `|f(t) - 2 f(t-1) + f(t-2)|` over the 5x5-blurred frames. Only meaningful with a still camera: ink that moves or changes at a steady rate (a shadow edge under a slowly moving sun) leaves almost none, ink that jumps (texel steps) leaves a lot (E012).
 
 Ink that stays on surfaces leaves only resampling error; swimming, popping or shimmering ink adds to it. Compare a view against `strokes` or `lines` on the same stretch. A slow stretch, for example `--path corridor_walk --frames 40 --t0 0.05 --t1 0.062`, keeps per-frame motion near walking speed at 60 fps. See E001.
 
@@ -72,6 +80,8 @@ To add a path, write the function, add it to `NAMES` and `by_name`, and make sur
 ### Code locations
 
 - `crates/capture/src/main.rs`: the tool.
+
+Example, a still camera under a moving sun: `mega_capture --path shaft_spawn --t0 0.5 --t1 0.5 --frames 60 --sun-azim -110 --sun-azim-end -109.4 --metrics --no-png`.
 - `crates/render/src/paths.rs`: camera paths.
 - `crates/gen/src/scenes.rs`: the scene registry; `test_scene.rs` and `shaft.rs` the scenes.
 

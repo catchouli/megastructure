@@ -111,7 +111,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
 }
 
 @fragment
-fn fs_main(o: VOut) -> @location(0) vec2<f32> {
+fn fs_main(o: VOut) -> @location(0) vec4<f32> {
     let px = o.clip.xy;
     let d = o.p1 - o.p0;
     let len = length(d);
@@ -173,8 +173,11 @@ fn fs_main(o: VOut) -> @location(0) vec2<f32> {
     let fade = 1.0 - smoothstep(S.rank_fade_start[rank], S.rank_fade_end[rank], z);
 
     let a = cov * alpha_w * vis * fade * o.info.z;
+    // Black strokes go to the line channel (B), which the composite turns white inside
+    // solid black; white strokes go straight to white ink (G).
     if (o.ids.z == STROKE_WHITE) {
-        return vec2<f32>(0.0, a);
+        return vec4<f32>(0.0, a, 0.0, 0.0);
     }
-    return vec2<f32>(a, 0.0);
+    // A: lines that may turn white inside solid black (major ranks only).
+    return vec4<f32>(0.0, 0.0, a, select(0.0, a, f32(o.ids.y) <= S.fog2.z));
 }

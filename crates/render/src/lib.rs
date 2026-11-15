@@ -4,8 +4,9 @@
 pub mod camera;
 pub mod paths;
 pub mod renderer;
+pub mod shadow;
 pub mod style;
 
 pub use camera::Camera;
-pub use renderer::{DebugView, HatchLod, Renderer, StrokeVisibility, Sun, DEPTH_FORMAT};
+pub use renderer::{DebugView, HatchLod, Renderer, ShadowFilter, StrokeVisibility, Sun, DEPTH_FORMAT};
 pub use style::StylePreset;

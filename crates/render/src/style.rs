@@ -33,6 +33,9 @@ pub struct StylePreset {
     /// occluded: the fog takes `mix(fog_colour, ink, fog_ao * (1 - ao))`. Air deep in a shaft
     /// is not lit, so an abyss fades to dark rather than to paper. Sky is unaffected.
     pub fog_ao: f32,
+    /// How far the fog colour darkens towards ink over solid black (shadows, pools), so a
+    /// black shape stays black into the distance instead of lifting to grey.
+    pub fog_black: f32,
 
     // Light and tone bands.
     /// Weight of the sun term `intensity * max(N.L, 0)` in the light value.
@@ -74,6 +77,21 @@ pub struct StylePreset {
     /// `1 + gain * d`, where d runs 0..1 from the band's own threshold down to the next
     /// darker one. Lines thicken towards black and merge into it.
     pub hatch_width_gain: f32,
+    /// Patch hatching (0 off, 1 on): lines are laid in columns of `hatch_patch_lines` that
+    /// start together and stop together (with a small per-line jitter), in runs about
+    /// `hatch_patch_len` breakup lengths long staggered between columns, instead of each
+    /// line breaking up independently. Band-edge jitter is shared per run too.
+    pub hatch_patch: f32,
+    /// Patch column width in lines (at the drawn octave).
+    pub hatch_patch_lines: f32,
+    /// Patch run length in units of `hatch_break_len` (at the drawn octave).
+    pub hatch_patch_len: f32,
+    /// Length in pixels over which a hatch line's width tapers to nothing at its trailing
+    /// end (a third of it at its starting end). 0 gives hard, anti-aliased ends.
+    pub hatch_taper_px: f32,
+    /// Fraction of each crosshatch line lost to breaks (the first layer uses
+    /// `hatch_break_gap`); higher leaves the crosshatch as patches over the first layer.
+    pub cross_break_gap: f32,
     /// The crosshatch layer's target pitch relative to the first layer's.
     pub cross_pitch_scale: f32,
     /// The crosshatch layer's line width relative to the first layer's.
@@ -129,6 +147,81 @@ pub struct StylePreset {
     pub contour_fade_start: f32,
     /// ...and have gone at this one.
     pub contour_fade_end: f32,
+
+    // Sun shadow (see "Shadow pass" in docs/features/ink-renderer.md).
+    /// How much the sun shadow takes away the sun term, 0..1. At 0 the shadow pass is not
+    /// drawn at all.
+    pub sun_shadow: f32,
+    /// Ambient term multiplier inside a sun shadow: the light there is
+    /// `clamp(ambient * ao * shadow_ambient, shadow_light_min, shadow_light_max)`.
+    pub shadow_ambient: f32,
+    /// Lower clamp of the light value inside a shadow.
+    pub shadow_light_min: f32,
+    /// Upper clamp of the light value inside a shadow. Below `band_black` every shadow is
+    /// solid black; between `band_cross` and `band_hatch` it is single hatching.
+    pub shadow_light_max: f32,
+    /// How far the light of faces turned away from the sun moves towards the shadow light
+    /// (0: they keep the ambient light, 1: drawn exactly like cast shadow). A blend of light
+    /// values, decided per face, so it never mixes two drawings.
+    pub shadow_attached: f32,
+    /// Amplitude in metres of the world-anchored offset of the shadow lookup, which makes the
+    /// shadow edge slightly irregular, like a hand-cut edge. 0 gives the true edge.
+    pub shadow_jitter: f32,
+    /// Wavelength in metres of that offset.
+    pub shadow_jitter_len: f32,
+
+    // Tone composition.
+    /// Amplitude of a world-anchored low-frequency noise added to the light value, so a large
+    /// surface is not ruled uniformly.
+    pub tone_noise: f32,
+    /// Wavelength of that noise in metres.
+    pub tone_noise_len: f32,
+    /// Amplitude of a random light offset per panel (`id_fine`), so tone is decided panel by
+    /// panel, aligned with the structure: some panels left white, others ruled hard.
+    pub panel_tone: f32,
+    /// Line pitch shrinks with darkness inside a band: the target pitch is divided by
+    /// `1 + gain * d` (d as for `hatch_width_gain`), so dark ends are denser as well as heavier.
+    pub hatch_density_gain: f32,
+    /// Indication: the light half of the single-hatch band is lifted to white, except near
+    /// shadow edges (within `indication_radius`, on either side), and lit surfaces near a
+    /// shadow edge are drawn down into single hatching. 0 is off.
+    pub indication: f32,
+    /// Radius in metres around a cast shadow within which hatching is kept (indication).
+    pub indication_radius: f32,
+    /// Baked ao below which surfaces pool into solid black (recesses, the deep shaft).
+    /// 0 disables.
+    pub pool_ao: f32,
+    /// Width in ao of the ramp into that black.
+    pub pool_width: f32,
+    /// Down-facing faces have their light scaled by `1 - underside_black * (-n.y)`, so the
+    /// undersides of bridges and galleries go black.
+    pub underside_black: f32,
+    /// Strokes and contours that fall inside solid black are drawn in white ink instead, by
+    /// this fraction (0: black lines vanish in black, 1: fully white).
+    pub white_lines: f32,
+    /// Highest stroke rank that turns white inside black (contours always do): 1 keeps
+    /// massing and major edges, 3 also panel seams.
+    pub white_line_rank: f32,
+    /// Strength of sparse white rules scratched into solid black along the first hatch
+    /// direction, so a black wall still shows which way it runs. 0 disables.
+    pub white_hatch: f32,
+    /// Pitch of those rules relative to the hatch pitch.
+    pub white_hatch_pitch: f32,
+    /// Fraction of cells with a white speck inside solid black, 0 disables.
+    pub speckle: f32,
+    /// Speck radius in pixels.
+    pub speckle_px: f32,
+    /// Spacing in pixels of the speck cells (world-anchored, kept near this pitch by octaves).
+    pub speckle_cell_px: f32,
+    /// Angle in degrees between the crosshatch layer and the first layer (90: exact mesh).
+    pub cross_angle: f32,
+    /// Random variation of that angle in degrees, +- half of this, per element or per panel.
+    pub cross_angle_jitter: f32,
+    /// 0: the angle varies per element (`id_coarse`), 1: per panel (`id_fine`).
+    pub cross_angle_by_panel: f32,
+    /// Sky: `None` keeps the fogged paper of the atmosphere, `Some(x)` is a flat tone from
+    /// paper (0) to ink (1).
+    pub sky_tone: Option<f32>,
 }
 
 impl StylePreset {
@@ -144,6 +237,7 @@ impl StylePreset {
             fog_density: 0.006,
             fog_max: 0.85,
             fog_ao: 0.0,
+            fog_black: 0.0,
 
             sun_strength: 0.5,
             ambient: 0.5,
@@ -162,6 +256,11 @@ impl StylePreset {
             hatch_break_gap: 0.22,
             hatch_max_octave: 12.0,
             hatch_width_gain: 0.8,
+            hatch_patch: 1.0,
+            hatch_patch_lines: 8.0,
+            hatch_patch_len: 4.0,
+            hatch_taper_px: 6.0,
+            cross_break_gap: 0.45,
             cross_pitch_scale: 1.6,
             cross_width_scale: 0.8,
 
@@ -188,6 +287,35 @@ impl StylePreset {
             contour_fine_strength: 0.45,
             contour_fade_start: 150.0,
             contour_fade_end: 400.0,
+
+            sun_shadow: 0.0,
+            shadow_ambient: 1.0,
+            shadow_light_min: 0.0,
+            shadow_light_max: 1.0,
+            shadow_attached: 0.0,
+            shadow_jitter: 0.0,
+            shadow_jitter_len: 1.0,
+
+            tone_noise: 0.0,
+            tone_noise_len: 20.0,
+            panel_tone: 0.0,
+            hatch_density_gain: 0.0,
+            indication: 0.0,
+            indication_radius: 3.0,
+            pool_ao: 0.0,
+            pool_width: 0.05,
+            underside_black: 0.0,
+            white_lines: 0.0,
+            white_line_rank: 1.0,
+            white_hatch: 0.0,
+            white_hatch_pitch: 3.0,
+            speckle: 0.0,
+            speckle_px: 0.7,
+            speckle_cell_px: 9.0,
+            cross_angle: 90.0,
+            cross_angle_jitter: 0.0,
+            cross_angle_by_panel: 0.0,
+            sky_tone: None,
         }
     }
 
@@ -200,7 +328,7 @@ impl StylePreset {
             fog: [self.fog_start, self.fog_density, self.fog_max, self.fog_ao],
             light: [self.sun_strength, self.ambient, self.band_jitter, self.band_jitter_len],
             bands: [self.band_hatch, self.band_cross, self.band_black, self.sun_occlusion],
-            cross: [self.cross_pitch_scale, self.cross_width_scale, 0.0, 0.0],
+            cross: [self.cross_pitch_scale, self.cross_width_scale, self.cross_angle.to_radians(), self.cross_angle_jitter.to_radians()],
             hatch: [self.hatch_spacing, self.hatch_target_px, self.hatch_line_px, self.hatch_width_jitter],
             hatch2: [self.hatch_break_len, self.hatch_break_gap, self.hatch_max_octave, self.hatch_width_gain],
             stroke: [self.stroke_width_px, self.stroke_min_px, self.stroke_depth_ref, self.stroke_depth_exp],
@@ -211,6 +339,14 @@ impl StylePreset {
             rank_min_len: self.rank_min_len_px,
             contour: [self.contour_fine_near, self.contour_fine_far, self.contour_depth_k, self.contour_nv_min],
             contour2: [self.contour_strength, self.contour_fade_start, self.contour_fade_end, self.contour_fine_strength],
+            shadow: [self.shadow_ambient, self.shadow_light_min, self.shadow_light_max, self.shadow_attached],
+            shadow2: [self.shadow_jitter, self.shadow_jitter_len, self.indication, self.indication_radius],
+            tone: [self.tone_noise, self.tone_noise_len, self.hatch_density_gain, self.sky_tone.unwrap_or(-1.0)],
+            blacks: [self.pool_ao, self.pool_width, self.underside_black, self.white_lines],
+            speckle: [self.speckle, self.speckle_px, self.speckle_cell_px, self.cross_angle_by_panel],
+            fog2: [self.fog_black, self.sun_shadow, self.white_line_rank, 0.0],
+            white: [self.white_hatch, self.white_hatch_pitch, self.panel_tone, self.cross_break_gap],
+            patch: [self.hatch_patch, self.hatch_patch_lines, self.hatch_patch_len, self.hatch_taper_px],
         }
     }
 }
@@ -228,7 +364,6 @@ impl StylePreset {
             fog_ao: 1.5,
             ambient: 0.75,
             sun_strength: 0.4,
-            sun_occlusion: 1.0,
             band_cross: 0.36,
             hatch_width_gain: 1.0,
             rank_fade_start: [500.0, 140.0, 40.0, 16.0],
@@ -236,6 +371,25 @@ impl StylePreset {
             rank_min_len_px: [3.0, 5.0, 8.0, 12.0],
             contour_fade_start: 220.0,
             contour_fade_end: 650.0,
+            // Shadows and tone composition (E011 to E017).
+            sun_occlusion: 0.0,
+            sun_shadow: 1.0,
+            shadow_ambient: 0.0,
+            shadow_light_min: 0.0,
+            shadow_light_max: 0.0,
+            shadow_attached: 0.3,
+            fog_black: 1.0,
+            white_lines: 1.0,
+            white_line_rank: 1.0,
+            white_hatch: 0.6,
+            white_hatch_pitch: 6.0,
+            speckle: 0.1,
+            shadow_jitter: 0.1,
+            shadow_jitter_len: 1.2,
+            panel_tone: 0.08,
+            cross_angle: 75.0,
+            cross_angle_jitter: 30.0,
+            sky_tone: Some(0.0),
             ..Self::nihei()
         }
     }
@@ -257,6 +411,198 @@ impl StylePreset {
             "shaft" => Self::nihei_vast(),
             _ => Self::nihei(),
         }
+    }
+}
+
+/// Parse a comma-separated list of exactly N numbers.
+fn parse_list<const N: usize>(name: &str, value: &str) -> Result<[f32; N], String> {
+    let parts: Vec<&str> = value.split(',').map(str::trim).collect();
+    if parts.len() != N {
+        return Err(format!("{name} takes {N} comma-separated numbers, got '{value}'"));
+    }
+    let mut out = [0.0; N];
+    for (o, p) in out.iter_mut().zip(parts) {
+        *o = p.parse().map_err(|_| format!("{name}: '{p}' is not a number"))?;
+    }
+    Ok(out)
+}
+
+impl StylePreset {
+    /// Names of every field [`StylePreset::set`] accepts.
+    pub const FIELDS: &'static [&'static str] = &[
+        "paper",
+        "ink",
+        "fog_colour",
+        "paper_grain",
+        "fog_start",
+        "fog_density",
+        "fog_max",
+        "fog_ao",
+        "fog_black",
+        "sun_strength",
+        "ambient",
+        "sun_occlusion",
+        "band_hatch",
+        "band_cross",
+        "band_black",
+        "band_jitter",
+        "band_jitter_len",
+        "hatch_spacing",
+        "hatch_target_px",
+        "hatch_line_px",
+        "hatch_width_jitter",
+        "hatch_break_len",
+        "hatch_break_gap",
+        "hatch_max_octave",
+        "hatch_width_gain",
+        "hatch_patch",
+        "hatch_patch_lines",
+        "hatch_patch_len",
+        "hatch_taper_px",
+        "cross_break_gap",
+        "cross_pitch_scale",
+        "cross_width_scale",
+        "stroke_width_px",
+        "stroke_min_px",
+        "stroke_depth_ref",
+        "stroke_depth_exp",
+        "stroke_falloff_max",
+        "stroke_taper_px",
+        "stroke_taper_min",
+        "stroke_noise_amp",
+        "stroke_noise_len",
+        "stroke_overshoot_px",
+        "stroke_depth_tol",
+        "contour_fine_near",
+        "contour_fine_far",
+        "contour_depth_k",
+        "contour_nv_min",
+        "contour_strength",
+        "contour_fine_strength",
+        "contour_fade_start",
+        "contour_fade_end",
+        "sun_shadow",
+        "shadow_ambient",
+        "shadow_light_min",
+        "shadow_light_max",
+        "shadow_attached",
+        "shadow_jitter",
+        "shadow_jitter_len",
+        "tone_noise",
+        "tone_noise_len",
+        "panel_tone",
+        "hatch_density_gain",
+        "indication",
+        "indication_radius",
+        "pool_ao",
+        "pool_width",
+        "underside_black",
+        "white_lines",
+        "white_line_rank",
+        "white_hatch",
+        "white_hatch_pitch",
+        "speckle",
+        "speckle_px",
+        "speckle_cell_px",
+        "cross_angle",
+        "cross_angle_jitter",
+        "cross_angle_by_panel",
+        "rank_fade_start",
+        "rank_fade_end",
+        "rank_min_len_px",
+        "sky_tone",
+    ];
+
+    /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
+    /// Scalars take a number, colours three and per-rank fields four comma-separated
+    /// numbers; `sky_tone` also takes `none`.
+    pub fn set(&mut self, name: &str, value: &str) -> Result<(), String> {
+        let num = |v: &str| v.trim().parse::<f32>().map_err(|_| format!("{name}: '{v}' is not a number"));
+        match name {
+            "paper_grain" => self.paper_grain = num(value)?,
+            "fog_start" => self.fog_start = num(value)?,
+            "fog_density" => self.fog_density = num(value)?,
+            "fog_max" => self.fog_max = num(value)?,
+            "fog_ao" => self.fog_ao = num(value)?,
+            "fog_black" => self.fog_black = num(value)?,
+            "sun_strength" => self.sun_strength = num(value)?,
+            "ambient" => self.ambient = num(value)?,
+            "sun_occlusion" => self.sun_occlusion = num(value)?,
+            "band_hatch" => self.band_hatch = num(value)?,
+            "band_cross" => self.band_cross = num(value)?,
+            "band_black" => self.band_black = num(value)?,
+            "band_jitter" => self.band_jitter = num(value)?,
+            "band_jitter_len" => self.band_jitter_len = num(value)?,
+            "hatch_spacing" => self.hatch_spacing = num(value)?,
+            "hatch_target_px" => self.hatch_target_px = num(value)?,
+            "hatch_line_px" => self.hatch_line_px = num(value)?,
+            "hatch_width_jitter" => self.hatch_width_jitter = num(value)?,
+            "hatch_break_len" => self.hatch_break_len = num(value)?,
+            "hatch_break_gap" => self.hatch_break_gap = num(value)?,
+            "hatch_max_octave" => self.hatch_max_octave = num(value)?,
+            "hatch_width_gain" => self.hatch_width_gain = num(value)?,
+            "hatch_patch" => self.hatch_patch = num(value)?,
+            "hatch_patch_lines" => self.hatch_patch_lines = num(value)?,
+            "hatch_patch_len" => self.hatch_patch_len = num(value)?,
+            "hatch_taper_px" => self.hatch_taper_px = num(value)?,
+            "cross_break_gap" => self.cross_break_gap = num(value)?,
+            "cross_pitch_scale" => self.cross_pitch_scale = num(value)?,
+            "cross_width_scale" => self.cross_width_scale = num(value)?,
+            "stroke_width_px" => self.stroke_width_px = num(value)?,
+            "stroke_min_px" => self.stroke_min_px = num(value)?,
+            "stroke_depth_ref" => self.stroke_depth_ref = num(value)?,
+            "stroke_depth_exp" => self.stroke_depth_exp = num(value)?,
+            "stroke_falloff_max" => self.stroke_falloff_max = num(value)?,
+            "stroke_taper_px" => self.stroke_taper_px = num(value)?,
+            "stroke_taper_min" => self.stroke_taper_min = num(value)?,
+            "stroke_noise_amp" => self.stroke_noise_amp = num(value)?,
+            "stroke_noise_len" => self.stroke_noise_len = num(value)?,
+            "stroke_overshoot_px" => self.stroke_overshoot_px = num(value)?,
+            "stroke_depth_tol" => self.stroke_depth_tol = num(value)?,
+            "contour_fine_near" => self.contour_fine_near = num(value)?,
+            "contour_fine_far" => self.contour_fine_far = num(value)?,
+            "contour_depth_k" => self.contour_depth_k = num(value)?,
+            "contour_nv_min" => self.contour_nv_min = num(value)?,
+            "contour_strength" => self.contour_strength = num(value)?,
+            "contour_fine_strength" => self.contour_fine_strength = num(value)?,
+            "contour_fade_start" => self.contour_fade_start = num(value)?,
+            "contour_fade_end" => self.contour_fade_end = num(value)?,
+            "sun_shadow" => self.sun_shadow = num(value)?,
+            "shadow_ambient" => self.shadow_ambient = num(value)?,
+            "shadow_light_min" => self.shadow_light_min = num(value)?,
+            "shadow_light_max" => self.shadow_light_max = num(value)?,
+            "shadow_attached" => self.shadow_attached = num(value)?,
+            "shadow_jitter" => self.shadow_jitter = num(value)?,
+            "shadow_jitter_len" => self.shadow_jitter_len = num(value)?,
+            "tone_noise" => self.tone_noise = num(value)?,
+            "tone_noise_len" => self.tone_noise_len = num(value)?,
+            "panel_tone" => self.panel_tone = num(value)?,
+            "hatch_density_gain" => self.hatch_density_gain = num(value)?,
+            "indication" => self.indication = num(value)?,
+            "indication_radius" => self.indication_radius = num(value)?,
+            "pool_ao" => self.pool_ao = num(value)?,
+            "pool_width" => self.pool_width = num(value)?,
+            "underside_black" => self.underside_black = num(value)?,
+            "white_lines" => self.white_lines = num(value)?,
+            "white_line_rank" => self.white_line_rank = num(value)?,
+            "white_hatch" => self.white_hatch = num(value)?,
+            "white_hatch_pitch" => self.white_hatch_pitch = num(value)?,
+            "speckle" => self.speckle = num(value)?,
+            "speckle_px" => self.speckle_px = num(value)?,
+            "speckle_cell_px" => self.speckle_cell_px = num(value)?,
+            "cross_angle" => self.cross_angle = num(value)?,
+            "cross_angle_jitter" => self.cross_angle_jitter = num(value)?,
+            "cross_angle_by_panel" => self.cross_angle_by_panel = num(value)?,
+            "paper" => self.paper = parse_list::<3>(name, value)?,
+            "ink" => self.ink = parse_list::<3>(name, value)?,
+            "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
+            "rank_fade_start" => self.rank_fade_start = parse_list::<4>(name, value)?,
+            "rank_fade_end" => self.rank_fade_end = parse_list::<4>(name, value)?,
+            "rank_min_len_px" => self.rank_min_len_px = parse_list::<4>(name, value)?,
+            "sky_tone" => self.sky_tone = if value.trim() == "none" { None } else { Some(num(value)?) },
+            _ => return Err(format!("unknown preset field '{name}'")),
+        }
+        Ok(())
     }
 }
 
@@ -287,4 +633,12 @@ pub(crate) struct StyleGpu {
     rank_min_len: [f32; 4],
     contour: [f32; 4],
     contour2: [f32; 4],
+    shadow: [f32; 4],
+    shadow2: [f32; 4],
+    tone: [f32; 4],
+    blacks: [f32; 4],
+    speckle: [f32; 4],
+    fog2: [f32; 4],
+    white: [f32; 4],
+    patch: [f32; 4],
 }

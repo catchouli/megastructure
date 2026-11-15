@@ -2,7 +2,7 @@
 
 ## Status
 
-Designed, 2026-11-15. A fixed sun without shadows exists in the ink renderer (`Sun` in `crates/render/src/renderer.rs`: position, radius, intensity, switched to a pure direction beyond 1e5 m; see `ink-renderer.md`). Shadows, the sky and the day-night cycle are not implemented; the full sky and the cycle arrive with M5.
+In progress, 2026-11-15. The sun and its shadows exist in the ink renderer (`Sun` in `crates/render/src/renderer.rs`; "Shadow pass" in `ink-renderer.md`): a positioned sun that may change every frame, cascaded shadow maps refitted in every `render` (three camera cascades and one fitted to the scene bounds), orthographic for a remote sun and perspective for a near one, skipped when the sun is off or a remote sun is below the horizon, and thresholded into hard, anti-aliased ink edges. The sky is a flat tone from the style preset (`sky_tone`). Not implemented: the drawn sky, the day-night cycle (orbit, time), light shafts, the far-field ray march; the full sky and the cycle arrive with M5.
 
 ## What it is
 
@@ -30,17 +30,21 @@ Sun state, per frame:
 
 Shading uses the per-fragment direction `normalize(sun_position - world_position)`, which reduces to a constant direction as distance grows. Above a distance threshold the renderer switches to a pure directional path to avoid precision loss.
 
-Shadows:
+What exists (`Sun`, public fields `position`, `radius`, `intensity`; `Sun::remote(dir)`, `Sun::direction_from_angles(elevation, azimuth)`, `Sun::angles_of(dir)`, `Sun::is_up(from)`, `Sun::for_scene`). Azimuth is measured from +Z towards +X. `falloff` and the cell-plus-offset position are not implemented (positions are plain `Vec3`).
 
-- **Remote sun:** cascaded orthographic shadow maps around the camera.
-- **Near sun:** perspective shadow frusta from the sun's position towards the camera region, with the same cascade splits. A sun inside the structure would need a cube map; not planned unless wanted.
-- **Far field:** beyond the last cascade, a coarse ray march through the 32 m occupancy grid towards the sun. Queued as an experiment.
-- **Skipped entirely** when intensity is zero, the sun is below the horizon, or no opening to the sky is in range of the camera.
+Shadows (built; details in `ink-renderer.md`):
+
+- **Remote sun:** four orthographic cascades: three around the camera (frustum slices to 8, 30 and 110 m, bounding spheres snapped to texels) and one over the scene's bounds, all 2048 square, refitted every frame.
+- **Near sun:** the same four as perspective frusta from the sun's position. A sun inside the structure would need a cube map; not planned unless wanted.
+- **Far field:** beyond the last camera cascade, a coarse ray march through the 32 m occupancy grid towards the sun. Not built; for M1 the scene-bounds cascade covers it. Queued.
+- **Skipped** when intensity is zero, a remote sun is below the horizon (its intensity is then treated as 0 everywhere), or the style preset's `sun_shadow` is 0. Not yet skipped when no opening to the sky is in range.
+- **Drawn as ink:** the filtered visibility is thresholded at 0.5 into a one-pixel anti-aliased edge before band quantisation; what a shadow is drawn as (solid black, hatching, tone by depth) is a preset choice (E011). Stable as the sun moves (E012).
+- **Small openings:** nothing assumes closed geometry; light passes through holes down to about two texels of the cascade in use (2 cm near the camera, 25 cm at 100 m and beyond).
 
 Consequences for other systems:
 
 - Baked per-vertex data must be independent of the sun: ambient occlusion and openness (sky visibility) only. Nothing directional is baked.
-- Tone band thresholds depend on the light value, so a moving sun slowly moves band boundaries across surfaces. Whether this reads as shimmer needs testing.
+- Tone band thresholds depend on the light value, so a moving sun slowly moves band boundaries across surfaces. With the sun moving 0.01 degrees per frame no shimmer was measured (E012); at day-cycle speeds the motion is far slower.
 - The sky treatment is selected by sun elevation and intensity, with a blend through dusk.
 - The style preset holds the sky's graphic parameters (ruled-line count, disc outline weight, night treatment).
 
@@ -53,4 +57,4 @@ Consequences for other systems:
 
 ## Related experiments
 
-None yet. Two are queued in `experiments.md`: stability of the thresholded shadow edge as the sun moves, and the far-field occupancy-grid shadow.
+E011 (shadow treatment), E012 (shadow edge and a moving sun), E013 (hand-cut edge), E017 (sky tone). Queued: the far-field occupancy-grid shadow.

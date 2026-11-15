@@ -147,11 +147,84 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: with it on, the per-frame movement is the same to within 10 percent (mean 10.4 mm per frame at walking speed); with it off, more than half of the frames do not move at all and the rest move by a whole step. The cost is a lag: the picture shows the position of up to one step (17 ms, 4 cm at walking speed, 10 cm running) ago, and exact multiples of the step show the position one step back. Extrapolating forward instead would remove the lag but overshoots when the player stops or hits a wall; not tried. Headless output is unchanged: the route script ends at the same state line to the digit, and every frame's camera equals the walker's eye bit for bit.
 - Verdict: kept, windowed only. Whether the lag is felt at 120 Hz has not been judged by hand (nothing was run in a window).
 
+## E011: Sun shadows, and what a shadow is drawn as
+- Date: 2026-11-15
+- Feature: `features/ink-renderer.md`, `features/sun-and-sky.md`, `features/one-shaft.md`
+- Question: with a real shadow pass feeding the light before band quantisation, how should a shadow be drawn on the shaft: solid black, single hatching, crosshatching, tone by depth, or a mix?
+- Setup: shadow pass as described in `ink-renderer.md` (three camera cascades plus one over the scene bounds, 2048 each, refitted every frame). Shaft sun raised from 54 to 74 degrees (azimuth kept at -110): at 54 degrees the west rim shadowed the east wall below 87 m and the spawn view (200 m down) went black; at 74 degrees the east wall is lit to about 220 m, just below the spawn. Five treatments, all with `nihei_vast` otherwise: black (`shadow_attached=1`, shadow light 0), hatch (shadow light fixed at 0.42), cross (0.33), depth (`shadow_ambient=0.7`, max 0.55, attached 1), mix (cast shadow black, `shadow_attached=0.3`). Sheet `compare/E011-shadow-treatment.png` (rows `shaft_spawn`, `shaft_rim_down`, `shaft_hall_enter`, `shaft_look_up`). Regenerate one cell with, for example, `mega_capture --path shaft_spawn --set shadow_attached=1 --out <dir>`.
+- Result: black gives the strongest placed shapes (the lit window on the east wall, bridge bars) but turns every interior and the whole look-up view into a black page. Hatch and cross are as uniform as the frame before shadows: shadows become texture, not shapes. Depth is closest to the references in the open shaft (dark ruling going black with depth) but busy. First tries also showed an inconsistency: cast shadow only on sun-facing faces made the hall floor black while the columns, turned away from the sun, stayed white; attached shadow must be drawn like cast shadow, or both by the same rule. It was first implemented as an ink blend and gave grey mixtures on grazing faces; it is now a per-face light blend with a hard facing test. The mix keeps black shapes where the sun is cut off and leaves faces turned away toned by depth, so interiors stay legible.
+- Verdict: mix kept as the `nihei_vast` default (`shadow_light_max 0`, `shadow_attached 0.3`), with E016's white ink inside the black. `nihei` keeps shadows off (`sun_shadow 0`): the test scene is closed, so everything would be one shadow. The owner saw it in the windowed game: liked the shadows, intense but right.
+
+## E012: Shadow edge filtering and a moving sun
+- Date: 2026-11-15
+- Feature: `features/ink-renderer.md`, `features/sun-and-sky.md`
+- Question: closes the queued "sun shadow as solid black shapes: stability of the thresholded shadow edge as the sun moves". Is the thresholded edge clean (no acne, steps or peter-panning) and does it move smoothly?
+- Setup: filtered visibility thresholded at 0.5 with a one-pixel gradient-based ramp. Diagnostic `--shadow-filter smooth|bilinear|hard`. Still camera, sun azimuth swept -110 to -109.4 degrees over 60 frames (0.01 degrees per frame) and -110 to -107 (0.05 per frame): `mega_capture --path shaft_spawn --t0 0.5 --t1 0.5 --frames 60 --sun-azim -110 --sun-azim-end -109.4 --shadow-filter smooth --metrics --no-png`, also on `shaft_bridge_walk` (t 0.3) and `shaft_arch_view`. New metric: temporal second difference of the blurred frames, near zero for ink moving at a steady rate. Sheet `compare/E012-shadow-edge.png`: 4x crops of 2560x1440 frames.
+- Result: second difference at 0.01 degrees per frame: smooth 0.019 to 0.023, bilinear 0.022 to 0.027, hard 0.037 to 0.041; at 0.05 degrees per frame on the spawn: 0.041, 0.061, 0.090. On the sheet, hard shows texel steps, bilinear scallops, smooth a clean curve. Two problems found at 4x and fixed: on the east wall, grazed by the light at 75 degrees, the wide kernel shadowed the wall itself and the edge row was dotted pixel by pixel; a receiver-plane depth bias (each tap compares against the receiver's depth at that tap) and spreading the taps to the pixel's footprint (up to 2 texels) removed the self-shadowing. A dotted row remained on some edges: it is the rails at the top galleries and on the bridges, thinner than one texel of the scene cascade, rasterised as a dotted line into the map. No acne or visible peter-panning at any view checked. A remote sun below the horizon still lit downward faces with the shadow pass skipped; it now counts as intensity 0.
+- Verdict: smooth kept. Open: thin occluders (exclude rank-3 parts from the shadow pass, or rasterise them wider). The sheet shows the state after both fixes. Regenerate a column with `mega_capture --path shaft_spawn --width 2560 --height 1440 --shadow-filter hard --out <dir>`.
+
+## E013: A hand-cut shadow edge
+- Date: 2026-11-15
+- Feature: `features/ink-renderer.md`
+- Question: can the shadow edge be slightly irregular, like a cut paper edge, and stay stable?
+- Setup: the shadow lookup offset by a world-anchored 3D value noise across the light (`shadow_jitter` metres, wavelength `shadow_jitter_len`). Sheet `compare/E013-shadow-jitter.png`: 0, 0.1 and 0.25 m on a 1:1 crop of `shaft_bridge_walk` at 2560x1440 (`--set shadow_jitter=0.25`).
+- Result: first version offset the point off the surface; at 0.4 m lit faces grew black blobs where the shifted lookup fell behind its own grazed surface. With the offset projected into the receiver's plane the blobs are gone and the effect is subtle: visible on near edges, invisible at 100 m (it is in metres). Stability: with the sun moving, blurred MAD 0.026 at 0 and 0.1 m, 0.028 at 0.25 m; camera walking on the bridge: identical figures with and without.
+- Verdict: kept at 0.1 m, 1.2 m in `nihei_vast`. A screen-scaled amplitude would read better at distance but would change shape as the camera moves.
+
+## E014: Uneven hatching and indication
+- Date: 2026-11-15
+- Feature: `features/ink-renderer.md`
+- Question: how to stop a 600 m wall being ruled uniformly: world tone noise, per-panel tone, density growing with darkness, or indication (hatching gathered near shadow edges, blank elsewhere)?
+- Setup: `tone_noise` (0.08 to 0.1, 25 to 40 m), `hatch_density_gain` 1, `panel_tone` 0.08 to 0.16, `indication` 1 at 3 to 8 m. Sheet `compare/E014-uneven-hatching.png` (rows `shaft_arch_view`, `shaft_rim_down`).
+- Result: tone noise gives faint, unconvincing blotches (walls turned away from the sun sit at one light value, so small offsets barely move the bands). Density gain greys the darker end without adding structure. Per-panel tone is the effective one: aligned with the structure, some panels ruled hard, some light; at 0.16 it reads as a quilt. Indication had a sign error at first (a lit point surrounded by shadow counted as far from it); fixed, it greys lit areas near shadow edges, which weakens the white against black that the references rely on.
+- Verdict: `panel_tone 0.08` kept in `nihei_vast`; tone noise, density gain and indication kept as parameters, off.
+
+## E015: Crosshatch angle
+- Date: 2026-11-15
+- Feature: `features/ink-renderer.md`
+- Question: review note 4, "the crosshatch is an exact 90 degree mesh". Does an off-90 second layer, varied per element or per panel, read better?
+- Setup: `cross_angle` 90 and 75, `cross_angle_jitter` 30 per element or per panel. Sheet `compare/E015-crosshatch-angle.png`: 1:1 crops of `still_hall` at 2560x1440 (the shaft has little crosshatch with the E011 mix).
+- Result: 75 degrees loses the graph-paper mesh; per-element jitter gives each column and wall its own angle, as separate hand passes would; per panel breaks at every panel seam, which looks like a fault.
+- Verdict: `nihei_vast` uses 75 with 30 degrees jitter per element. `nihei` left at 90 for the owner to decide (the owner liked the test scene's crosshatch in corners).
+
+## E016: Graphic blacks and white ink
+- Date: 2026-11-15
+- Feature: `features/ink-renderer.md`
+- Question: with large solid blacks, how to keep structure legible inside them: white lines, white rules, specks, and should recesses and undersides pool into black?
+- Setup: plain black; `white_lines 1` (major lines only, `white_line_rank 1`; rank-3 seams in white looked like a blueprint grid); plus `white_hatch 0.6` at 6x pitch and `speckle 0.1`; plus `pool_ao 0.55` and `underside_black 1`. Sheet `compare/E016-graphic-blacks.png` (rows `shaft_look_up`, `shaft_hall_enter`, `shaft_stair_view`).
+- Result: plain black loses the shaft entirely in the look-up view. White lines restore the massing; white rules converging in the black give the look-up view its direction back, scratchboard-like; specks add life (the owner's "sparkles in the shadows": the specks and the broken white rules). Pool and underside darken the lit top of the look-up view too and add nothing elsewhere, since shadows already supply the blacks. Stability: specks add 0.04 levels of blurred error and 0.01% pops on `shaft_hall_enter` and `shaft_bridge_walk`.
+- Verdict: white lines, white rules and specks kept in `nihei_vast`; pool and underside off.
+
+## E017: The abyss and the sky
+- Date: 2026-11-15
+- Feature: `features/sun-and-sky.md`, `features/ink-renderer.md`
+- Question: what should the open top and the bottom of the shaft be?
+- Setup: `sky_tone` none (fogged paper), 0 (paper), 1 (ink); `fog_ao` 3. Sheet `compare/E017-abyss-sky.png` (rows `shaft_stair_below`, `shaft_look_up --t 0`, `shaft_rim_down`). Few paths see much sky.
+- Result: with shadows the abyss is already black (cast shadow plus `fog_black`), so `fog_ao 3` changes little. Paper sky makes the opening a clean white shape against the black; fogged paper is a dull grey; ink sky merges the opening into the black and loses it.
+- Verdict: `sky_tone Some(0)` in `nihei_vast`. Follow-up with the sky pass (M5).
+
+## E018: Before and after the shadow and tone pass
+- Date: 2026-11-15
+- Feature: `features/ink-renderer.md`, `features/one-shaft.md`
+- Question: the whole pass, judged on the main views.
+- Setup: scene defaults before this work (renders from the previous build) against now. Sheet `compare/E018-before-after.png` (`shaft_spawn`, `shaft_look_up`, `shaft_rim_down`, `shaft_stair_view`, `shaft_bridge_walk`, `still_hall`). Regenerate the after column with `mega_capture --path <name> --out <dir>`.
+- Result: the shaft views have placed blacks: a lit window on the east wall with the stair across it, black bars from bridges, the look-up as a black field with white rules converging on a bright opening. `still_hall` (the test scene, `nihei`, shadows off) changes only through E019's patch hatching. Temporal stability (blurred reprojected MAD in levels, pops; before then after): bridge walk 1.10, 0.20% then 0.53, 0.18%; stair climb 1.44, 0.42% then 1.28, 0.62%; rim down 0.31, 0.09% then 1.23, 0.30%; spawn 1.07, 0.03% then 0.68, 0.16%; hall enter 2.14, 0.75% then 1.08, 0.82%; look up 1.29, 0.04% then 0.64, 0.24%; corridor walk 1.30, 0.18% then 1.41, 0.27%; strafe 0.78, 0.16% then 0.62, 0.09%; orbit 1.23, 0.38% then 1.21, 0.41%. Per unit of ink the shaft figures fall (0.003 to 0.017) because mean ink rose from 31-102 to 72-217. The blurred error falls or holds except on the rim-down view, where the west wall is now ruled where it was blank; pops rise where thin white lines on black resample.
+- Verdict: kept. Frame time, Apple M3 Max, `--bench 300`: 0.96 to 1.53 ms at 1280x720 and 2.85 to 4.13 ms at 2560x1440 over six shaft and test paths (before 0.49 to 0.58 and 1.58 to 1.74).
+
+## E019: Hatch stroke ends and placement
+- Date: 2026-11-15
+- Feature: `features/ink-renderer.md`
+- Question: owner, on the crosshatch in the windowed game: "not like how a human would place lines; they start and stop very abruptly". Not aliasing. Can strokes taper, and be laid in coherent patches instead of breaking up independently per line?
+- Setup: stroke ends anti-aliased along the line from a distance in pixels to the end (exact for patch runs, first order from the noise derivative otherwise, from the light's change per pixel at band edges), width tapering to nothing over `hatch_taper_px` (a quarter of it at the start). Patch hatching (`hatch_patch`): columns of `hatch_patch_lines` lines cut into staggered runs of `hatch_patch_len` breakup lengths; lines of a run start and stop together with small jitter; band-edge jitter shared per run; crosshatch with a larger gap (`cross_break_gap 0.45`), so it lies as patches over the first layer. Sheet `compare/E019-hatch-strokes.png`: 2x crops of 2560x1440 (`still_hall` column and back wall, `shaft_arch_view`), before, taper only, patches.
+- Result: a first patch version used a smooth 2D noise field: gap boundaries were its iso-contours and read as white blobs; crossfading two octave layouts over the whole crossfade left many strokes half drawn (grey). Explicit runs, with the layout switching only in the middle 30% of the crossfade, give groups of strokes that start together, trail off with tapered ends and break in aligned gaps. A 12 px taper made needles; 6 px reads as a pen lifting. Stability (blurred MAD per unit ink, pops; per-line then patches): corridor walk 0.020, 0.18% then 0.025, 0.25%; orbit 0.022, 0.38% then 0.023, 0.41%; strafe 0.012, 0.16% then 0.011, 0.09%; stair climb 0.018, 0.90% then 0.016, 0.64%; hall enter 0.005, 0.83% then 0.005, 0.80%. The corridor walk is a little worse, where the layout switch band crosses the long floor. Per-patch angle variation was not tried.
+- Verdict: kept as the default in both presets (`hatch_patch 1`, `hatch_taper_px 6`, `hatch_patch_lines 8`, `hatch_patch_len 4`, `cross_break_gap 0.45`). Follow-up: a dyadic patch layout (the next octave's runs as unions of this octave's) to remove the switch; per-patch angle.
+
 ## Queued
 
 Experiments the plan already calls for, in rough order:
 
 - Stroke depth tolerance on dense generated geometry (thin parts). E003 covered the test scene.
 - Hatch octave crossfade judged on 60 fps video rather than metrics (E002 follow-up).
-- Sun shadow as solid black shapes: stability of the thresholded shadow edge as the sun moves.
-- Far-field sun shadow from a ray march through the 32 m occupancy grid, in place of shadow maps beyond the near cascades.
+- Far-field sun shadow from a ray march through the 32 m occupancy grid, in place of shadow maps beyond the near cascades (E011 covers M1 with a scene-fitted cascade instead).
+- Thin occluders (railings) in the shadow pass (E012 follow-up).
+- Dyadic patch layout for hatching, and per-patch crosshatch angle (E019 follow-up).

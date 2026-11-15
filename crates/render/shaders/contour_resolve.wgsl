@@ -22,7 +22,7 @@ fn mask_bilinear(x: vec2<f32>) -> f32 {
 }
 
 @fragment
-fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec2<f32> {
+fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = vec2<i32>(floor(pos.xy));
     let centre = mask_at(p);
     var jxx = 0.0;
@@ -56,5 +56,5 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec2<f32> {
     }
     let smoothed = sum / 7.0;
     let e = mix(centre, smoothed, coherence);
-    return vec2<f32>(e, 0.0);
+    return vec4<f32>(0.0, 0.0, e, e);
 }

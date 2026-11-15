@@ -82,6 +82,8 @@ Every element is a function from parameters to triangles, ink strokes, colliders
 
 Macro, global and coarse: builder epochs and later accretion, exposure to sky, a water drainage walk giving a wetness field, a power graph whose edges fail with age and wetness, and a collapse plan that only removes edges outside the connected core or adds a later-epoch bypass.
 
+Breaks are also how light gets in (requested 2026-11-15): holes in walls, floors and roofs should let sun through as hard-edged shapes, and every break gets a rubble pile beneath it. The shadow pass must therefore resolve openings of a metre or so cleanly.
+
 Micro, per space: integrity per element, support-graph propagation (anything without a path to a root falls), falling and rubble under what fell, Voronoi cracks and missing panels. Machine state (powered, failing, dead) comes from the power graph.
 
 ## 4. Workspace layout (proposed)

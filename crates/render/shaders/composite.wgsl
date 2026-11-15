@@ -24,7 +24,12 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Euclidean distance, so the fade does not change as the view turns.
     let dist = select(linear_depth(d) / max(dot(ray, G.camera_fwd.xyz), 1e-3), 1e7, sky);
     let fill = textureLoad(fill_tex, p, 0);
-    let ink = textureLoad(ink_tex, p, 0).xy;
+    // R hatching and solid black, G white ink, B lines (strokes and contours), A the major
+    // ones among them. Major lines that fall inside solid black turn white by S.blacks.w, so
+    // structure stays legible there; minor ones (panel seams) vanish into the black.
+    let ink4 = textureLoad(ink_tex, p, 0);
+    let inv = fill.w * S.blacks.w;
+    let ink = vec2<f32>(max(ink4.x, ink4.z * (1.0 - inv)), max(ink4.y, ink4.w * inv));
     let view = G.flags.x;
 
     var c: vec3<f32>;
@@ -48,14 +53,29 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             c = mix(S.paper.rgb, S.ink.rgb, ink.x);
             c = mix(c, S.paper.rgb, ink.y);
         }
+        case VIEW_SHADOW: {
+            // Cascade tint (0 white, 1 pale blue, 2 pale green, 3 pale red, beyond grey)
+            // under the shadow amount in ink.
+            let k = fill.y * 4.0;
+            var tint = vec3<f32>(1.0);
+            if (k >= 0.5 && k < 1.5) { tint = vec3<f32>(0.8, 0.88, 1.0); }
+            if (k >= 1.5 && k < 2.5) { tint = vec3<f32>(0.82, 1.0, 0.82); }
+            if (k >= 2.5 && k < 3.5) { tint = vec3<f32>(1.0, 0.84, 0.84); }
+            if (k >= 3.5) { tint = vec3<f32>(0.7); }
+            c = select(mix(tint, vec3<f32>(0.1), ink4.x), vec3<f32>(1.0, 0.95, 0.7), sky);
+        }
         default: {
             // Final and lines: atmosphere pushes tone to the fog colour and attenuates ink by
             // the same factor.
             let f = select(saturate(1.0 - exp(-max(dist - S.fog.x, 0.0) * S.fog.y)) * S.fog.z, S.fog.z, sky);
             // Fog takes the light level of the surface behind it (sky counts as open).
             let ao = select(fill.z, 1.0, sky);
-            let fog = mix(S.fog_colour.rgb, S.ink.rgb, saturate(S.fog.w * (1.0 - ao)));
-            let base = mix(S.paper.rgb, fog, f);
+            let fog = mix(S.fog_colour.rgb, S.ink.rgb, saturate(max(S.fog.w * (1.0 - ao), S.fog2.x * fill.w)));
+            var base = mix(S.paper.rgb, fog, f);
+            if (sky && S.tone.w >= 0.0) {
+                // A flat sky tone instead of the fogged paper.
+                base = mix(S.paper.rgb, S.ink.rgb, S.tone.w);
+            }
             c = mix(base, S.ink.rgb, ink.x * (1.0 - f));
             c = mix(c, S.paper.rgb, ink.y * (1.0 - f));
             // Screen-anchored paper grain.
