@@ -32,7 +32,7 @@ Bindings are by physical key position, so they do not depend on the keyboard lay
 | Run | Shift |
 | Quit | Escape |
 
-Arrow-key look turns at a fixed angular rate, independent of frame rate, with pitch clamped as for the mouse. The same bindings apply to the debug fly camera, where Space and Ctrl move up and down. Arrow-key look is not implemented yet.
+Arrow-key look turns at a fixed angular rate of 90 degrees per second (`ARROW_TURN_RATE_DEG` in `crates/game/src/sim.rs`), independent of frame rate, with pitch clamped as for the mouse, and works alongside mouse look. The same bindings apply to the debug fly camera, where Space and Ctrl move up and down.
 
 ## Technical details
 

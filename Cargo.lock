@@ -1198,6 +1198,7 @@ dependencies = [
  "egui-winit",
  "env_logger",
  "glam",
+ "image",
  "log",
  "mega_gen",
  "mega_render",

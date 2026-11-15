@@ -1,0 +1,150 @@
+//! Command-line parsing.
+
+use crate::script::Script;
+use anyhow::{anyhow, bail, Result};
+use std::path::PathBuf;
+
+pub const USAGE: &str = "\
+megastructure: fly through a scene.
+
+USAGE:
+    megastructure [--scene NAME] [--exit-after-frames N]
+    megastructure --headless [--frames N] [--dt S] [--width W] [--height H]
+                  [--input SCRIPT] [--out DIR] [--every K] [--scene NAME]
+
+OPTIONS:
+    --scene <name>          scene to load (default: the first of the scene list)
+    --exit-after-frames <N> windowed: quit after N frames
+    --headless              no window: run a fixed-timestep loop and render offscreen
+    --frames <N>            headless: number of frames; default the script length, or 1
+    --dt <S>                headless: seconds per frame, default 1/60
+    --width <W> --height <H>  headless: image size, default 1280x720
+    --input <script>        headless: scripted input, e.g. forward:2,look_right+forward:1.5,idle:0.5
+                            actions: forward back left right up down fast
+                            look_left look_right look_up look_down idle
+    --out <dir>             headless: write frame_NNNN.png here
+    --every <K>             headless: write every Kth frame (0-based index divisible by K) and
+                            the last; default 0 = last frame only
+    -h, --help              print this help
+
+CONTROLS (windowed):
+    W A S D        move            Space / Ctrl   up / down
+    Shift          fast            Scroll         change speed
+    Arrow keys     turn (90 degrees per second)
+    Mouse          look while any button is held, or while the cursor is grabbed (Tab)
+    Escape         quit";
+
+pub struct HeadlessArgs {
+    pub frames: u64,
+    pub dt: f32,
+    pub width: u32,
+    pub height: u32,
+    pub script: Option<Script>,
+    pub out: Option<PathBuf>,
+    pub every: u64,
+}
+
+pub enum Mode {
+    Windowed { exit_after_frames: Option<u64> },
+    Headless(HeadlessArgs),
+}
+
+pub struct Args {
+    pub scene: String,
+    pub mode: Mode,
+}
+
+fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
+    it.next().ok_or_else(|| anyhow!("{flag} needs a value"))
+}
+
+fn number<T: std::str::FromStr>(s: &str, flag: &str) -> Result<T> {
+    s.parse().map_err(|_| anyhow!("{flag}: '{s}' is not a valid number"))
+}
+
+/// Parse the arguments after the program name. `Ok(None)` means help was printed.
+pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
+    let mut it = args.into_iter();
+    let mut scene = mega_gen::scenes::DEFAULT.to_string();
+    let (mut headless, mut exit_after, mut frames, mut dt) = (false, None, None, None);
+    let (mut width, mut height, mut script, mut out, mut every) = (None, None, None, None, None);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(None);
+            }
+            "--scene" => scene = value(&mut it, &a)?,
+            "--headless" => headless = true,
+            "--exit-after-frames" => exit_after = Some(number::<u64>(&value(&mut it, &a)?, &a)?),
+            "--frames" => frames = Some(number::<u64>(&value(&mut it, &a)?, &a)?),
+            "--dt" => dt = Some(number::<f32>(&value(&mut it, &a)?, &a)?),
+            "--width" => width = Some(number::<u32>(&value(&mut it, &a)?, &a)?),
+            "--height" => height = Some(number::<u32>(&value(&mut it, &a)?, &a)?),
+            "--input" => script = Some(Script::parse(&value(&mut it, &a)?)?),
+            "--out" => out = Some(PathBuf::from(value(&mut it, &a)?)),
+            "--every" => every = Some(number::<u64>(&value(&mut it, &a)?, &a)?),
+            other => bail!("unknown argument '{other}'\n\n{USAGE}"),
+        }
+    }
+    if !headless {
+        let headless_only = [
+            ("--frames", frames.is_some()),
+            ("--dt", dt.is_some()),
+            ("--width", width.is_some()),
+            ("--height", height.is_some()),
+            ("--input", script.is_some()),
+            ("--out", out.is_some()),
+            ("--every", every.is_some()),
+        ];
+        if let Some((flag, _)) = headless_only.iter().find(|(_, set)| *set) {
+            bail!("{flag} only applies with --headless");
+        }
+        return Ok(Some(Args { scene, mode: Mode::Windowed { exit_after_frames: exit_after } }));
+    }
+    if exit_after.is_some() {
+        bail!("--exit-after-frames is for the windowed game; use --frames with --headless");
+    }
+    let dt = dt.unwrap_or(1.0 / 60.0);
+    if !dt.is_finite() || dt <= 0.0 {
+        bail!("--dt must be a positive number of seconds, got {dt}");
+    }
+    let (width, height) = (width.unwrap_or(1280), height.unwrap_or(720));
+    if width == 0 || height == 0 {
+        bail!("--width and --height must be at least 1");
+    }
+    let frames = match (frames, &script) {
+        (Some(n), _) => n,
+        (None, Some(s)) => s.total_frames(dt).max(1),
+        (None, None) => 1,
+    };
+    if frames == 0 {
+        bail!("--frames must be at least 1");
+    }
+    Ok(Some(Args { scene, mode: Mode::Headless(HeadlessArgs { frames, dt, width, height, script, out, every: every.unwrap_or(0) }) }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> Result<Option<Args>> {
+        parse(s.split_whitespace().map(String::from))
+    }
+
+    #[test]
+    fn headless_defaults_and_script_length() {
+        let Mode::Headless(h) = p("--headless --input forward:2,idle:0.5").unwrap().unwrap().mode else { panic!() };
+        assert_eq!((h.width, h.height, h.frames, h.every), (1280, 720, 150, 0));
+    }
+
+    #[test]
+    fn errors() {
+        assert!(p("--bogus").is_err());
+        assert!(p("--frames 3").is_err());
+        assert!(p("--headless --dt 0").is_err());
+        assert!(p("--headless --input jump:1").is_err());
+        assert!(p("--headless --frames 0").is_err());
+        assert!(p("--headless --exit-after-frames 3").is_err());
+    }
+}

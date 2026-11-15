@@ -25,13 +25,14 @@ Constants that other systems depend on (for example, movement limits the generat
 | Sun and sky | `features/sun-and-sky.md` | Designed |
 | Machinery | `features/machinery.md` | Designed in outline |
 | Capture tool | `features/capture-tool.md` | Working |
+| Headless mode | `features/headless-mode.md` | Working |
 | Ink renderer | `features/ink-renderer.md` | In progress (M0 frame working) |
 
 Still to be split out of `PLAN.md` when work starts: kit of parts, space graph, layout, decay, streaming and LOD.
 
 ## Testing without a window
 
-All verification is headless. `mega_capture` renders named camera paths offscreen to PNG files, and the game binary is to gain a `--headless` mode that runs its update loop and renderer offscreen for a fixed number of frames. Automated checks and agents never open a window. The windowed game is for a person to run by hand:
+All verification is headless. `mega_capture` renders named camera paths offscreen to PNG files, and the game binary has a `--headless` mode that runs its update loop and renderer offscreen for a fixed number of frames, optionally driven by a scripted input (`features/headless-mode.md`). Automated checks and agents never open a window. The windowed game is for a person to run by hand:
 
 ```
 cargo run --release --bin megastructure
