@@ -2,7 +2,7 @@
 
 ## Status
 
-Working, 2026-11-15. A kinematic capsule controller walks the shaft from the spawn gallery, along bridge B1, up the 126-riser stair, along the ledge and through the arch into the hall, and falls, dies and resets as designed. Verified by unit tests on hand-built colliders and by scripted runs in the real shaft scene, with no window: the headless runner and the same scripts driven through `Sim` in tests. The windowed path compiles and shares all of the simulation code, but it has not been run (nothing opens a window in automated checks), so key handling and the on-screen stats are untested. The contract values (below) are unchanged and can be frozen before the generator core (M2).
+Working, 2026-11-15, revised the same day (interpolated display, ring-checked stable spot with a respawn lockout, press-only jump). A kinematic capsule controller walks the shaft from the spawn gallery, along bridge B1, up the 126-riser stair, along the ledge and through the arch into the hall, and falls, dies and resets as designed. Verified by unit tests on hand-built colliders and by scripted runs in the real shaft scene, with no window: the headless runner and the same scripts driven through `Sim` in tests. The windowed path compiles and shares all of the simulation code, but it has not been run (nothing opens a window in automated checks), so key handling and the on-screen stats are untested. The contract values (below) are unchanged and can be frozen before the generator core (M2).
 
 ## What it is
 
@@ -16,7 +16,7 @@ First-person walking, running and jumping through the structure. Falling is phys
 - **Falling.** Gravity with quadratic drag, so speed approaches a terminal velocity instead of growing without bound. Limited air control.
 - **Impact.** On landing, the speed along the surface normal decides the outcome: below a threshold nothing happens, above it the player dies. A middle band (stumble, camera dip) is optional.
 - **Void.** A fall with nothing below continues indefinitely. The structure is finite, so a fall can leave it; the player keeps falling through open sky. Nothing resets it.
-- **Death and reset.** On death, or on the manual reset key, the player returns to the last place they stood on stable ground for at least half a second.
+- **Death and reset.** On death, or on the manual reset key, the player returns to the last place they stood on stable ground for at least half a second, with solid ground all round them (not at a lip), and movement keys are ignored for the next 0.3 s.
 - **Camera.** The eye is 1.65 m above the feet. There is no head bob. Mouse and arrow-key look are the same in both modes.
 - **Modes.** Walking is the default in a scene with colliders; a scene without colliders (the test scene) starts in the fly camera. `F` switches between them at the current position, so the fly camera can be used to look at a place or to get somewhere a walker cannot.
 
@@ -30,7 +30,7 @@ Bindings are by physical key position, so they do not depend on the keyboard lay
 |---|---|---|
 | Move | W A S D | both |
 | Look | Mouse, or the arrow keys (required: the game must be fully playable from the keyboard) | both |
-| Jump | Space (hold to hop on landing) | walking |
+| Jump | Space (a press; a press up to 0.1 s before landing still jumps) | walking |
 | Run | Shift | walking (fly: five times faster) |
 | Back to the last stable ground | R | walking |
 | Switch between walking and the fly camera | F | both |
@@ -75,19 +75,19 @@ Each fixed step does, in order: depenetrate; turn the keys and facing into a wan
 - **Stick to the ground.** After every ground move a 0.3 m sweep downwards snaps the feet onto walkable ground below; if there is none the walker is in the air (with zero vertical speed). This is what lets the player follow ramps and stairs down and over the ridge at the top of a flight without skipping off them, and it makes the eye follow the surface exactly.
 - **Step up.** If a move was stopped by something too steep to stand on, try a step: raise the capsule by up to 0.3 m (less under a ceiling), move forward, sweep down, and accept the landing if it is walkable, if the touched point is no more than 0.3 m above the starting feet, and if it got further forward than the plain slide. The forward move is the step's motion, or 0.15 m if that fails, so the capsule ends far enough over the edge to stand on it and not on its corner (E102). A 0.25 m ledge is stepped, 0.35 m is not.
 - **Eye.** `eye = feet + 1.65 m + eye_offset`. After a step-up or a snap down of more than 0.12 m the offset takes up the jump and decays at 14 per second (exponentially), so a ledge does not pop the picture. Slopes and stairs are never smoothed: the eye follows them exactly (E103).
-- **Jump.** On the ground with Space held: vertical speed `JUMP_SPEED` (3.2 m/s, apex about 0.52 m, about 0.65 s in the air). Holding Space hops again on landing.
+- **Jump.** A press of Space (the rising edge of the key, not the held key) on the ground gives vertical speed `JUMP_SPEED` (3.2 m/s, apex about 0.52 m, about 0.65 s in the air). A press is remembered for `JUMP_BUFFER` (0.1 s), so one just before touching down jumps on landing, and a key that stays held does not hop again. The first step after a respawn ignores a key already held.
 
 ### Falling
 
 `a = g - k * v * |v|` with `k = g / v_t^2` is applied to the whole velocity vector (so horizontal speed also decays slightly). Integration is fixed at `FIXED_DT = 1/60 s`: a midpoint step for the velocity, and the displacement from the average of the old and new velocity, which gives the exact apex for a jump and a speed within 0.1 m/s of the analytic `v_t tanh(g t / v_t)`: 49.0 m/s (89 percent of terminal) after 8 s, 54.99 m/s after a minute, and the speed is clamped to `TERMINAL_VELOCITY` so it never exceeds it. A 400 m fall takes about 11 s.
 
-`Sim` runs the walker in whole fixed steps from an accumulator (`MAX_TICKS_PER_FRAME` = 8, further time is dropped), so the result depends only on the inputs and the number of steps, not on the frame rate; the same script gives bit-identical results. Looking (mouse and arrow keys) is applied per frame with the real `dt`. The position is not interpolated between fixed steps, so on a display faster than 60 Hz the position advances in 60 Hz steps (open question).
+`Sim` runs the walker in whole fixed steps from an accumulator (`MAX_TICKS_PER_FRAME` = 8, further time is dropped), so the result depends only on the inputs and the number of steps, not on the frame rate; the same script gives bit-identical results. Looking (mouse and arrow keys) is applied per frame with the real `dt`. **Display between steps.** `Sim` keeps the walker's eye before and after the latest fixed step. With `Sim::interpolate` on (set by the windowed runner only) the camera is at `prev + (cur - prev) * alpha` with `alpha = accumulator / FIXED_DT`, so a 120 Hz display sees a smooth glide instead of 60 Hz steps. It lags the simulation by up to one step (17 ms) and does not slide across a death, a reset or a switch from the fly camera (`Walker::teleports`). Looking is not interpolated; it is immediate. With it off, which is the headless runner and every test, the camera is exactly the eye after the latest step, so headless output is bit-identical to before (E106).
 
 ### Impact, death and reset
 
 In the air, each contact is checked: the speed along its normal is `-v . n` for the velocity used for that step. Above `FATAL_IMPACT_SPEED` (14 m/s, a drop of about 10 m without drag) the player dies, on any surface. Otherwise a contact with walkable ground while falling is a landing: the vertical speed is lost and the horizontal speed kept. Measured in tests: a 5 m and an 8 m drop are survived, 15 m and 40 m are fatal.
 
-The stable spot is the feet position of the latest step on which the player had been on the ground, without a break, for at least `STABLE_GROUND_TIME` (0.5 s) and had a surface straight below the middle of the capsule (so a perch on a ledge's corner is not recorded, E104). Death and `R` both return to it at rest, on the ground. Deaths and resets are counted. Before any spot qualifies the spawn is the stable spot. `F` into walking keeps the old spot. Walking off an edge returns the player a few centimetres short of that edge.
+The stable spot is the feet position of the latest step on which the player had been on the ground, without a break, for at least `STABLE_GROUND_TIME` (0.5 s) and `World::supported_ring` held: 16 points on a ring of `STABLE_RING_RADIUS` (0.65 m) around the capsule's axis each have either solid at their height (a wall or a rail, which is not an edge) or ground within `STABLE_RING_REACH` (0.5 m) above or below the feet. So a spot is never nearer than 0.64 m to a drop, a corner perch or the end of a bridge (E104, E105); on the stair the 1.5 m lane qualifies. Death and `R` both return to it at rest, on the ground, and then `RESPAWN_LOCKOUT` (0.3 s) ignores the movement keys (looking still works), so a held forward key does not carry the player straight back over an edge; afterwards it does. Deaths and resets are counted. Before any spot qualifies the spawn is the stable spot. `F` into walking keeps the old spot. Walking off an edge returns the player 0.65 m or more back from that edge.
 
 ### Constants
 
@@ -112,6 +112,9 @@ Tuning and numerical constants:
 | Constant | Value | Meaning |
 |---|---|---|
 | `FIXED_DT`, `MAX_TICKS_PER_FRAME` | 1/60 s, 8 | Simulation step; most steps per rendered frame |
+| `JUMP_BUFFER` | 0.1 s | A jump press this long before landing still jumps |
+| `STABLE_RING_RADIUS`, `STABLE_RING_SAMPLES`, `STABLE_RING_REACH` | 0.65 m, 16, 0.5 m | Ground needed around a stable spot |
+| `RESPAWN_LOCKOUT` | 0.3 s | Movement keys ignored after a death or reset |
 | `GROUND_ACCEL`, `GROUND_DECEL`, `AIR_ACCEL` | 30, 45, 6 m/s^2 | Control |
 | `SKIN` | 4 mm | Gap kept to surfaces |
 | `SNAP_DISTANCE` | 0.3 m | Reach of stick-to-ground (equal to the step height) |
@@ -125,9 +128,9 @@ World positions are held as a cell index plus a local `f32` offset (or `f64`), s
 
 ### Tests
 
-Unit tests with no GPU, in `walker.rs`, `world.rs` and `sim.rs` on small hand-built collider sets: standing on a box for 10 s does not move; a wall stops the walker and is slid along at an angle; a 0.25 m ledge is stepped up and a 0.35 m one is not (also at a run); a 35 degree ramp is climbed and 45 and 41 degree ramps are not (39 is); a stair ramp (rise 0.17, run 0.30) is climbed and descended at walk and run with the eye monotonic, in steps within 25 percent of the slope's worth, and never airborne; the jump apex is 0.47 to 0.56 m; free fall reaches 0.89 of terminal at 8 s, approaches 55 m/s and never exceeds it; drops of 5 and 8 m are survived and 15 and 40 m are fatal; death returns to the last stable ground, as does `R`; less than half a second on the ground does not set a spot; stepping into void keeps falling for 15 s with no reset; a scripted run twice is bit-identical; air control is limited; the exact capsule-box distance matches a brute-force search over 3,000 random poses; modes, `F` and `R` edges, and fixed-step behaviour in `Sim`.
+Unit tests with no GPU, in `walker.rs`, `world.rs` and `sim.rs` on small hand-built collider sets: standing on a box for 10 s does not move; a wall stops the walker and is slid along at an angle; a 0.25 m ledge is stepped up and a 0.35 m one is not (also at a run); a 35 degree ramp is climbed and 45 and 41 degree ramps are not (39 is); a stair ramp (rise 0.17, run 0.30) is climbed and descended at walk and run with the eye monotonic, in steps within 25 percent of the slope's worth, and never airborne; the jump apex is 0.47 to 0.56 m; free fall reaches 0.89 of terminal at 8 s, approaches 55 m/s and never exceeds it; drops of 5 and 8 m are survived and 15 and 40 m are fatal; death returns to the last stable ground, as does `R`; less than half a second on the ground does not set a spot; a spot near a lip, near the end of a strip or 0.4 m from a drop is not stable, one beside a wall is; after a death with forward held and running the player returns 0.65 m from the edge and stays put for the 0.3 s lockout, as after `R`; a held jump jumps once, a second press jumps again, and a press 3 or 5 steps before landing jumps on landing while 12 or 30 steps before does not; the camera at 240 Hz over the 60 Hz step moves evenly when interpolated (within 10 percent) and exactly with the eye when not; stepping into void keeps falling for 15 s with no reset; a scripted run twice is bit-identical; air control is limited; the exact capsule-box distance matches a brute-force search over 3,000 random poses; modes, `F` and `R` edges, and fixed-step behaviour in `Sim`.
 
-Scenes: `shaft_tests.rs` walks the real shaft with the headless scripts: spawn to the hall at run and at walk speed (grounded on every frame, no death, bridge at y 400, stair top at the hall floor 421.42 m, in the hall), the stair up and down at both speeds, the feet against the generator's `stair_surface`, a step off bridge B1 and a 400 m fall ending in death and a return to the bridge, a fall beside the structure that never ends, and a ray down every quarter metre of B1.
+Scenes: `shaft_tests.rs` walks the real shaft with the headless scripts: spawn to the hall at run and at walk speed (grounded on every frame, no death, bridge at y 400, stair top at the hall floor 421.42 m, in the hall), the stair up and down at both speeds, the feet against the generator's `stair_surface`, a step off bridge B1 and a 400 m fall ending in death and a return to the bridge, a fall beside the structure that never ends, and a ray down every quarter metre of B1, the headless state line of the spawn-to-hall route to the digit, and the stable spot following the player up the stair (R half way up returns within a metre).
 
 ## Open questions
 
@@ -135,13 +138,13 @@ Scenes: `shaft_tests.rs` walks the real shaft with the headless scripts: spawn t
 - Whether falling out of the structure entirely should reset after some time or distance. Currently nothing does: 20 s of falling beside the shaft, from the spawn's height, ends 486 m below the shaft's floor at 54.9 m/s and is still going.
 - Whether a long fall needs any presentation (wind streak lines, camera shake) or should stay silent and still.
 - Field of view. The research found nothing usable; the default 70 degrees is unchanged. There is no head bob.
-- The return point after walking off a ledge is the edge itself, so a player still holding forward goes straight off again. A spot recorded half a second late, or a step back from edges, would be gentler (E104).
-- Position is not interpolated between 60 Hz steps; at 120 or 144 Hz the motion will judder slightly. Interpolating makes the headless state lag by a step unless handled; not built.
-- A held Space hops on every landing. An edge-triggered jump (needs a press, not a hold) may be better.
+- Interpolation shows the walker up to one step (17 ms) behind. Whether that lag is noticeable at 120 Hz is unjudged: nothing was run in a window. Extrapolation would remove it but overshoots at stops and walls; not tried.
+- Nowhere narrower than about 1.3 m between drops can hold a stable spot (the ring check), so there a death or `R` goes back to the last wider place. None exists in the shaft; a narrow catwalk in a later scene would need a smaller ring.
+- A jump tap shorter than one rendered frame is missed in the windowed game (the key is sampled once per frame); F and R are latched, Space is not.
 - Railings are 6 cm thick boxes 1.1 m high: a 1.8 m capsule cannot jump or climb over them, and every bridge, landing and stair flight in the shaft is railed, so in the shaft the player cannot walk off an edge at all (the scripted falls switch to the fly camera to move over the void). Whether that is wanted, or some edges should be open, is a generator decision.
 - A capsule's round foot perches on a ledge's corner when its centre is up to 0.19 m past the edge, with the feet a few centimetres low, and slips off beyond that. Realistic, and visible only at edges.
 - The windowed path (key handling for F and R, the stats overlay) is untested.
 
 ## Related experiments
 
-E101 (parry shape casts or exact advancement), E102 (step-up with a round foot), E103 (smooth eye on stairs), E104 (where death returns to).
+E101 (parry shape casts or exact advancement), E102 (step-up with a round foot), E103 (smooth eye on stairs), E104 (where death returns to), E105 (ring of ground under the stable spot), E106 (showing the walker between steps).

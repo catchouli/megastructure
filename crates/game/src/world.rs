@@ -15,7 +15,7 @@
 //! parry works in glam 0.33 types through `glamx`; the game uses glam 0.34, so values cross
 //! this boundary as plain components.
 
-use crate::player::{CAPSULE_HEIGHT, CAPSULE_RADIUS, SKIN};
+use crate::player::{CAPSULE_HEIGHT, CAPSULE_RADIUS, SKIN, STABLE_RING_REACH, STABLE_RING_SAMPLES};
 use glam::Vec3;
 use mega_gen::Collider;
 use parry3d::bounding_volume::Aabb;
@@ -165,8 +165,9 @@ impl Solid {
         best
     }
 
-    /// Where a ray straight down from `origin` first enters the box (its height), if it does.
-    fn ray_down(&self, origin: Vec3) -> Option<f32> {
+    /// A ray straight down from `origin`: where it first enters the box (its height), or that
+    /// it starts inside the box, or None if it misses.
+    fn ray_down(&self, origin: Vec3) -> Option<Probe> {
         let o = self.local_point(origin);
         let (mut t_min, mut t_max) = (0.0f32, f32::MAX);
         for i in 0..3 {
@@ -181,7 +182,15 @@ impl Solid {
                 t_max = t_max.min(t1.max(t2));
             }
         }
-        (t_min <= t_max && t_min > 0.0).then_some(origin.y - t_min)
+        if t_min > t_max {
+            None
+        } else if t_min > 0.0 {
+            Some(Probe::Hit(origin.y - t_min))
+        } else if t_max > 0.0 {
+            Some(Probe::Inside)
+        } else {
+            None
+        }
     }
 
     /// The capsule with its end-sphere centres at `a` and `b` and radius `r`, against this box.
@@ -212,6 +221,15 @@ impl Solid {
             Contact { dist: -(least + r), normal: self.world_dir(n), point: self.world_point(on_face) }
         }
     }
+}
+
+/// Result of a downward ray against one box.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Probe {
+    /// The ray enters the box's top at this height.
+    Hit(f32),
+    /// The ray starts inside the box.
+    Inside,
 }
 
 #[derive(Clone, Copy)]
@@ -303,10 +321,31 @@ impl World {
 
     /// Whether there is a surface straight below the middle of the capsule, within `reach`
     /// below the feet: the player stands on the ground, not on the rim of a corner.
+    #[cfg(test)]
     pub fn supported_below(&self, feet: Vec3, reach: f32) -> bool {
         let origin = feet + Vec3::Y * 0.05;
         let floor = feet.y - reach;
-        self.candidates(origin, origin - Vec3::Y * (reach + 0.1), 0.0).any(|s| s.ray_down(origin).is_some_and(|y| y >= floor))
+        self.candidates(origin, origin - Vec3::Y * (reach + 0.1), 0.0).any(|s| s.ray_down(origin).is_some_and(|p| matches!(p, Probe::Hit(y) if y >= floor)))
+    }
+
+    /// Whether the capsule at `feet` stands well inside its ground: around it, at radius
+    /// `radius`, at `STABLE_RING_SAMPLES` points, there is either solid at the height of the feet
+    /// (a wall, a rail, a taller ledge) or ground no more than `STABLE_RING_REACH` below or above
+    /// the feet. Not near a lip or the end of a bridge, where one of the points sees only air.
+    pub fn supported_ring(&self, feet: Vec3, radius: f32) -> bool {
+        let top = feet.y + STABLE_RING_REACH;
+        let floor = feet.y - STABLE_RING_REACH;
+        (0..STABLE_RING_SAMPLES).all(|i| {
+            let a = std::f32::consts::TAU * i as f32 / STABLE_RING_SAMPLES as f32;
+            let origin = Vec3::new(feet.x + radius * a.cos(), top, feet.z + radius * a.sin());
+            let query = Aabb::new(pv(Vec3::new(origin.x - 0.01, floor - 0.1, origin.z - 0.01)), pv(Vec3::new(origin.x + 0.01, top + 0.1, origin.z + 0.01)));
+            let hits: Vec<u32> = self.bvh.intersect_aabb(&query).collect();
+            hits.into_iter().any(|j| match self.solids[j as usize].ray_down(origin) {
+                Some(Probe::Inside) => true,
+                Some(Probe::Hit(y)) => y >= floor,
+                None => false,
+            })
+        })
     }
 
     /// Whether the capsule at `feet` overlaps any collider (touching within `SKIN` does not count).

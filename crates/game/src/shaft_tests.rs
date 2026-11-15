@@ -85,6 +85,11 @@ fn the_route_from_spawn_to_the_hall_stays_on_the_ground() {
         assert!(w.grounded && w.deaths == 0);
         let line = state_line(&sim, frames);
         assert!(line.contains("mode=walk grounded=true") && line.contains("died=false deaths=0"), "{line}");
+        if name == "run" {
+            // The headless output of this script, unchanged by interpolation, the respawn rule
+            // and the jump rule (the line printed by `megastructure --headless` before them).
+            assert_eq!(line, "state frames=3228 x=-0.7043 y=423.0740 z=-101.1447 yaw_deg=180.000 pitch_deg=0.000 mode=walk grounded=true vy=0.0000 died=false deaths=0 resets=0");
+        }
     }
 }
 
@@ -222,4 +227,19 @@ fn the_feet_follow_the_generators_stair_surface_over_all_three_flights_and_both_
     });
     assert!(n > 500, "only {n} frames on the stair");
     assert!(max < 0.06 && min > -0.005, "feet were {min}..{max} above the stair surface");
+}
+
+#[test]
+fn on_the_stair_the_stable_spot_follows_the_player_and_r_returns_close_by() {
+    // The stair lane is 1.5 m wide; the ring check (0.65 m) must still count it as ground. Walk
+    // half way up, stand, press R: back within a metre, on the stair, not at the bridge.
+    let scene = shaft();
+    let mut sim = Sim::for_scene(&scene, None);
+    drive(&mut sim, "idle:1,look_right:1,forward:3.7,look_left:1,run+forward:11,look_left:1,run+forward:5.5,idle:1", |_, _| {});
+    let before = sim.walker().unwrap().pos;
+    assert!(before.y > 405.0 && before.y < 415.0, "not half way up the stair: {before:?}");
+    drive(&mut sim, "reset:0.02,idle:0.5", |_, _| {});
+    let after = sim.walker().unwrap();
+    assert_eq!(after.resets, 1);
+    assert!((after.pos - before).length() < 1.0 && after.grounded, "{:?} vs {before:?}", after.pos);
 }

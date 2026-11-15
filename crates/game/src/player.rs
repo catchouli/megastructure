@@ -26,6 +26,19 @@ pub const FATAL_IMPACT_SPEED: f32 = 14.0;
 /// Time on the ground, continuously, before a spot counts as stable ground to return to, seconds.
 pub const STABLE_GROUND_TIME: f32 = 0.5;
 
+/// A spot only becomes the stable spot to return to if ground (or a wall) lies under a ring of
+/// points this far from the capsule's axis, metres. Wider than the capsule, so the return point is
+/// at least 0.6 m from any lip (16 samples leave a worst case of 0.65 cos 11 degrees = 0.64 m).
+pub const STABLE_RING_RADIUS: f32 = 0.65;
+/// Points on that ring.
+pub const STABLE_RING_SAMPLES: usize = 16;
+/// How far above and below the feet the ground under a ring point may be, metres.
+pub const STABLE_RING_REACH: f32 = 0.5;
+/// After a death or a reset, movement keys are ignored for this long, seconds.
+pub const RESPAWN_LOCKOUT: f32 = 0.3;
+/// A jump pressed this long before touching down still happens on landing, seconds.
+pub const JUMP_BUFFER: f32 = 0.1;
+
 /// Fixed simulation step, seconds. The walker is only ever advanced in steps of exactly this.
 pub const FIXED_DT: f32 = 1.0 / 60.0;
 /// Most fixed steps run for one rendered frame; further time is dropped so a stall cannot spiral.

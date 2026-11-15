@@ -131,6 +131,22 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: a walking player is "standing" the whole way to the edge, so the spot ends up at the lip. Worse, the capsule can be grounded with its centre up to 0.19 m beyond the edge, perched on the corner at up to 40 degrees (feet 5 cm low), and that is where the return went (x 3.13 to 3.18 against an edge at 3.0). With a key still held the player fell again at once and died twice from one fall. Changed so a spot only counts if there is a surface straight below the middle of the capsule, so a corner perch is never recorded; the return is then at the last spot with full support, a few centimetres short of the lip.
 - Verdict: kept. The return is still at the edge for someone walking off it. Follow-ups worth trying: record the spot half a second late, or step back from edges, if it feels harsh in play.
 
+## E105: A ring of ground under the stable spot
+- Date: 2026-11-15
+- Feature: `features/player-movement.md`
+- Question: E104 left the return point a few centimetres short of a lip, so a held forward key walked the player straight off again. Does requiring ground under a ring of points around the capsule give a return point that is clear of edges, without making narrow places (the stair lane, bridges) unable to hold a stable spot?
+- Setup: a spot counts only if 16 points on a ring of 0.65 m radius around the capsule's axis each have solid at their height (a wall or rail: not an edge) or ground within 0.5 m above or below the feet (`World::supported_ring`). Sixteen points at 0.65 m leave a worst case of 0.64 m to a lip at any angle; with 8 points it is 0.60 only along the axes. After a death or reset the movement keys are ignored for 0.3 s. Tests: a platform 20 m up, forward held and running the whole time (`walker::tests::respawn_is_well_back_from_the_edge_and_held_keys_are_ignored_for_a_moment`); the shaft route, counting frames on which the stable spot updated.
+- Result: the player returned 0.650 m from the edge and stayed still for the 0.3 s of the lockout; with the key still held it then walked on. With the ring added to E104's check (ground straight below the axis within 0.028 m), the spot updated on 2,002 of the shaft route's 3,228 frames but on only 28 of the stair's 526: the axis check failed on every slope, because the rounded foot rides up to 0.046 m above a 29.5 degree surface at the axis. Dropping it (the ring covers it, and a corner perch has air under some ring point) gave 2,500 of 3,228 and 526 of 526 on the stair, where the 1.5 m lane with a wall on one side and a rail on the other is still wide enough for the ring, and reset on the stair returned within a metre.
+- Verdict: kept. The stable spot is now always at least 0.64 m from a drop. In places narrower than 1.3 m between drops nothing is stable; none exists in the shaft.
+
+## E106: Showing the walker between 60 Hz steps
+- Date: 2026-11-15
+- Feature: `features/player-movement.md`
+- Question: the owner's display runs at 120 Hz and the walker steps at 60 Hz. Does interpolating the eye between the last two steps remove the judder, and can headless output stay bit-identical?
+- Setup: `Sim` keeps the walker's eye before and after the latest fixed step; with `interpolate` on (only the windowed runner) the camera is shown at `alpha = accumulator / step` between them, with no sliding across a death, a reset or a switch from the fly camera. Off (the headless runner and the tests) the camera is the eye after the latest step, as before. Test with 240 Hz frames over a floor (`sim::tests::interpolated_walking_moves_the_eye_smoothly_between_fixed_steps_and_off_it_is_exact`).
+- Result: with it on, the per-frame movement is the same to within 10 percent (mean 10.4 mm per frame at walking speed); with it off, more than half of the frames do not move at all and the rest move by a whole step. The cost is a lag: the picture shows the position of up to one step (17 ms, 4 cm at walking speed, 10 cm running) ago, and exact multiples of the step show the position one step back. Extrapolating forward instead would remove the lag but overshoots when the player stops or hits a wall; not tried. Headless output is unchanged: the route script ends at the same state line to the digit, and every frame's camera equals the walker's eye bit for bit.
+- Verdict: kept, windowed only. Whether the lag is felt at 120 Hz has not been judged by hand (nothing was run in a window).
+
 ## Queued
 
 Experiments the plan already calls for, in rough order:

@@ -85,7 +85,9 @@ fn init_gfx(event_loop: &ActiveEventLoop, scene: &Scene, move_mode: Option<MoveM
     surface.configure(&device, &config);
 
     let renderer = Renderer::new(device.clone(), queue.clone(), config.format, config.width, config.height);
-    let game = Game::new(renderer, scene, move_mode);
+    let mut game = Game::new(renderer, scene, move_mode);
+    // The display may run faster than the 60 Hz simulation: show the walker between steps.
+    game.sim.interpolate = true;
 
     let egui_ctx = egui::Context::default();
     let egui_state = egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &*window, Some(window.scale_factor() as f32), window.theme(), Some(device.limits().max_texture_dimension_2d as usize));

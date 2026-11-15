@@ -50,7 +50,7 @@ Segments run in sequence; `+` holds several actions at once (`forward+look_left:
 
 Durations are converted to frames by rounding the cumulative time over `dt`, so whole-second segments at 1/60 s are exactly 60 frames each. The actions are the keyboard's: `forward`/`back`/`left`/`right` are W S A D, `up` E, `down` Q or Ctrl, `jump` Space, `fast` and `run` (the same action) Shift, `toggle_fly` F, `reset` R, and the four `look_*` the arrow keys. Looks turn at 90 degrees per second. `look_right` decreases yaw, since yaw 0 faces +Z and positive yaw turns towards +X.
 
-- **Walking:** `forward` and friends move along the facing at 2.5 m/s, 6 m/s with `run`; `jump` jumps when on the ground (held, it hops on every landing); `up` and `down` do nothing. `reset` returns to the last stable ground. Walking runs in fixed steps of 1/60 s whatever `--dt` is (a `--dt` of 1/30 runs two steps per frame).
+- **Walking:** `forward` and friends move along the facing at 2.5 m/s, 6 m/s with `run`; `jump` jumps when on the ground (on the first step it is held; held longer, it does not hop again, and a press up to 0.1 s before landing jumps on landing); `up` and `down` do nothing. `reset` returns to the last stable ground and the movement keys are ignored for the next 0.3 s. Walking runs in fixed steps of 1/60 s whatever `--dt` is (a `--dt` of 1/30 runs two steps per frame).
 - **Flying:** moves are in the facing direction at the base speed (8 m/s, five times that with `fast` or `run`); `up` and `jump` go up, `down` goes down.
 - **`toggle_fly` and `reset` act on the first frame they are held**, so `toggle_fly:1` toggles once, not sixty times. Give the segment a whole frame at least: at 1/60 s `toggle_fly:0.02` is one frame. Scenes without colliders ignore both.
 

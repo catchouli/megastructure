@@ -43,6 +43,15 @@ pub struct Walker {
     pub eye_offset: f32,
     /// Speed along the normal of the hardest contact of the latest step (diagnostic).
     pub last_impact: f32,
+    /// Seconds left in which movement input is ignored (after a death or a reset).
+    pub lockout: f32,
+    /// Times the position was set directly (a death, a reset, leaving the fly camera): a renderer
+    /// that interpolates must not slide across these.
+    pub teleports: u32,
+    /// Jump key state of the previous step, for the rising edge.
+    jump_prev: bool,
+    /// Seconds a jump press stays valid while waiting for the ground.
+    jump_buffer: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -167,6 +176,10 @@ impl Walker {
             resets: 0,
             eye_offset: 0.0,
             last_impact: 0.0,
+            lockout: 0.0,
+            teleports: 0,
+            jump_prev: false,
+            jump_buffer: 0.0,
         }
     }
 
@@ -183,6 +196,7 @@ impl Walker {
         self.grounded = false;
         self.ground_time = 0.0;
         self.eye_offset = 0.0;
+        self.teleports += 1;
     }
 
     /// Manual reset: back to the last stable ground, at rest.
@@ -198,11 +212,25 @@ impl Walker {
         self.ground_normal = Vec3::Y;
         self.ground_time = STABLE_GROUND_TIME;
         self.eye_offset = 0.0;
+        self.lockout = RESPAWN_LOCKOUT;
+        self.jump_buffer = 0.0;
+        self.teleports += 1;
     }
 
     /// Advance by one fixed step.
     pub fn tick(&mut self, world: &World, input: &WalkInput) {
         let dt = FIXED_DT;
+        // Just after a respawn the keys do nothing, so a held key does not carry the player
+        // straight back over the edge.
+        let raw_jump = input.jump;
+        let locked = self.lockout > 0.0;
+        self.lockout = (self.lockout - dt).max(0.0);
+        let input = &if locked { WalkInput { yaw: input.yaw, ..Default::default() } } else { *input };
+        // A jump is a key press, not a held key; a press shortly before landing is kept.
+        if input.jump && !self.jump_prev {
+            self.jump_buffer = JUMP_BUFFER;
+        }
+        self.jump_prev = raw_jump;
         self.pos = world.depenetrate(self.pos);
         self.last_impact = 0.0;
 
@@ -220,9 +248,10 @@ impl Walker {
         if self.grounded {
             let rate = if wish == Vec3::ZERO { GROUND_DECEL } else { GROUND_ACCEL };
             vh = approach(vh, wish, rate * dt);
-            if input.jump {
+            if self.jump_buffer > 0.0 {
                 self.vel.y = JUMP_SPEED;
                 self.grounded = false;
+                self.jump_buffer = 0.0;
             }
         } else if let Some(wd) = wish.try_normalize() {
             // Air control: push along the wanted direction, but never beyond the wanted speed.
@@ -244,9 +273,10 @@ impl Walker {
             return;
         }
 
+        self.jump_buffer = (self.jump_buffer - dt).max(0.0);
         if self.grounded {
             self.ground_time += dt;
-            if self.ground_time >= STABLE_GROUND_TIME && world.supported_below(self.pos, 2.0 * SKIN + 0.02) {
+            if self.ground_time >= STABLE_GROUND_TIME && world.supported_ring(self.pos, STABLE_RING_RADIUS) {
                 self.stable_pos = self.pos;
             }
         } else {
@@ -754,6 +784,96 @@ mod tests {
         assert!(w.pos.z < 0.2 + 1e-3 && w.pos.z > 0.1, "z {}", w.pos.z);
         assert!(w.pos.x > 5.0);
     }
+
+    #[test]
+    fn respawn_is_well_back_from_the_edge_and_held_keys_are_ignored_for_a_moment() {
+        let world = platform_world(20.0);
+        let mut w = walker_at(Vec3::new(-5.0, 20.0, 0.0));
+        run(&mut w, &world, WalkInput::default(), 1.0);
+        // Forward stays held the whole time, running: off the edge at x = 3, fall, die.
+        let input = WalkInput { run: true, ..forward(EAST) };
+        let mut ticks = 0;
+        while w.deaths == 0 && ticks < 60 * 20 {
+            w.tick(&world, &input);
+            ticks += 1;
+        }
+        assert_eq!(w.deaths, 1, "never died");
+        let back = w.pos;
+        assert!((back.y - 20.0).abs() < 0.01 && w.grounded && w.vel == Vec3::ZERO, "{back:?}");
+        assert!(3.0 - back.x >= 0.6, "returned {} m from the edge", 3.0 - back.x);
+        // The lockout: for 0.3 s the held key does nothing.
+        for _ in 0..(RESPAWN_LOCKOUT / FIXED_DT) as usize - 1 {
+            w.tick(&world, &input);
+            assert_eq!(w.pos, back, "moved during the lockout");
+        }
+        // Afterwards it walks again (and may well go off the edge again).
+        for _ in 0..30 {
+            w.tick(&world, &input);
+        }
+        assert!(w.pos.x > back.x + 0.5, "never walked on after the lockout: {:?}", w.pos);
+        // Same for R.
+        let mut w = walker_at(Vec3::new(-5.0, 20.0, 0.0));
+        run(&mut w, &world, WalkInput::default(), 1.0);
+        w.reset();
+        let at = w.pos;
+        run(&mut w, &world, input, 0.25);
+        assert_eq!(w.pos, at);
+    }
+
+    #[test]
+    fn spots_near_an_edge_or_a_bridge_end_are_not_stable_but_spots_under_a_wall_or_in_the_middle_are() {
+        // A strip 3 m wide and 10 m long, with a wall alongside it on one side.
+        let strip = aabb([0.0, 19.0, -1.5], [10.0, 20.0, 1.5]);
+        let wall = aabb([0.0, 19.0, 1.5], [10.0, 30.0, 3.0]);
+        let world = World::new(&[strip, wall]);
+        assert!(world.supported_ring(Vec3::new(5.0, 20.0, 0.0), STABLE_RING_RADIUS), "middle of the strip");
+        assert!(world.supported_ring(Vec3::new(5.0, 20.0, 1.2), STABLE_RING_RADIUS), "beside the wall: the wall is not an edge");
+        assert!(!world.supported_ring(Vec3::new(5.0, 20.0, -1.0), STABLE_RING_RADIUS), "0.5 m from the open side");
+        assert!(!world.supported_ring(Vec3::new(0.4, 20.0, 0.0), STABLE_RING_RADIUS), "0.4 m from the end");
+        assert!(world.supported_ring(Vec3::new(5.0, 20.0, -0.8), STABLE_RING_RADIUS), "0.7 m from the open side");
+    }
+
+    #[test]
+    fn jump_is_a_press_not_a_hold_and_a_press_just_before_landing_counts() {
+        let world = World::new(&[floor()]);
+        let hold = WalkInput { jump: true, ..Default::default() };
+        // Holding for three seconds: one jump, however many landings.
+        let mut w = walker_at(Vec3::ZERO);
+        settle(&mut w, &world);
+        let mut takeoffs = 0;
+        let mut was_grounded = true;
+        for _ in 0..180 {
+            w.tick(&world, &hold);
+            takeoffs += (was_grounded && !w.grounded) as u32;
+            was_grounded = w.grounded;
+        }
+        assert_eq!(takeoffs, 1, "held Space hopped {takeoffs} times");
+        assert!(w.grounded);
+        // Release and press again: a second jump.
+        w.tick(&world, &WalkInput::default());
+        w.tick(&world, &hold);
+        assert!(!w.grounded && w.vel.y > 3.0);
+
+        // Land time of a plain jump, in steps after the press.
+        let mut probe = walker_at(Vec3::ZERO);
+        settle(&mut probe, &world);
+        probe.tick(&world, &hold);
+        let mut land = 1;
+        while !probe.grounded {
+            probe.tick(&world, &WalkInput::default());
+            land += 1;
+        }
+        // Press `early` steps before the landing step (and release at once): jumps again if the
+        // press is within the 0.1 s buffer (6 steps), lands and stays if it is earlier.
+        for (early, jumps) in [(3usize, true), (5, true), (12, false), (30, false)] {
+            let mut w = walker_at(Vec3::ZERO);
+            settle(&mut w, &world);
+            w.tick(&world, &hold);
+            for i in 1..land + 3 {
+                let press = i + early == land;
+                w.tick(&world, &WalkInput { jump: press, ..Default::default() });
+            }
+            assert_eq!(w.pos.y > 0.05, jumps, "press {early} steps before landing: grounded {} y {}", w.grounded, w.pos.y);
+        }
+    }
 }
-
-

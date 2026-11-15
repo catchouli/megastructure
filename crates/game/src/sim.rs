@@ -58,12 +58,19 @@ pub struct Sim {
     accumulator: f64,
     prev_toggle: bool,
     prev_reset: bool,
+    /// Show the walking eye interpolated between the last two fixed steps (the windowed game).
+    /// Off, the camera is exactly the walker's eye after the latest step, which is what headless
+    /// runs and tests see.
+    pub interpolate: bool,
+    /// The walker's eye before and after the latest fixed step.
+    eye_prev: Vec3,
+    eye_cur: Vec3,
 }
 
 impl Sim {
     /// A fly camera at `position`, with nothing to collide with.
     pub fn new(position: Vec3, yaw: f32) -> Self {
-        Self { camera: Camera::new(position, yaw, 0.0), speed: BASE_SPEED, mode: MoveMode::Fly, walking: None, accumulator: 0.0, prev_toggle: false, prev_reset: false }
+        Self { camera: Camera::new(position, yaw, 0.0), speed: BASE_SPEED, mode: MoveMode::Fly, walking: None, accumulator: 0.0, prev_toggle: false, prev_reset: false, interpolate: false, eye_prev: position, eye_cur: position }
     }
 
     /// The simulation for a scene: walking from its spawn if it has colliders (unless `mode`
@@ -72,6 +79,8 @@ impl Sim {
         let mut sim = Sim::new(Vec3::from(scene.spawn), scene.spawn_yaw);
         if !scene.colliders.is_empty() {
             sim.walking = Some(Walking { world: Arc::new(World::new(&scene.colliders)), walker: Walker::new(sim.camera.position) });
+            sim.eye_prev = sim.camera.position;
+            sim.eye_cur = sim.camera.position;
             sim.mode = mode.unwrap_or(MoveMode::Walk);
         }
         sim
@@ -100,6 +109,8 @@ impl Sim {
         match (mode, self.walking.as_mut()) {
             (MoveMode::Walk, Some(w)) => {
                 w.walker.place_eye(self.camera.position);
+                self.eye_prev = w.walker.eye();
+                self.eye_cur = self.eye_prev;
                 self.accumulator = 0.0;
                 self.mode = MoveMode::Walk;
             }
@@ -176,6 +187,8 @@ impl Sim {
         let Some(w) = self.walking.as_mut() else { return };
         if reset {
             w.walker.reset();
+            self.eye_prev = w.walker.eye();
+            self.eye_cur = self.eye_prev;
         }
         let axis = |plus: bool, minus: bool| plus as i32 as f32 - minus as i32 as f32;
         let walk = WalkInput {
@@ -194,11 +207,20 @@ impl Sim {
                 self.accumulator = 0.0;
                 break;
             }
+            let (before, teleports) = (w.walker.eye(), w.walker.teleports);
             w.walker.tick(&w.world, &walk);
+            self.eye_cur = w.walker.eye();
+            // A death or reset moved the player; do not slide the picture across the jump.
+            self.eye_prev = if w.walker.teleports != teleports { self.eye_cur } else { before };
             self.accumulator -= step;
             ticks += 1;
         }
-        self.camera.position = w.walker.eye();
+        self.camera.position = if self.interpolate {
+            let alpha = (self.accumulator / step).clamp(0.0, 1.0) as f32;
+            self.eye_prev.lerp(self.eye_cur, alpha)
+        } else {
+            self.eye_cur
+        };
     }
 }
 
@@ -444,5 +466,97 @@ mod tests {
         assert!((sim.camera.yaw - ARROW_TURN_RATE_DEG.to_radians()).abs() < 1e-4);
         sim.update(0.0, &InputState { mouse_delta: (100.0, 40.0), ..Default::default() });
         assert!((sim.camera.pitch + 40.0 * MOUSE_SENSITIVITY).abs() < 1e-6);
+    }
+
+    #[test]
+    fn interpolated_walking_moves_the_eye_smoothly_between_fixed_steps_and_off_it_is_exact() {
+        // 240 Hz frames over a 60 Hz simulation.
+        let input = held(|i| i.forward = true);
+        let run = |interpolate: bool| {
+            let mut sim = Sim::for_scene(&floor_scene(), None);
+            sim.interpolate = interpolate;
+            let mut z = Vec::new();
+            for _ in 0..360 {
+                sim.update(1.0 / 240.0, &input);
+                z.push(sim.camera.position.z);
+            }
+            z
+        };
+        let steady = |z: &[f32]| z[120..].windows(2).map(|p| p[1] - p[0]).collect::<Vec<f32>>();
+        let (smooth, stepped) = (steady(&run(true)), steady(&run(false)));
+        let mean = smooth.iter().sum::<f32>() / smooth.len() as f32;
+        assert!((mean - 2.5 / 240.0).abs() < 1e-4, "mean step {mean}");
+        for d in &smooth {
+            assert!((d - mean).abs() < 0.1 * mean, "interpolated step {d} against mean {mean}");
+        }
+        // Without it three frames in four do not move at all.
+        assert!(stepped.iter().filter(|d| **d == 0.0).count() > stepped.len() / 2);
+        // It lags the latest step by under one step, never leads it.
+        let mut a = Sim::for_scene(&floor_scene(), None);
+        a.interpolate = true;
+        let mut b = Sim::for_scene(&floor_scene(), None);
+        for _ in 0..240 {
+            a.update(1.0 / 240.0, &input);
+            b.update(1.0 / 240.0, &input);
+            assert!(a.camera.position.z <= b.camera.position.z + 1e-6);
+            assert!(b.camera.position.z - a.camera.position.z < 2.5 / 60.0 + 1e-4);
+        }
+        // No sliding across a reset.
+        a.walker_mut().unwrap().place_eye(Vec3::new(20.0, 30.0, 20.0));
+        a.update(1.0 / 240.0, &InputState::default());
+        a.update(1.0 / 240.0, &held(|i| i.reset = true));
+        assert_eq!(a.camera.position, a.walker().unwrap().eye());
+    }
+
+    #[test]
+    fn at_the_fixed_step_the_camera_is_exactly_the_walkers_eye_and_a_script_is_unchanged() {
+        let mut sim = Sim::for_scene(&floor_scene(), None);
+        assert!(!sim.interpolate);
+        let steps = [
+            (held(|i| i.forward = true), 40),
+            (held(|i| {
+                i.forward = true;
+                i.jump = true;
+            }), 5),
+            (held(|i| {
+                i.fast = true;
+                i.right = true;
+            }), 70),
+            (InputState::default(), 30),
+        ];
+        for (input, n) in &steps {
+            for _ in 0..*n {
+                sim.update(1.0 / 60.0, input);
+                let e = sim.walker().unwrap().eye();
+                assert_eq!(sim.camera.position.to_array().map(f32::to_bits), e.to_array().map(f32::to_bits));
+            }
+        }
+        // And with interpolation on, exact multiples of the step show the previous step, one behind.
+        let mut b = Sim::for_scene(&floor_scene(), None);
+        b.interpolate = true;
+        for (input, n) in &steps {
+            for _ in 0..*n {
+                b.update(1.0 / 60.0, input);
+            }
+        }
+        assert!((b.camera.position - sim.camera.position).length() < 0.11);
+    }
+
+    #[test]
+    fn a_held_space_jumps_once_and_a_second_press_jumps_again() {
+        let mut sim = Sim::for_scene(&floor_scene(), None);
+        frames(&mut sim, &InputState::default(), 30);
+        let mut takeoffs = 0;
+        let mut was = true;
+        for _ in 0..240 {
+            sim.update(1.0 / 60.0, &held(|i| i.jump = true));
+            let g = sim.walker().unwrap().grounded;
+            takeoffs += (was && !g) as u32;
+            was = g;
+        }
+        assert_eq!(takeoffs, 1);
+        frames(&mut sim, &InputState::default(), 2);
+        frames(&mut sim, &held(|i| i.jump = true), 2);
+        assert!(!sim.walker().unwrap().grounded);
     }
 }
