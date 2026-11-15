@@ -1,0 +1,11 @@
+[package]
+name = "mega_gen"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+bytemuck.workspace = true
+glam.workspace = true

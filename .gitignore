@@ -1,0 +1,6 @@
+target
+/out
+/captures
+*.png.tmp
+.DS_Store
+references/

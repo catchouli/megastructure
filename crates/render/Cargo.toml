@@ -1,0 +1,10 @@
+[package]
+name = "mega_render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mega_gen.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true

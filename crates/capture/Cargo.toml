@@ -1,0 +1,19 @@
+[package]
+name = "mega_capture"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "mega_capture"
+path = "src/main.rs"
+
+[dependencies]
+mega_gen.workspace = true
+mega_render.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+pollster.workspace = true
+image.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
