@@ -4,3 +4,4 @@ target
 *.png.tmp
 .DS_Store
 references/
+/compare
