@@ -46,7 +46,7 @@ action  = forward | back | left | right | up | down | fast
 
 Segments run in sequence; `+` holds several actions at once (`forward+look_left:1.5`). `idle` holds nothing and cannot be combined. `seconds` is a non-negative number. Whitespace around tokens is ignored. After the script ends the input is idle for any remaining frames.
 
-Durations are converted to frames by rounding the cumulative time over `dt`, so whole-second segments at 1/60 s are exactly 60 frames each. The actions are the keyboard's: `forward`/`back`/`left`/`right` are W S A D, `up`/`down` Space and Ctrl, `fast` Shift, and the four `look_*` the arrow keys. Moves are in the facing direction at the base speed (8 m/s, five times that with `fast`); looks turn at 90 degrees per second. `look_right` decreases yaw, since yaw 0 faces +Z and positive yaw turns towards +X.
+Durations are converted to frames by rounding the cumulative time over `dt`, so whole-second segments at 1/60 s are exactly 60 frames each. The actions are the keyboard's: `forward`/`back`/`left`/`right` are W S A D, `up`/`down` E or Space and Q or Ctrl, `fast` Shift, and the four `look_*` the arrow keys. Moves are in the facing direction at the base speed (8 m/s, five times that with `fast`); looks turn at 90 degrees per second. `look_right` decreases yaw, since yaw 0 faces +Z and positive yaw turns towards +X.
 
 ### What it prints
 

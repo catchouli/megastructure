@@ -127,8 +127,8 @@ impl<'a> App<'a> {
             back: down(KeyCode::KeyS),
             left: down(KeyCode::KeyA),
             right: down(KeyCode::KeyD),
-            up: down(KeyCode::Space),
-            down: down(KeyCode::ControlLeft) || down(KeyCode::ControlRight),
+            up: down(KeyCode::Space) || down(KeyCode::KeyE),
+            down: down(KeyCode::ControlLeft) || down(KeyCode::ControlRight) || down(KeyCode::KeyQ),
             fast: down(KeyCode::ShiftLeft) || down(KeyCode::ShiftRight),
             look_left: down(KeyCode::ArrowLeft),
             look_right: down(KeyCode::ArrowRight),
@@ -169,7 +169,7 @@ impl<'a> App<'a> {
                 ui.label(format!("frame {ms:.2} ms ({:.0} fps)", 1000.0 / ms.max(0.001)));
                 ui.label(format!("pos {:.1} {:.1} {:.1}", cam.position.x, cam.position.y, cam.position.z));
                 ui.label(format!("yaw {:.0} pitch {:.0}  speed {speed:.1} m/s", cam.yaw.to_degrees(), cam.pitch.to_degrees()));
-                ui.label("WASD Space Ctrl Shift, arrows: turn, scroll: speed, Tab: grab, Esc: quit");
+                ui.label("WASD, E/Q or Space/Ctrl: up/down, Shift: fast, arrows: turn, scroll: speed, Tab: grab, Esc: quit");
             });
         });
         g.egui_state.handle_platform_output(&g.window, out.platform_output);
