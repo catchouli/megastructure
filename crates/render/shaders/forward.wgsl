@@ -182,7 +182,10 @@ fn fs_main(in: VsOut) -> FsOut {
         lod2 = 0.0;
     }
 
-    let light = S.light.x * G.sun_params.y * max(dot(n, sun_dir(p)), 0.0) + S.light.y * in.ao;
+    // With no shadow pass, the sun term is scaled by the baked ao by S.bands.w (0 for the
+    // test scene, 1 in deep spaces), so sunlight does not reach the bottom of a shaft.
+    let sun_vis = mix(1.0, in.ao, S.bands.w);
+    let light = S.light.x * G.sun_params.y * max(dot(n, sun_dir(p)), 0.0) * sun_vis + S.light.y * in.ao;
     let edge = max(fwidth(light), 0.004);
 
     let h1 = hatch_layer(LayerIn(u1, u2, g1, g2, lod1, 0x68e31da4u, light, S.bands.x, S.bands.z, edge, 1.0, 1.0));

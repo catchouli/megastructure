@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress, 2026-11-15. Milestone M0 frame working on the test scene: forward MRT pass with ruled hatching and tone bands, stroke pass, contour pass with its own anti-aliasing resolve, composite with atmosphere, nine debug views. Black-and-white `nihei` preset only. Not yet built: shadow maps, sky, light shafts, screentone, the compute cull prepass, world-keyed contour wobble, colour presets.
+In progress, 2026-11-15. Milestone M0 frame working on the test scene: forward MRT pass with ruled hatching and tone bands, stroke pass, contour pass with its own anti-aliasing resolve, composite with atmosphere, nine debug views. Black-and-white presets `nihei` (test scene) and `nihei_vast` (the One Shaft, M1; see `one-shaft.md`). Not yet built: shadow maps, sky, light shafts, screentone, the compute cull prepass, world-keyed contour wobble, colour presets.
 
 ## What it is
 
@@ -50,13 +50,13 @@ All are recreated on `resize`. Only the composite writes to the caller's target,
 ### Light and bands
 
 ```
-L = sun_strength * intensity * max(N . S, 0) + ambient * ao
+L = sun_strength * intensity * max(N . S, 0) * mix(1, ao, sun_occlusion) + ambient * ao
 S = normalize(sun_position - P)     (positioned sun)
 S = sun_direction                   (beyond 1e5 m from the camera)
 band = 0 if L >= band_hatch, 1 if >= band_cross, 2 if >= band_black, else 3
 ```
 
-No shadow term yet. The sun uniform already carries position, radius and intensity (`Sun` in `renderer.rs`, set with `Renderer::set_sun`), with the switch to a pure direction done on the CPU when the sun is farther than `Sun::DIRECTIONAL_DISTANCE`. The default sun is remote, about 32 degrees up, direction `(0.6, 0.53, -0.6)`.
+No shadow term yet. `sun_occlusion` (0 in `nihei`, 1 in `nihei_vast`) scales the sun term by the baked ao, the only thing that keeps sunlight off the bottom of a 600 m shaft without shadows (E010). Packed in `bands.w`. The sun uniform already carries position, radius and intensity (`Sun` in `renderer.rs`, set with `Renderer::set_sun`), with the switch to a pure direction done on the CPU when the sun is farther than `Sun::DIRECTIONAL_DISTANCE`. The default sun is remote, about 32 degrees up, direction `(0.6, 0.53, -0.6)`.
 
 ### Ruled hatching
 
@@ -135,13 +135,14 @@ Contour resolve: the 3x3 structure tensor of the mask gradient gives the line or
 ```
 dist  = euclidean distance from the camera (from depth and the pixel ray, so it does not change as the view turns)
 f     = fog_max * (1 - exp(-max(dist - fog_start, 0) * fog_density))      (fog_max for background)
-base  = mix(paper, fog_colour, f)
+fog   = mix(fog_colour, ink, saturate(fog_ao * (1 - ao)))                (ao = 1 for background)
+base  = mix(paper, fog, f)
 c     = mix(base, ink, ink.R * (1 - f))
 c     = mix(c, paper, ink.G * (1 - f))
 c    *= 1 + (hash(pixel) - 0.5) * paper_grain
 ```
 
-The fill target's palette index and band are written but not yet used by the final view; the band is shown by the `bands` debug view. A colour preset would look the palette index up here.
+The fog takes the light level of the surface behind it: `fog_ao` (0 in `nihei`, 1.5 in `nihei_vast`, packed in `fog.w`) darkens it where the baked ao is low, so an abyss fades to dark grey rather than to paper (E008). The fill target's palette index and band are written but not yet used by the final view; the band is shown by the `bands` debug view. A colour preset would look the palette index up here.
 
 ### Pixel scale
 
@@ -158,8 +159,10 @@ Pixel-sized preset values are for a 720-pixel-high image and are multiplied by `
 | `fog_start` | 25 m | Fade starts |
 | `fog_density` | 0.006 /m | Exponential density past the start |
 | `fog_max` | 0.85 | Largest fade |
+| `fog_ao` | 0 | Fog darkening towards ink by `1 - ao` |
 | `sun_strength` | 0.5 | Weight of the sun term |
 | `ambient` | 0.5 | Weight of `ao` |
+| `sun_occlusion` | 0 | Sun term scaled by `mix(1, ao, x)` |
 | `band_hatch` | 0.62 | Light below this is hatched |
 | `band_cross` | 0.45 | Below this, crosshatched |
 | `band_black` | 0.30 | Below this, solid black |
@@ -198,6 +201,26 @@ Pixel-sized preset values are for a 720-pixel-high image and are multiplied by `
 | `contour_fade_start` | 150 m | Contours start fading |
 | `contour_fade_end` | 400 m | Contours gone |
 
+### The `nihei_vast` preset
+
+`StylePreset::nihei_vast()` is `nihei` with these changes, for spaces hundreds of metres deep. `StylePreset::for_scene("shaft")` returns it; `by_name` and `NAMES` list both presets.
+
+| Field | nihei_vast | Why |
+|---|---|---|
+| `fog_start`, `fog_density`, `fog_max` | 40 m, 0.0026 /m, 0.8 | Structure 300 to 600 m away must stay legible (about 60% faded at 600 m) |
+| `fog_ao` | 1.5 | The abyss fades to dark, not to paper |
+| `ambient` | 0.75 | Walls near the rim can reach white; tone comes from baked openness |
+| `sun_strength` | 0.4 | |
+| `sun_occlusion` | 1 | No sunlit floors at the bottom of the shaft |
+| `band_cross` | 0.36 | Crosshatch only in a narrow band above black: on walls seen at grazing angles up or down the shaft it read as a grid. Darkness comes from vertical rules thickening into black, as in the references |
+| `hatch_width_gain` | 1.0 | Idem |
+| `rank_fade_start` | 500, 140, 40, 16 m | |
+| `rank_fade_end` | 900, 260, 80, 32 m | Rank 0 (massing, bridge decks, shaft corners) draws the whole 600 m; panel seams are gone by 80 m |
+| `rank_min_len_px` | 3, 5, 8, 12 px | |
+| `contour_fade_start`, `contour_fade_end` | 220 m, 650 m | Coarse-id contours outline elements all the way down the shaft |
+
+See E008 for the comparison with `nihei` on the shaft.
+
 ### Debug views
 
 Selected with `Renderer::set_view(DebugView)` or `mega_capture --view <name>`.
@@ -228,7 +251,7 @@ Temporal stability (`--metrics`, 40 frames over a slow stretch of each path; blu
 
 ### Files
 
-- `crates/render/src/style.rs`: `StylePreset`, `nihei()`, GPU packing.
+- `crates/render/src/style.rs`: `StylePreset`, `nihei()`, `nihei_vast()`, `for_scene`, `by_name`, GPU packing.
 - `crates/render/src/renderer.rs`: targets, pipelines, CPU stroke cull, `DebugView`, `Sun`, `HatchLod`, `StrokeVisibility`.
 - `crates/render/shaders/common.wgsl`: uniforms, hashes, noise, filtered coverage, octahedral encoding, fullscreen triangle. Prepended to every pass.
 - `crates/render/shaders/forward.wgsl`, `strokes.wgsl`, `contours.wgsl`, `contour_resolve.wgsl`, `composite.wgsl`: the passes.
@@ -236,13 +259,26 @@ Temporal stability (`--metrics`, 40 frames over a slow stretch of each path; blu
 
 ## Open questions
 
-- Tone band edges follow per-vertex AO interpolated over 3 to 4 m panels, so they are visibly polygonal (see the `bands` view). Finer AO, AO from the generator per element, or a smooth screen-space term may be needed.
+- Tone band edges followed per-vertex AO interpolated over 3 to 4 m panels. For generated scenes the kit now tessellates faces to 1.5 to 2 m and bakes a smooth AO (E009, `kit-of-parts.md`); the test scene is unchanged. Parts narrower than the tessellation still cannot occlude cleanly.
+- Without shadows, `sun_occlusion` and `fog_ao` are stand-ins that read the baked ao. A shadow pass would replace the first and could feed the second.
 - Whether the hatch octave crossfade should be eased (it is linear) after watching video at 60 fps; the metrics do not show octave banding.
 - Hatching on large lit-from-nowhere interiors reads as graph paper when the floor is lit and panelled; this is a scene and shadow question more than a renderer one, to revisit with shadows.
 - Contour depth edges at silhouettes are one pixel and binary before the resolve; in orbiting views they are the least stable contribution (0.75% of compared pixels off by more than 64 levels). A sub-pixel silhouette estimate from the depth planes would help.
 - World-keyed contour wobble (planned) is not implemented.
 - The compute cull prepass should write the `visible` list and indirect arguments; nothing in the stroke shader needs to change.
 
+### Review notes, 2026-11-15 (Cat, from the windowed test scene)
+
+- Liked: the crosshatching, especially where it gathers in corners as ambient occlusion would.
+- Disliked: the image is plain overall, and has the look that comics converted to 3D tend to have.
+- Working diagnosis of that look, to be tested as experiments with side-by-side sheets in `compare/`:
+  1. Every surface gets equal treatment; a draughtsman draws detail in patches and leaves the rest blank.
+  2. Lines are too correct: straight, meeting exactly at corners, uniform in weight.
+  3. Tone boundaries sit where a renderer puts them; in the references blacks are placed as shapes.
+  4. The crosshatch is an exact 90 degree mesh.
+  5. Lines glide with perfect coherence in motion.
+- Seen by accident and liked: from outside the test scene, back-face culling removes the walls but seam strokes still draw, giving a coarse grid you can see through. A candidate for a deliberate cutaway in the exterior view.
+
 ## Related experiments
 
-E001 (temporal metric), E002 (hatch octave selection), E003 (stroke depth tolerance), E004 (distance behaviour of lines), E005 (contour anti-aliasing), E006 (tent versus box coverage), E007 (tone and lighting for the test scene).
+E001 (temporal metric), E002 (hatch octave selection), E003 (stroke depth tolerance), E004 (distance behaviour of lines), E005 (contour anti-aliasing), E006 (tent versus box coverage), E007 (tone and lighting for the test scene), E008 (distance on the 600 m shaft), E010 (tone and light for the shaft).

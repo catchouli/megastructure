@@ -25,9 +25,9 @@ struct Style {
     paper: vec4<f32>,           // rgb, a: grain
     ink: vec4<f32>,             // rgb
     fog_colour: vec4<f32>,      // rgb
-    fog: vec4<f32>,             // start, density, max
+    fog: vec4<f32>,             // start, density, max, darkening by (1 - ao)
     light: vec4<f32>,           // sun strength, ambient, band jitter, band jitter length
-    bands: vec4<f32>,           // hatch below, cross below, black below
+    bands: vec4<f32>,           // hatch below, cross below, black below, sun occlusion by ao
     cross: vec4<f32>,           // crosshatch pitch scale, width scale
     hatch: vec4<f32>,           // spacing (m), target pitch (px), line width (px), width jitter
     hatch2: vec4<f32>,          // break length (m), gap fraction, max octave, width gain

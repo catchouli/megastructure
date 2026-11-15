@@ -27,8 +27,10 @@ Constants that other systems depend on (for example, movement limits the generat
 | Capture tool | `features/capture-tool.md` | Working |
 | Headless mode | `features/headless-mode.md` | Working |
 | Ink renderer | `features/ink-renderer.md` | In progress (M0 frame working) |
+| Kit of parts | `features/kit-of-parts.md` | In progress (M1 kit) |
+| One Shaft | `features/one-shaft.md` | Working (M1 scene) |
 
-Still to be split out of `PLAN.md` when work starts: kit of parts, space graph, layout, decay, streaming and LOD.
+Still to be split out of `PLAN.md` when work starts: space graph, layout, decay, streaming and LOD.
 
 ## Testing without a window
 

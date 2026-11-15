@@ -1,6 +1,6 @@
 //! Helpers shared by the test scene and (later) the real generator.
 
-use crate::mesh::{MeshData, Stroke, StrokeKind, Vertex};
+use crate::mesh::{Collider, MeshData, Stroke, StrokeKind, Vertex};
 use glam::Vec3;
 
 /// Ambient occlusion lookup: world position and face normal to a 0..1 value.
@@ -71,6 +71,8 @@ fn splitmix(mut x: u64) -> u32 {
 #[derive(Default)]
 pub struct MeshBuilder {
     pub mesh: MeshData,
+    /// Solids for the walking controller, emitted by the same element code as the faces.
+    pub colliders: Vec<Collider>,
     next_fine: u32,
     next_coarse: u32,
 }
@@ -78,7 +80,7 @@ pub struct MeshBuilder {
 impl MeshBuilder {
     pub fn new() -> Self {
         // Id 0 is reserved for "nothing" (sky, background), so ids start at 1.
-        Self { mesh: MeshData::default(), next_fine: 1, next_coarse: 1 }
+        Self { mesh: MeshData::default(), colliders: Vec::new(), next_fine: 1, next_coarse: 1 }
     }
 
     pub fn finish(self) -> MeshData {
@@ -92,7 +94,8 @@ impl MeshBuilder {
         id
     }
 
-    fn new_fine(&mut self) -> u32 {
+    /// A fresh fine id (one per panel). Faces of one panel must be emitted consecutively.
+    pub fn new_fine(&mut self) -> u32 {
         let id = self.next_fine;
         self.next_fine += 1;
         id
@@ -251,5 +254,147 @@ impl MeshBuilder {
 
     pub fn seam(&mut self, a: Vec3, b: Vec3, n: Vec3) {
         self.stroke(a, b, n, n, StrokeKind::Seam, 2);
+    }
+}
+
+/// Grid lines from 0 to `len`: every multiple of `step` plus the given breaks, sorted, with
+/// near-duplicates (closer than 1 mm) merged. Always starts at 0 and ends at `len`.
+pub fn grid_lines(len: f32, step: f32, breaks: &[f32]) -> Vec<f32> {
+    let mut v: Vec<f32> = Vec::new();
+    if step.is_finite() && step > 0.0 {
+        let n = (len / step).floor() as usize;
+        for k in 0..=n {
+            v.push(k as f32 * step);
+        }
+    } else {
+        v.push(0.0);
+    }
+    v.push(len);
+    v.extend(breaks.iter().copied().filter(|&b| b > 0.0 && b < len));
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut out: Vec<f32> = Vec::with_capacity(v.len());
+    for x in v {
+        match out.last() {
+            Some(&l) if x - l < 1e-3 => {
+                // Keep the exact end value.
+                if (x - len).abs() < 1e-6 {
+                    *out.last_mut().unwrap() = len;
+                }
+            }
+            _ => out.push(x),
+        }
+    }
+    out
+}
+
+impl MeshBuilder {
+    /// Begin the faces of one panel: a fresh fine id.
+    pub fn panel(&mut self) -> u32 {
+        self.new_fine()
+    }
+
+    /// Emit the rectangle `origin + s*u + t*v` (s, t in 0..1) as a grid of shared-vertex
+    /// quads cut at the given grid lines (metres along `u` and `v`, as from [`grid_lines`]),
+    /// with fine id `fine`. AO is set to 1; call [`MeshBuilder::bake_ao`] once the scene is
+    /// complete. `hatch` is projected into the face. The caller must emit all faces of one
+    /// fine id consecutively.
+    #[allow(clippy::too_many_arguments)]
+    pub fn grid_face(&mut self, origin: Vec3, u_dir: Vec3, v_dir: Vec3, us: &[f32], vs: &[f32], normal: Vec3, hatch: Vec3, fine: u32, coarse: u32) {
+        let normal = normal.normalize();
+        let hatch = (hatch - normal * normal.dot(hatch)).normalize();
+        let base = self.mesh.vertices.len() as u32;
+        let nu = us.len();
+        for &t in vs {
+            for &s in us {
+                let p = origin + u_dir * s + v_dir * t;
+                self.mesh.vertices.push(Vertex {
+                    position: p.to_array(),
+                    normal: normal.to_array(),
+                    hatch_axis: hatch.to_array(),
+                    id_fine: fine,
+                    id_coarse: coarse,
+                    ao: 1.0,
+                });
+            }
+        }
+        let flip = u_dir.cross(v_dir).dot(normal) < 0.0;
+        for j in 0..vs.len() - 1 {
+            for i in 0..nu - 1 {
+                let a = base + (j * nu + i) as u32;
+                let b = a + 1;
+                let c = a + nu as u32 + 1;
+                let d = a + nu as u32;
+                if flip {
+                    self.mesh.indices.extend_from_slice(&[a, c, b, a, d, c]);
+                } else {
+                    self.mesh.indices.extend_from_slice(&[a, b, c, a, c, d]);
+                }
+            }
+        }
+    }
+
+    /// A planar rectangle `origin + s*u + t*v` tessellated into cells of at most `step`
+    /// metres, as one panel with its own fine id. Returns the fine id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rect(&mut self, origin: Vec3, u: Vec3, v: Vec3, normal: Vec3, hatch: Vec3, step: f32, coarse: u32) -> u32 {
+        let (lu, lv) = (u.length(), v.length());
+        let fine = self.panel();
+        let us = grid_lines(lu, step.min(lu), &[]);
+        let vs = grid_lines(lv, step.min(lv), &[]);
+        self.grid_face(origin, u / lu, v / lv, &us, &vs, normal, hatch, fine, coarse);
+        fine
+    }
+
+    /// A planar polygon fan (convex, given in order) with its own fine id and ao 1. For
+    /// small shapes that need no tessellation (step sides, arch spandrel slivers).
+    pub fn polygon(&mut self, corners: &[Vec3], normal: Vec3, hatch: Vec3, fine: u32, coarse: u32) {
+        let normal = normal.normalize();
+        let hatch = (hatch - normal * normal.dot(hatch)).normalize();
+        let geo = (corners[1] - corners[0]).cross(corners[corners.len() - 1] - corners[0]);
+        let flip = geo.dot(normal) < 0.0;
+        let base = self.mesh.vertices.len() as u32;
+        let mut ordered: Vec<Vec3> = corners.to_vec();
+        if flip {
+            ordered[1..].reverse();
+        }
+        for p in &ordered {
+            self.mesh.vertices.push(Vertex {
+                position: p.to_array(),
+                normal: normal.to_array(),
+                hatch_axis: hatch.to_array(),
+                id_fine: fine,
+                id_coarse: coarse,
+                ao: 1.0,
+            });
+        }
+        for i in 1..ordered.len() as u32 - 1 {
+            self.mesh.indices.extend_from_slice(&[base, base + i, base + i + 1]);
+        }
+    }
+
+    pub fn collider(&mut self, c: Collider) {
+        self.colliders.push(c);
+    }
+
+    /// Replace every vertex's ao by `f(position, normal)`, clamped to 0..1. Runs on all
+    /// cores; the result does not depend on the thread count.
+    pub fn bake_ao(&mut self, f: &(dyn Fn(Vec3, Vec3) -> f32 + Sync)) {
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
+        let verts = &mut self.mesh.vertices;
+        let chunk = verts.len().div_ceil(threads).max(1);
+        std::thread::scope(|s| {
+            for part in verts.chunks_mut(chunk) {
+                s.spawn(move || {
+                    for v in part {
+                        v.ao = f(Vec3::from(v.position), Vec3::from(v.normal)).clamp(0.0, 1.0);
+                    }
+                });
+            }
+        });
+    }
+
+    /// The finished mesh and collider list.
+    pub fn finish_with_colliders(self) -> (MeshData, Vec<Collider>) {
+        (self.mesh, self.colliders)
     }
 }

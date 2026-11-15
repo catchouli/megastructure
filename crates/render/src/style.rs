@@ -29,12 +29,19 @@ pub struct StylePreset {
     pub fog_density: f32,
     /// Largest fade factor (1 erases distant structure completely).
     pub fog_max: f32,
+    /// How far the fog colour darkens towards ink where the surface behind it is
+    /// occluded: the fog takes `mix(fog_colour, ink, fog_ao * (1 - ao))`. Air deep in a shaft
+    /// is not lit, so an abyss fades to dark rather than to paper. Sky is unaffected.
+    pub fog_ao: f32,
 
     // Light and tone bands.
     /// Weight of the sun term `intensity * max(N.L, 0)` in the light value.
     pub sun_strength: f32,
     /// Weight of the ambient term `ao` in the light value.
     pub ambient: f32,
+    /// How much the sun term is scaled by the baked `ao` (0: not at all, 1: fully). With no
+    /// shadow pass this is the only thing keeping sunlight off the bottom of a deep shaft.
+    pub sun_occlusion: f32,
     /// Light below this is hatched (one layer).
     pub band_hatch: f32,
     /// Light below this is crosshatched (two layers).
@@ -136,9 +143,11 @@ impl StylePreset {
             fog_start: 25.0,
             fog_density: 0.006,
             fog_max: 0.85,
+            fog_ao: 0.0,
 
             sun_strength: 0.5,
             ambient: 0.5,
+            sun_occlusion: 0.0,
             band_hatch: 0.62,
             band_cross: 0.45,
             band_black: 0.3,
@@ -188,9 +197,9 @@ impl StylePreset {
             paper: v3(self.paper, self.paper_grain),
             ink: v3(self.ink, 0.0),
             fog_colour: v3(self.fog_colour, 0.0),
-            fog: [self.fog_start, self.fog_density, self.fog_max, 0.0],
+            fog: [self.fog_start, self.fog_density, self.fog_max, self.fog_ao],
             light: [self.sun_strength, self.ambient, self.band_jitter, self.band_jitter_len],
-            bands: [self.band_hatch, self.band_cross, self.band_black, 0.0],
+            bands: [self.band_hatch, self.band_cross, self.band_black, self.sun_occlusion],
             cross: [self.cross_pitch_scale, self.cross_width_scale, 0.0, 0.0],
             hatch: [self.hatch_spacing, self.hatch_target_px, self.hatch_line_px, self.hatch_width_jitter],
             hatch2: [self.hatch_break_len, self.hatch_break_gap, self.hatch_max_octave, self.hatch_width_gain],
@@ -202,6 +211,51 @@ impl StylePreset {
             rank_min_len: self.rank_min_len_px,
             contour: [self.contour_fine_near, self.contour_fine_far, self.contour_depth_k, self.contour_nv_min],
             contour2: [self.contour_strength, self.contour_fade_start, self.contour_fade_end, self.contour_fine_strength],
+        }
+    }
+}
+
+impl StylePreset {
+    /// `nihei` tuned for spaces hundreds of metres deep (the One Shaft): thinner atmosphere,
+    /// rank cut-offs and contour fades pushed out so that the largest forms still draw at
+    /// 600 m while panel-scale lines are gone by 100 m, and the sun scaled by baked openness.
+    /// See docs/features/one-shaft.md and experiment E008.
+    pub fn nihei_vast() -> Self {
+        Self {
+            fog_start: 40.0,
+            fog_density: 0.0026,
+            fog_max: 0.8,
+            fog_ao: 1.5,
+            ambient: 0.75,
+            sun_strength: 0.4,
+            sun_occlusion: 1.0,
+            band_cross: 0.36,
+            hatch_width_gain: 1.0,
+            rank_fade_start: [500.0, 140.0, 40.0, 16.0],
+            rank_fade_end: [900.0, 260.0, 80.0, 32.0],
+            rank_min_len_px: [3.0, 5.0, 8.0, 12.0],
+            contour_fade_start: 220.0,
+            contour_fade_end: 650.0,
+            ..Self::nihei()
+        }
+    }
+
+    /// Preset names accepted by [`StylePreset::by_name`].
+    pub const NAMES: &'static [&'static str] = &["nihei", "nihei_vast"];
+
+    pub fn by_name(name: &str) -> Option<Self> {
+        match name {
+            "nihei" => Some(Self::nihei()),
+            "nihei_vast" => Some(Self::nihei_vast()),
+            _ => None,
+        }
+    }
+
+    /// The preset a named scene is tuned for (`nihei` for anything unknown).
+    pub fn for_scene(scene: &str) -> Self {
+        match scene {
+            "shaft" => Self::nihei_vast(),
+            _ => Self::nihei(),
         }
     }
 }

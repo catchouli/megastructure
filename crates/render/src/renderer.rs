@@ -151,6 +151,21 @@ pub struct Sun {
 impl Sun {
     /// Beyond this distance from the camera the sun is treated as a direction.
     pub const DIRECTIONAL_DISTANCE: f32 = 1.0e5;
+
+    /// A remote sun in the direction `dir` (towards the sun).
+    pub fn remote(dir: Vec3) -> Self {
+        Self { position: dir.normalize() * 1.5e11, ..Self::default() }
+    }
+
+    /// The sun a named scene is lit for (the default for anything unknown). The shaft has a
+    /// high sun from the west, so the blank east wall is the lit one and the stair crosses
+    /// it as a dark line.
+    pub fn for_scene(scene: &str) -> Self {
+        match scene {
+            "shaft" => Self::remote(Vec3::new(-0.55, 0.8, -0.2)),
+            _ => Self::default(),
+        }
+    }
 }
 
 impl Default for Sun {

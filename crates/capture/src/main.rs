@@ -1,9 +1,9 @@
-//! Headless renderer: draws a named camera path of the test scene to PNG frames.
+//! Headless renderer: draws a named camera path of a scene to PNG frames.
 //!
 //! See docs/features/capture-tool.md.
 
 use anyhow::{anyhow, bail, Context, Result};
-use mega_render::{paths, DebugView, HatchLod, Renderer, StrokeVisibility, StylePreset};
+use mega_render::{paths, DebugView, HatchLod, Renderer, StrokeVisibility, StylePreset, Sun};
 use std::time::Instant;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +12,7 @@ use std::sync::Arc;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 const USAGE: &str = "\
-mega_capture: render a camera path of the test scene to PNG frames, no window.
+mega_capture: render a camera path of a scene to PNG frames, no window.
 
 USAGE:
     mega_capture --path <name> --out <dir> [--frames N] [--width W] [--height H] [--t T]
@@ -21,6 +21,9 @@ USAGE:
 
 OPTIONS:
     --path <name>    camera path (see --list-paths)                    [required]
+    --scene <name>   scene to render (see --list-scenes). Default: the scene the path
+                     is tuned to, or mega_gen::scenes::DEFAULT for a path without one.
+                     The scene also selects its style preset and sun.
     --out <dir>      output directory, created if missing             [required]
     --frames <N>     number of frames, default 1. Frame i uses t = i/(N-1)
     --t <T>          t in 0..1 for a single frame (only with --frames 1), default 0.5
@@ -42,15 +45,21 @@ OPTIONS:
     --bench <N>      render one frame N times without readback and print ms per frame
     --width <W>      image width in pixels, default 1280
     --height <H>     image height in pixels, default 720
-    --list-paths     print the available path names and exit
+    --list-paths     print the available path names (with their scenes) and exit
+    --list-scenes    print the available scene names and exit
+    --preset <name>  style preset instead of the scene's own: nihei, nihei_vast
     -h, --help       print this help
 
 With --frames N, frame i uses t = t0 + (t1 - t0) * i / (N - 1).
 Files are written as frame_0000.png, frame_0001.png, ...
+A line 'scene <name>: ...' with vertex, triangle, stroke and collider counts and the scene
+build time is printed first.
 Set RUST_LOG=info for adapter details.";
 
 struct Args {
     path: String,
+    scene: String,
+    preset: Option<StylePreset>,
     out: Option<PathBuf>,
     frames: u32,
     t: Option<f32>,
@@ -74,6 +83,8 @@ fn parse_args() -> Result<Option<Args>> {
     let (mut t0, mut t1, mut view, mut metrics, mut png, mut bench) = (0.0f32, 1.0f32, DebugView::Final, false, true, None);
     let (mut error_png, mut hatch_lod) = (false, HatchLod::Directional);
     let (mut stroke_vis, mut depth_tol) = (StrokeVisibility::CentrelineBlock, None);
+    let mut scene: Option<String> = None;
+    let mut preset: Option<StylePreset> = None;
     fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
         it.next().ok_or_else(|| anyhow!("{flag} needs a value"))
     }
@@ -88,9 +99,20 @@ fn parse_args() -> Result<Option<Args>> {
             }
             "--list-paths" => {
                 for n in paths::NAMES {
+                    println!("{n} ({})", paths::scene_of(n).unwrap_or(mega_gen::scenes::DEFAULT));
+                }
+                return Ok(None);
+            }
+            "--list-scenes" => {
+                for n in mega_gen::scenes::NAMES {
                     println!("{n}");
                 }
                 return Ok(None);
+            }
+            "--scene" => scene = Some(value(&mut it, &a)?),
+            "--preset" => {
+                let v = value(&mut it, &a)?;
+                preset = Some(StylePreset::by_name(&v).ok_or_else(|| anyhow!("unknown preset '{v}'; available: {}", StylePreset::NAMES.join(", ")))?);
             }
             "--path" => path = Some(value(&mut it, &a)?),
             "--out" => out = Some(PathBuf::from(value(&mut it, &a)?)),
@@ -136,6 +158,15 @@ fn parse_args() -> Result<Option<Args>> {
     if paths::by_name(&path).is_none() {
         bail!("unknown path '{path}'; available: {}", paths::NAMES.join(", "));
     }
+    let scene = scene.unwrap_or_else(|| paths::scene_of(&path).unwrap_or(mega_gen::scenes::DEFAULT).to_string());
+    if !mega_gen::scenes::NAMES.contains(&scene.as_str()) {
+        bail!("unknown scene '{scene}'; available: {}", mega_gen::scenes::NAMES.join(", "));
+    }
+    if let Some(own) = paths::scene_of(&path) {
+        if own != scene {
+            eprintln!("mega_capture: warning: path '{path}' is tuned to scene '{own}', rendering it in '{scene}'");
+        }
+    }
     if frames == 0 {
         bail!("--frames must be at least 1");
     }
@@ -150,7 +181,7 @@ fn parse_args() -> Result<Option<Args>> {
             bail!("--t must be within 0..1, got {t}");
         }
     }
-    Ok(Some(Args { path, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol }))
+    Ok(Some(Args { path, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol }))
 }
 
 fn main() {
@@ -204,8 +235,20 @@ fn run() -> Result<()> {
 
     let (w, h) = (args.width, args.height);
     let mut renderer = Renderer::new(device.clone(), queue.clone(), FORMAT, w, h);
-    let scene = mega_gen::test_scene::build();
-    renderer.upload_scene(&scene);
+    let built = Instant::now();
+    let scene = mega_gen::scenes::by_name(&args.scene).expect("validated in parse_args");
+    let build_ms = built.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "scene {}: {} vertices, {} triangles, {} strokes, {} colliders, built in {build_ms:.0} ms",
+        args.scene,
+        scene.mesh.vertices.len(),
+        scene.mesh.indices.len() / 3,
+        scene.mesh.strokes.len(),
+        scene.colliders.len()
+    );
+    renderer.upload_scene(&scene.mesh);
+    renderer.set_preset(args.preset.clone().unwrap_or_else(|| StylePreset::for_scene(&args.scene)));
+    renderer.set_sun(Sun::for_scene(&args.scene));
     renderer.set_view(args.view);
     renderer.set_hatch_lod(args.hatch_lod);
     renderer.set_stroke_visibility(args.stroke_vis);

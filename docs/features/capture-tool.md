@@ -2,11 +2,11 @@
 
 ## Status
 
-Working, 2026-11-15. Renders the hand-built test scene through the ink renderer (`ink-renderer.md`), with debug views, a reprojection-based temporal stability metric and a frame-time benchmark.
+Working, 2026-11-15. Renders any registered scene (`test`, `shaft`) through the ink renderer (`ink-renderer.md`), with debug views, a reprojection-based temporal stability metric and a frame-time benchmark.
 
 ## What it is
 
-`mega_capture` is a headless command-line renderer. It draws a named camera path of the test scene offscreen with wgpu and writes PNG frames. It is how renderer changes are checked without a window, by people, agents and tests.
+`mega_capture` is a headless command-line renderer. It draws a named camera path of a named scene offscreen with wgpu and writes PNG frames. It is how renderer changes are checked without a window, by people, agents and tests.
 
 ## Design
 
@@ -22,6 +22,8 @@ Run from the workspace root: `cargo run --release -p mega_capture -- <options>`.
 | Option | Meaning | Default |
 |---|---|---|
 | `--path <name>` | Camera path, required | |
+| `--scene <name>` | Scene from `mega_gen::scenes::NAMES`. The scene also selects its style preset (`StylePreset::for_scene`) and sun (`Sun::for_scene`). A path tuned to another scene renders with a warning | the path's own scene (`paths::scene_of`), else `mega_gen::scenes::DEFAULT` |
+| `--preset <name>` | Style preset instead of the scene's: `nihei`, `nihei_vast` | the scene's |
 | `--out <dir>` | Output directory, created if missing, required | |
 | `--frames <N>` | Number of frames. Frame `i` uses `t = i / (N - 1)` | 1 |
 | `--t <T>` | `t` in 0..1; only valid with `--frames 1` | 0.5 |
@@ -35,9 +37,10 @@ Run from the workspace root: `cargo run --release -p mega_capture -- <options>`.
 | `--hatch-lod <m>` | Diagnostic: `directional` (default), `isotropic`, `fixed` (E002) | |
 | `--stroke-vis <m>` | Diagnostic: `block` (default), `centreline`, `pixel` (E003) | |
 | `--depth-tol <x>` | Override the preset's stroke depth tolerance | |
-| `--list-paths` | Print path names and exit | |
+| `--list-paths` | Print path names with their scenes and exit | |
+| `--list-scenes` | Print scene names and exit | |
 
-Files are named `frame_0000.png`, `frame_0001.png` and so on; each written path is printed to stdout. `RUST_LOG=info` prints the adapter.
+Before rendering, one line `scene <name>: V vertices, T triangles, S strokes, C colliders, built in N ms` is printed (the build time covers `scenes::by_name`). Files are named `frame_0000.png`, `frame_0001.png` and so on; each written path is printed to stdout. `RUST_LOG=info` prints the adapter.
 
 Example: `mega_capture --path corridor_walk --frames 60 --width 1280 --height 720 --out captures/walk`.
 
@@ -55,7 +58,7 @@ Benchmark example: `mega_capture --path still_hall --bench 200 --width 2560 --he
 
 ### Camera paths
 
-Defined in `crates/render/src/paths.rs` as `fn(t: f32) -> Camera`, `t` clamped to 0..1. Coordinates are metres, Y up; the corridor runs along +Z from z=0, the arched doorway is at z=110..120, the hall spans x -30..30, z 120..270. Yaw 0 looks along +Z.
+Defined in `crates/render/src/paths.rs` as `fn(t: f32) -> Camera`, `t` clamped to 0..1. Each path belongs to one scene (`paths::scene_of`): `shaft_*` paths to `shaft` (listed in `one-shaft.md`), the rest to `test`. For the test scene, coordinates are metres, Y up; the corridor runs along +Z from z=0, the arched doorway is at z=110..120, the hall spans x -30..30, z 120..270. Yaw 0 looks along +Z.
 
 | Name | Motion |
 |---|---|
@@ -64,13 +67,13 @@ Defined in `crates/render/src/paths.rs` as `fn(t: f32) -> Camera`, `t` clamped t
 | `hall_orbit` | One lap at radius 22 m and 9 m height around the middle of the hall (z=195), looking at the centre |
 | `still_hall` | One fixed view in the hall looking towards the arch, with the stair climbing the left wall; `t` is ignored |
 
-To add a path, write the function, add it to `NAMES` and `by_name`.
+To add a path, write the function, add it to `NAMES` and `by_name`, and make sure `scene_of` maps it to its scene.
 
 ### Code locations
 
 - `crates/capture/src/main.rs`: the tool.
 - `crates/render/src/paths.rs`: camera paths.
-- `crates/gen/src/test_scene.rs`: the scene.
+- `crates/gen/src/scenes.rs`: the scene registry; `test_scene.rs` and `shaft.rs` the scenes.
 
 ## Open questions
 

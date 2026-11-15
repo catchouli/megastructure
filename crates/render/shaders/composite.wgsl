@@ -52,7 +52,10 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             // Final and lines: atmosphere pushes tone to the fog colour and attenuates ink by
             // the same factor.
             let f = select(saturate(1.0 - exp(-max(dist - S.fog.x, 0.0) * S.fog.y)) * S.fog.z, S.fog.z, sky);
-            let base = mix(S.paper.rgb, S.fog_colour.rgb, f);
+            // Fog takes the light level of the surface behind it (sky counts as open).
+            let ao = select(fill.z, 1.0, sky);
+            let fog = mix(S.fog_colour.rgb, S.ink.rgb, saturate(S.fog.w * (1.0 - ao)));
+            let base = mix(S.paper.rgb, fog, f);
             c = mix(base, S.ink.rgb, ink.x * (1.0 - f));
             c = mix(c, S.paper.rgb, ink.y * (1.0 - f));
             // Screen-anchored paper grain.

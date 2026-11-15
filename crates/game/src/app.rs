@@ -5,7 +5,7 @@ use crate::input::InputState;
 use crate::sim::Sim;
 use glam::Vec3;
 use mega_gen::scenes::Scene;
-use mega_render::{Camera, Renderer};
+use mega_render::{Camera, Renderer, StylePreset, Sun};
 
 pub struct App {
     pub sim: Sim,
@@ -15,6 +15,8 @@ pub struct App {
 impl App {
     /// Upload `scene` to `renderer` and place the camera at its spawn point.
     pub fn new(mut renderer: Renderer, scene: &Scene) -> Self {
+        renderer.set_preset(StylePreset::for_scene(scene.name));
+        renderer.set_sun(Sun::for_scene(scene.name));
         renderer.upload_scene(&scene.mesh);
         Self { sim: Sim::new(Vec3::from(scene.spawn), scene.spawn_yaw), renderer }
     }
