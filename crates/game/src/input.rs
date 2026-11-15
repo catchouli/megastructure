@@ -9,7 +9,15 @@ pub struct InputState {
     pub right: bool,
     pub up: bool,
     pub down: bool,
+    /// Shift: run when walking, fast when flying (`run` in a script).
     pub fast: bool,
+    /// Space: jump when walking, up when flying.
+    pub jump: bool,
+    /// F pressed (one frame in the windowed game; a script holds it for its segment, and only
+    /// the first frame counts): toggle between walking and the fly camera.
+    pub toggle_fly: bool,
+    /// R pressed: return to the last stable ground (walking only).
+    pub reset: bool,
     pub look_left: bool,
     pub look_right: bool,
     pub look_up: bool,
@@ -21,7 +29,24 @@ pub struct InputState {
 impl InputState {
     /// Action names accepted by the script grammar, in documentation order.
     pub const ACTION_NAMES: &'static [&'static str] =
-        &["forward", "back", "left", "right", "up", "down", "fast", "look_left", "look_right", "look_up", "look_down", "idle"];
+        &[
+        "forward",
+        "back",
+        "left",
+        "right",
+        "up",
+        "down",
+        "fast",
+        "run",
+        "jump",
+        "toggle_fly",
+        "reset",
+        "look_left",
+        "look_right",
+        "look_up",
+        "look_down",
+        "idle",
+    ];
 
     /// Set the action called `name` (`idle` sets nothing). Returns false for an unknown name.
     pub fn set_action(&mut self, name: &str) -> bool {
@@ -32,7 +57,10 @@ impl InputState {
             "right" => self.right = true,
             "up" => self.up = true,
             "down" => self.down = true,
-            "fast" => self.fast = true,
+            "fast" | "run" => self.fast = true,
+            "jump" => self.jump = true,
+            "toggle_fly" => self.toggle_fly = true,
+            "reset" => self.reset = true,
             "look_left" => self.look_left = true,
             "look_right" => self.look_right = true,
             "look_up" => self.look_up = true,

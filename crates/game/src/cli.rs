@@ -1,38 +1,46 @@
 //! Command-line parsing.
 
 use crate::script::Script;
+use crate::sim::MoveMode;
 use anyhow::{anyhow, bail, Result};
 use std::path::PathBuf;
 
 pub const USAGE: &str = "\
-megastructure: fly through a scene.
+megastructure: walk or fly through a scene.
 
 USAGE:
-    megastructure [--scene NAME] [--exit-after-frames N]
+    megastructure [--scene NAME] [--mode walk|fly] [--exit-after-frames N]
     megastructure --headless [--frames N] [--dt S] [--width W] [--height H]
-                  [--input SCRIPT] [--out DIR] [--every K] [--scene NAME]
+                  [--input SCRIPT] [--out DIR] [--every K] [--scene NAME] [--mode walk|fly]
 
 OPTIONS:
     --scene <name>          scene to load (default: the first of the scene list)
+    --mode <walk|fly>       how to start: walk (first-person, needs a scene with colliders) or
+                            fly (the debug camera); default walk where the scene has colliders
     --exit-after-frames <N> windowed: quit after N frames
     --headless              no window: run a fixed-timestep loop and render offscreen
     --frames <N>            headless: number of frames; default the script length, or 1
     --dt <S>                headless: seconds per frame, default 1/60
     --width <W> --height <H>  headless: image size, default 1280x720
     --input <script>        headless: scripted input, e.g. forward:2,look_right+forward:1.5,idle:0.5
-                            actions: forward back left right up down fast
-                            look_left look_right look_up look_down idle
+                            actions: forward back left right up down fast run jump toggle_fly
+                            reset look_left look_right look_up look_down idle
     --out <dir>             headless: write frame_NNNN.png here
     --every <K>             headless: write every Kth frame (0-based index divisible by K) and
                             the last; default 0 = last frame only
     -h, --help              print this help
 
-CONTROLS (windowed):
-    W A S D        move            Space / Ctrl   up / down
-    Shift          fast            Scroll         change speed
+CONTROLS (windowed), walking:
+    W A S D        move            Space          jump
+    Shift          run             R              back to the last stable ground
+    F              switch between walking and the fly camera, at the current position
     Arrow keys     turn (90 degrees per second)
     Mouse          look while any button is held, or while the cursor is grabbed (Tab)
-    Escape         quit";
+    Escape         quit
+CONTROLS (windowed), flying:
+    W A S D        move            E or Space     up
+    Shift          fast            Q or Ctrl      down
+    Scroll         change speed";
 
 pub struct HeadlessArgs {
     pub frames: u64,
@@ -52,6 +60,8 @@ pub enum Mode {
 pub struct Args {
     pub scene: String,
     pub mode: Mode,
+    /// `--mode`: walk or fly at the start; None picks walking where the scene has colliders.
+    pub move_mode: Option<MoveMode>,
 }
 
 fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
@@ -67,6 +77,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut it = args.into_iter();
     let mut scene = mega_gen::scenes::DEFAULT.to_string();
     let (mut headless, mut exit_after, mut frames, mut dt) = (false, None, None, None);
+    let mut move_mode = None;
     let (mut width, mut height, mut script, mut out, mut every) = (None, None, None, None, None);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -76,6 +87,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             }
             "--scene" => scene = value(&mut it, &a)?,
             "--headless" => headless = true,
+            "--mode" => {
+                move_mode = Some(match value(&mut it, &a)?.as_str() {
+                    "walk" => MoveMode::Walk,
+                    "fly" => MoveMode::Fly,
+                    other => bail!("--mode: '{other}' is not walk or fly"),
+                })
+            }
             "--exit-after-frames" => exit_after = Some(number::<u64>(&value(&mut it, &a)?, &a)?),
             "--frames" => frames = Some(number::<u64>(&value(&mut it, &a)?, &a)?),
             "--dt" => dt = Some(number::<f32>(&value(&mut it, &a)?, &a)?),
@@ -100,7 +118,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
         if let Some((flag, _)) = headless_only.iter().find(|(_, set)| *set) {
             bail!("{flag} only applies with --headless");
         }
-        return Ok(Some(Args { scene, mode: Mode::Windowed { exit_after_frames: exit_after } }));
+        return Ok(Some(Args { scene, mode: Mode::Windowed { exit_after_frames: exit_after }, move_mode }));
     }
     if exit_after.is_some() {
         bail!("--exit-after-frames is for the windowed game; use --frames with --headless");
@@ -121,7 +139,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     if frames == 0 {
         bail!("--frames must be at least 1");
     }
-    Ok(Some(Args { scene, mode: Mode::Headless(HeadlessArgs { frames, dt, width, height, script, out, every: every.unwrap_or(0) }) }))
+    Ok(Some(Args { scene, mode: Mode::Headless(HeadlessArgs { frames, dt, width, height, script, out, every: every.unwrap_or(0) }), move_mode }))
 }
 
 #[cfg(test)]
@@ -139,11 +157,20 @@ mod tests {
     }
 
     #[test]
+    fn mode_flag_and_new_actions() {
+        assert_eq!(p("--mode walk").unwrap().unwrap().move_mode, Some(MoveMode::Walk));
+        assert_eq!(p("--headless --mode fly --input jump+run:1,reset:0.1,toggle_fly:0.1").unwrap().unwrap().move_mode, Some(MoveMode::Fly));
+        assert_eq!(p("--headless").unwrap().unwrap().move_mode, None);
+    }
+
+    #[test]
     fn errors() {
         assert!(p("--bogus").is_err());
         assert!(p("--frames 3").is_err());
         assert!(p("--headless --dt 0").is_err());
-        assert!(p("--headless --input jump:1").is_err());
+        assert!(p("--headless --input crouch:1").is_err());
+        assert!(p("--mode run").is_err());
+        assert!(p("--mode").is_err());
         assert!(p("--headless --frames 0").is_err());
         assert!(p("--headless --exit-after-frames 3").is_err());
     }

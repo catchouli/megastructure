@@ -21,6 +21,7 @@ egui-wgpu = "0.37"
 egui-winit = { version = "0.37", default-features = false }
 mega_gen = { path = "crates/gen" }
 mega_render = { path = "crates/render" }
+parry3d = "0.31"
 
 [profile.dev]
 opt-level = 1

@@ -2,6 +2,7 @@
 
 use crate::app::App as Game;
 use crate::input::InputState;
+use crate::sim::MoveMode;
 use anyhow::{anyhow, Context, Result};
 use mega_gen::scenes::Scene;
 use mega_render::Renderer;
@@ -31,10 +32,14 @@ struct Input {
     buttons_held: u32,
     grabbed: bool,
     mouse_delta: (f32, f32),
+    /// F and R presses since the last frame (a press shorter than a frame still counts).
+    toggle_pending: bool,
+    reset_pending: bool,
 }
 
 struct App<'a> {
     exit_after_frames: Option<u64>,
+    move_mode: Option<MoveMode>,
     scene: &'a Scene,
     gfx: Option<Gfx>,
     game: Option<Game>,
@@ -45,7 +50,7 @@ struct App<'a> {
     error: Option<anyhow::Error>,
 }
 
-fn init_gfx(event_loop: &ActiveEventLoop, scene: &Scene) -> Result<(Gfx, Game)> {
+fn init_gfx(event_loop: &ActiveEventLoop, scene: &Scene, move_mode: Option<MoveMode>) -> Result<(Gfx, Game)> {
     let window = Arc::new(
         event_loop
             .create_window(Window::default_attributes().with_title("megastructure").with_inner_size(PhysicalSize::new(1280, 720)))
@@ -80,7 +85,7 @@ fn init_gfx(event_loop: &ActiveEventLoop, scene: &Scene) -> Result<(Gfx, Game)> 
     surface.configure(&device, &config);
 
     let renderer = Renderer::new(device.clone(), queue.clone(), config.format, config.width, config.height);
-    let game = Game::new(renderer, scene);
+    let game = Game::new(renderer, scene, move_mode);
 
     let egui_ctx = egui::Context::default();
     let egui_state = egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &*window, Some(window.scale_factor() as f32), window.theme(), Some(device.limits().max_texture_dimension_2d as usize));
@@ -90,13 +95,14 @@ fn init_gfx(event_loop: &ActiveEventLoop, scene: &Scene) -> Result<(Gfx, Game)> 
 }
 
 impl<'a> App<'a> {
-    fn new(exit_after_frames: Option<u64>, scene: &'a Scene) -> Self {
+    fn new(exit_after_frames: Option<u64>, scene: &'a Scene, move_mode: Option<MoveMode>) -> Self {
         Self {
             exit_after_frames,
+            move_mode,
             scene,
             gfx: None,
             game: None,
-            input: Input { keys: HashSet::new(), buttons_held: 0, grabbed: false, mouse_delta: (0.0, 0.0) },
+            input: Input { keys: HashSet::new(), buttons_held: 0, grabbed: false, mouse_delta: (0.0, 0.0), toggle_pending: false, reset_pending: false },
             last_frame: Instant::now(),
             frame_ms: 16.0,
             frames: 0,
@@ -121,15 +127,19 @@ impl<'a> App<'a> {
         let looking = inp.grabbed || inp.buttons_held > 0;
         let mouse_delta = if looking { inp.mouse_delta } else { (0.0, 0.0) };
         inp.mouse_delta = (0.0, 0.0);
+        let (mut toggle, mut reset) = (std::mem::take(&mut inp.toggle_pending), std::mem::take(&mut inp.reset_pending));
         let down = |k: KeyCode| inp.keys.contains(&k);
         InputState {
             forward: down(KeyCode::KeyW),
             back: down(KeyCode::KeyS),
             left: down(KeyCode::KeyA),
             right: down(KeyCode::KeyD),
-            up: down(KeyCode::Space) || down(KeyCode::KeyE),
+            up: down(KeyCode::KeyE),
             down: down(KeyCode::ControlLeft) || down(KeyCode::ControlRight) || down(KeyCode::KeyQ),
             fast: down(KeyCode::ShiftLeft) || down(KeyCode::ShiftRight),
+            jump: down(KeyCode::Space),
+            toggle_fly: std::mem::take(&mut toggle),
+            reset: std::mem::take(&mut reset),
             look_left: down(KeyCode::ArrowLeft),
             look_right: down(KeyCode::ArrowRight),
             look_up: down(KeyCode::ArrowUp),
@@ -164,12 +174,18 @@ impl<'a> App<'a> {
         // UI.
         let raw = g.egui_state.take_egui_input(&g.window);
         let (cam, ms, speed) = (game.camera(), self.frame_ms, game.sim.speed);
+        let status = match (game.sim.mode, game.sim.walker()) {
+            (MoveMode::Walk, Some(w)) => format!("walking{} deaths {}", if w.grounded { "" } else { ", airborne" }, w.deaths),
+            _ => format!("flying, speed {speed:.1} m/s"),
+        };
+        let can_walk = game.sim.can_walk();
         let mut out = g.egui_ctx.run_ui(raw, |ui| {
             egui::Window::new("Stats").resizable(false).show(ui.ctx(), |ui| {
                 ui.label(format!("frame {ms:.2} ms ({:.0} fps)", 1000.0 / ms.max(0.001)));
                 ui.label(format!("pos {:.1} {:.1} {:.1}", cam.position.x, cam.position.y, cam.position.z));
-                ui.label(format!("yaw {:.0} pitch {:.0}  speed {speed:.1} m/s", cam.yaw.to_degrees(), cam.pitch.to_degrees()));
-                ui.label("WASD, E/Q or Space/Ctrl: up/down, Shift: fast, arrows: turn, scroll: speed, Tab: grab, Esc: quit");
+                ui.label(format!("yaw {:.0} pitch {:.0}  {status}", cam.yaw.to_degrees(), cam.pitch.to_degrees()));
+                ui.label("WASD, Shift: run/fast, Space: jump (fly: up), arrows: turn, Tab: grab, Esc: quit");
+                ui.label(if can_walk { "F: walk/fly, R: back to stable ground, E/Q/Ctrl and scroll: fly only" } else { "E/Q or Space/Ctrl: up/down, scroll: speed" });
             });
         });
         g.egui_state.handle_platform_output(&g.window, out.platform_output);
@@ -224,7 +240,7 @@ impl<'a> App<'a> {
 impl ApplicationHandler for App<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gfx.is_none() {
-            match init_gfx(event_loop, self.scene) {
+            match init_gfx(event_loop, self.scene, self.move_mode) {
                 Ok((g, game)) => {
                     g.window.request_redraw();
                     self.gfx = Some(g);
@@ -268,6 +284,13 @@ impl ApplicationHandler for App<'_> {
                         let grab = !self.input.grabbed;
                         self.set_grab(grab);
                     } else if pressed {
+                        if !event.repeat {
+                            match code {
+                                KeyCode::KeyF => self.input.toggle_pending = true,
+                                KeyCode::KeyR => self.input.reset_pending = true,
+                                _ => {}
+                            }
+                        }
                         self.input.keys.insert(code);
                     } else {
                         self.input.keys.remove(&code);
@@ -314,10 +337,10 @@ impl ApplicationHandler for App<'_> {
     }
 }
 
-pub fn run(scene: &Scene, exit_after_frames: Option<u64>) -> Result<()> {
+pub fn run(scene: &Scene, exit_after_frames: Option<u64>, move_mode: Option<MoveMode>) -> Result<()> {
     let event_loop = EventLoop::new().context("cannot create event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new(exit_after_frames, scene);
+    let mut app = App::new(exit_after_frames, scene, move_mode);
     event_loop.run_app(&mut app).context("event loop failed")?;
     match app.error.take() {
         Some(e) => Err(e),

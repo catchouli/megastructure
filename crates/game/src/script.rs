@@ -115,12 +115,21 @@ mod tests {
     }
 
     #[test]
+    fn walking_actions_set_their_fields() {
+        let s = Script::parse("jump+run:1,reset:0.1,toggle_fly:0.1,fast:1").unwrap();
+        assert!(s.segments[0].input.jump && s.segments[0].input.fast);
+        assert!(s.segments[1].input.reset && !s.segments[1].input.fast);
+        assert!(s.segments[2].input.toggle_fly);
+        assert!(s.segments[3].input.fast && !s.segments[3].input.jump);
+    }
+
+    #[test]
     fn rejects_bad_scripts() {
-        for bad in ["", "forward", "forward:", "forward:x", "forward:-1", "forward:nan", "jump:1", "forward+jump:1", "forward:1,,back:1", "forward:1,", "idle+forward:1", ":1", "forward:inf"] {
+        for bad in ["", "forward", "forward:", "forward:x", "forward:-1", "forward:nan", "crouch:1", "forward+crouch:1", "forward:1,,back:1", "forward:1,", "idle+forward:1", ":1", "forward:inf"] {
             assert!(Script::parse(bad).is_err(), "'{bad}' should fail");
         }
-        let e = Script::parse("jump:1").unwrap_err().to_string();
-        assert!(e.contains("unknown action 'jump'") && e.contains("look_right"), "{e}");
+        let e = Script::parse("crouch:1").unwrap_err().to_string();
+        assert!(e.contains("unknown action 'crouch'") && e.contains("look_right") && e.contains("toggle_fly"), "{e}");
     }
 
     #[test]

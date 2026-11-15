@@ -21,7 +21,7 @@ Constants that other systems depend on (for example, movement limits the generat
 
 | Feature | File | Status |
 |---|---|---|
-| Player movement | `features/player-movement.md` | Designed |
+| Player movement | `features/player-movement.md` | Working (M1 shaft walkable; windowed untested) |
 | Sun and sky | `features/sun-and-sky.md` | Designed |
 | Machinery | `features/machinery.md` | Designed in outline |
 | Capture tool | `features/capture-tool.md` | Working |

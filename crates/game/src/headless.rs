@@ -4,6 +4,7 @@
 use crate::app::App;
 use crate::cli::HeadlessArgs;
 use crate::input::InputState;
+use crate::sim::{MoveMode, Sim};
 use anyhow::{anyhow, bail, Context, Result};
 use mega_gen::scenes::Scene;
 use mega_render::Renderer;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-pub fn run(args: &HeadlessArgs, scene: &Scene) -> Result<()> {
+pub fn run(args: &HeadlessArgs, scene: &Scene, mode: Option<MoveMode>) -> Result<()> {
     if let Some(out) = &args.out {
         std::fs::create_dir_all(out).with_context(|| format!("cannot create output directory {}", out.display()))?;
     }
@@ -49,7 +50,7 @@ pub fn run(args: &HeadlessArgs, scene: &Scene) -> Result<()> {
         }));
     }
 
-    let mut app = App::new(Renderer::new(device.clone(), queue.clone(), FORMAT, w, h), scene);
+    let mut app = App::new(Renderer::new(device.clone(), queue.clone(), FORMAT, w, h), scene, mode);
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("headless target"),
@@ -126,15 +127,27 @@ pub fn run(args: &HeadlessArgs, scene: &Scene) -> Result<()> {
         bail!("a GPU validation error occurred (see message above)");
     }
 
-    let c = app.camera();
-    println!(
-        "state frames={} x={:.4} y={:.4} z={:.4} yaw_deg={:.3} pitch_deg={:.3}",
-        args.frames,
+    println!("{}", state_line(&app.sim, args.frames));
+    Ok(())
+}
+
+/// The final state line. The first six fields are the fly camera's; the rest describe the walker.
+pub fn state_line(sim: &Sim, frames: u64) -> String {
+    let c = sim.camera;
+    let (grounded, vy, deaths, resets) = sim.walker().map_or((false, 0.0, 0, 0), |w| (w.grounded, w.vel.y, w.deaths, w.resets));
+    format!(
+        "state frames={} x={:.4} y={:.4} z={:.4} yaw_deg={:.3} pitch_deg={:.3} mode={} grounded={} vy={:.4} died={} deaths={} resets={}",
+        frames,
         c.position.x,
         c.position.y,
         c.position.z,
         c.yaw.to_degrees(),
-        c.pitch.to_degrees()
-    );
-    Ok(())
+        c.pitch.to_degrees(),
+        sim.mode.name(),
+        grounded,
+        vy,
+        deaths > 0,
+        deaths,
+        resets
+    )
 }
