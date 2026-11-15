@@ -2,7 +2,7 @@
 
 ## Status
 
-Working, 2026-11-15. Renders the hand-built test scene with the placeholder forward pass; it will pick up the ink passes as they land because it only calls `Renderer::render`.
+Working, 2026-11-15. Renders the hand-built test scene through the ink renderer (`ink-renderer.md`), with debug views, a reprojection-based temporal stability metric and a frame-time benchmark.
 
 ## What it is
 
@@ -26,11 +26,32 @@ Run from the workspace root: `cargo run --release -p mega_capture -- <options>`.
 | `--frames <N>` | Number of frames. Frame `i` uses `t = i / (N - 1)` | 1 |
 | `--t <T>` | `t` in 0..1; only valid with `--frames 1` | 0.5 |
 | `--width`, `--height` | Image size in pixels | 1280, 720 |
+| `--t0`, `--t1` | Range of `t` for a sequence: frame `i` uses `t = t0 + (t1 - t0) * i / (N - 1)` | 0, 1 |
+| `--view <name>` | Debug view: `final`, `id`, `normals`, `depth`, `bands`, `hatching`, `strokes`, `contours`, `lines` | `final` |
+| `--metrics` | Print temporal stability figures for the sequence (see below). Switches paper grain off | |
+| `--no-png` | Do not write frames (with `--metrics`); `--out` becomes optional | |
+| `--error-png` | With `--metrics`, also write `error_NNNN.png`: blurred reprojection residual times 8, white is none | |
+| `--bench <N>` | Render one frame (`--t`) N times without readback and print ms per frame | |
+| `--hatch-lod <m>` | Diagnostic: `directional` (default), `isotropic`, `fixed` (E002) | |
+| `--stroke-vis <m>` | Diagnostic: `block` (default), `centreline`, `pixel` (E003) | |
+| `--depth-tol <x>` | Override the preset's stroke depth tolerance | |
 | `--list-paths` | Print path names and exit | |
 
 Files are named `frame_0000.png`, `frame_0001.png` and so on; each written path is printed to stdout. `RUST_LOG=info` prints the adapter.
 
 Example: `mega_capture --path corridor_walk --frames 60 --width 1280 --height 720 --out captures/walk`.
+
+### Temporal metrics
+
+With `--metrics` the tool also reads back the depth buffer. For each pair of consecutive frames it prints, averaged over the sequence:
+
+- consecutive MAD: mean absolute grey difference, at full resolution and after a 4x4 box downsample. Dominated by legitimate motion; kept for reference.
+- reprojected MAD: every pixel of the current frame is moved back into the previous frame through its depth and both cameras, pixels that were off screen or hidden (linear depth differs by more than 1%) are skipped, and the previous frame is sampled bilinearly. Raw and after a 5x5 box blur, plus the share of pixels off by more than 64 levels ("pops").
+- mean ink (255 minus mean grey) and both MADs divided by it, to compare views with different amounts of ink.
+
+Ink that stays on surfaces leaves only resampling error; swimming, popping or shimmering ink adds to it. Compare a view against `strokes` or `lines` on the same stretch. A slow stretch, for example `--path corridor_walk --frames 40 --t0 0.05 --t1 0.062`, keeps per-frame motion near walking speed at 60 fps. See E001.
+
+Benchmark example: `mega_capture --path still_hall --bench 200 --width 2560 --height 1440`. The figure is wall-clock time over back-to-back submissions, so it includes CPU work and is an upper bound on GPU time.
 
 ### Camera paths
 
@@ -53,9 +74,8 @@ To add a path, write the function, add it to `NAMES` and `by_name`.
 
 ## Open questions
 
-- Colour format of the capture target will need to change once the ink pass writes more than one target; the composite output should stay `Rgba8Unorm`.
 - Whether to add an optional contact sheet or video output for judging temporal stability.
 
 ## Related experiments
 
-None yet.
+E001 (the temporal metric), E002, E003 (diagnostic switches).

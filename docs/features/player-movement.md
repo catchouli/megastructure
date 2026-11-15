@@ -20,6 +20,20 @@ First-person walking, running and jumping through the structure. Falling is phys
 
 Earlier megastructure games drew complaints for first-person platforming, not for scale, so no required route may depend on a jump. Jumping is there for freedom of movement.
 
+### Controls
+
+Bindings are by physical key position, so they do not depend on the keyboard layout.
+
+| Action | Keys |
+|---|---|
+| Move | W A S D |
+| Look | Mouse, or the arrow keys (required: the game must be fully playable from the keyboard) |
+| Jump | Space |
+| Run | Shift |
+| Quit | Escape |
+
+Arrow-key look turns at a fixed angular rate, independent of frame rate, with pitch clamped as for the mouse. The same bindings apply to the debug fly camera, where Space and Ctrl move up and down. Arrow-key look is not implemented yet.
+
 ## Technical details
 
 Kinematic capsule controller on parry3d shape casts (or rapier's character controller if it proves adequate). Per-element colliders; a ramp collider for every stair flight.

@@ -25,8 +25,9 @@ Constants that other systems depend on (for example, movement limits the generat
 | Sun and sky | `features/sun-and-sky.md` | Designed |
 | Machinery | `features/machinery.md` | Designed in outline |
 | Capture tool | `features/capture-tool.md` | Working |
+| Ink renderer | `features/ink-renderer.md` | In progress (M0 frame working) |
 
-Still to be split out of `PLAN.md` when work starts: ink renderer, strokes, hatching and tone, kit of parts, space graph, layout, decay, streaming and LOD.
+Still to be split out of `PLAN.md` when work starts: kit of parts, space graph, layout, decay, streaming and LOD.
 
 ## Testing without a window
 

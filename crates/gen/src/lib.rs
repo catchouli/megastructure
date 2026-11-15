@@ -3,6 +3,7 @@
 
 pub mod builder;
 pub mod mesh;
+pub mod scenes;
 pub mod test_scene;
 
 pub use builder::{auto_hatch, box_ao, AoFn, FaceMask, MeshBuilder};

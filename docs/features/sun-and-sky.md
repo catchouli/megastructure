@@ -2,7 +2,7 @@
 
 ## Status
 
-Designed, 2026-11-15. Not implemented. A fixed sun arrives with M0 or M1; the full sky and the day-night cycle arrive with M5.
+Designed, 2026-11-15. A fixed sun without shadows exists in the ink renderer (`Sun` in `crates/render/src/renderer.rs`: position, radius, intensity, switched to a pure direction beyond 1e5 m; see `ink-renderer.md`). Shadows, the sky and the day-night cycle are not implemented; the full sky and the cycle arrive with M5.
 
 ## What it is
 

@@ -54,9 +54,9 @@ pub fn box_ao(min: Vec3, max: Vec3) -> impl Fn(Vec3, Vec3) -> f32 {
                 continue;
             }
             let d = (p[axis] - min[axis]).abs().min((max[axis] - p[axis]).abs());
-            dark += 0.3 * (-d / 1.5).exp();
+            dark += 0.4 * (-d / 2.0).exp();
         }
-        (1.0 - dark).clamp(0.35, 1.0)
+        (1.0 - dark).clamp(0.25, 1.0)
     }
 }
 
@@ -139,10 +139,17 @@ impl MeshBuilder {
     /// (rank 2); the outer boundary is left to the caller.
     #[allow(clippy::too_many_arguments)]
     pub fn panelled_quad(&mut self, origin: Vec3, u: Vec3, v: Vec3, normal: Vec3, panel: f32, coarse: u32, ao: AoFn) {
+        let hatch = auto_hatch(normal.normalize(), u, v);
+        self.panelled_quad_hatched(origin, u, v, normal, hatch, panel, coarse, ao);
+    }
+
+    /// [`MeshBuilder::panelled_quad`] with an explicit hatch axis (projected into the face).
+    #[allow(clippy::too_many_arguments)]
+    pub fn panelled_quad_hatched(&mut self, origin: Vec3, u: Vec3, v: Vec3, normal: Vec3, hatch: Vec3, panel: f32, coarse: u32, ao: AoFn) {
         let normal = normal.normalize();
         let nu = ((u.length() / panel).ceil() as usize).max(1);
         let nv = ((v.length() / panel).ceil() as usize).max(1);
-        let hatch = auto_hatch(normal, u, v);
+        let hatch = (hatch - normal * normal.dot(hatch)).normalize();
         let at = |i: usize, j: usize| origin + u * (i as f32 / nu as f32) + v * (j as f32 / nv as f32);
         for i in 0..nu {
             for j in 0..nv {

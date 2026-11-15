@@ -57,10 +57,11 @@ fn corridor(b: &mut MeshBuilder) {
     b.panelled_quad(min, len, w, Y, 3.0, c, &ao); // floor
     let c = b.new_coarse();
     b.panelled_quad(min + h, len, w, -Y, 3.0, c, &ao); // ceiling
+    // Walls are ruled along the corridor, so their hatching converges on the vanishing point.
     let c = b.new_coarse();
-    b.panelled_quad(min, len, h, X, 3.0, c, &ao); // left wall
+    b.panelled_quad_hatched(min, len, h, X, Z, 3.0, c, &ao); // left wall
     let c = b.new_coarse();
-    b.panelled_quad(max - len, len, -h, -X, 3.0, c, &ao); // right wall (origin at top-right start)
+    b.panelled_quad_hatched(max - len, len, -h, -X, Z, 3.0, c, &ao); // right wall (origin at top-right start)
     let c = b.new_coarse();
     b.panelled_quad(min, w, h, Z, 3.0, c, &ao); // end cap at z=0
     // Creases: the four long edges and the cap outline. Room normals point inward.
