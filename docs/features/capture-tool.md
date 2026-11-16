@@ -71,6 +71,8 @@ With `--metrics` the tool also reads back the depth buffer. For each pair of con
 - reprojected MAD after a 13x13 blur: density at the scale of a group of strokes, so coherent changes (patches re-forming, tone breathing) stand out from the resampling error of thin lines (E020).
 - temporal second difference: mean of `|f(t) - 2 f(t-1) + f(t-2)|` over the 5x5-blurred frames. Only meaningful with a still camera: ink that moves or changes at a steady rate (a shadow edge under a slowly moving sun) leaves almost none, ink that jumps (texel steps) leaves a lot (E012).
 
+A further line gives contrast-relative pops (E046): the share of pixels whose error is more than half the local contrast (the range of their 3x3 neighbourhood in the current frame, at least 24 levels). A line edge that moves by less than half a pixel changes its pixels by less than half its contrast, so this counts changes that sub-pixel resampling cannot explain, whatever the line's contrast against its background; the fixed 64-level count overstates dark lines on light tone (E043). Both are printed.
+
 Ink that stays on surfaces leaves only resampling error; swimming, popping or shimmering ink adds to it. Compare a view against `strokes` or `lines` on the same stretch. A slow stretch, for example `--path corridor_walk --frames 40 --t0 0.05 --t1 0.062`, keeps per-frame motion near walking speed at 60 fps. See E001.
 
 Benchmark example: `mega_capture --path still_hall --bench 200 --width 2560 --height 1440`. The figure is wall-clock time over back-to-back submissions, so it includes CPU work and is an upper bound on GPU time.

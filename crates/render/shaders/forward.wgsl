@@ -626,6 +626,8 @@ struct ShadowU {
 @group(1) @binding(0) var shadow_tex: texture_depth_2d_array;
 @group(1) @binding(1) var shadow_cmp: sampler_comparison;
 @group(1) @binding(2) var<uniform> SH: ShadowU;
+@group(1) @binding(3) var paper_tex: texture_2d<f32>;
+@group(1) @binding(4) var paper_smp: sampler;
 
 fn shadow_size() -> f32 {
     return f32(textureDimensions(shadow_tex).x);
@@ -795,10 +797,19 @@ fn halftone(w: f32, uv: vec2<f32>, gmax: f32) -> f32 {
     }
     var sum = 0.0;
     var wsum = 0.0;
-    for (var k = 0; k < 8; k++) {
-        let pitch = S.halftone.y * exp2(f32(k));
+    // Only the pitches that can fall in the 3.5 to 11 px window (at most three).
+    let kmin = max(floor(log2(3.5 * gmax * G.misc.x / S.halftone.y)), 0.0);
+    for (var j = 0; j < 3; j++) {
+        let k = kmin + f32(j);
+        if (k > 7.0) {
+            break;
+        }
+        let pitch = S.halftone.y * exp2(k);
         let px = pitch / max(gmax, 1e-7) / G.misc.x;
-        let win = smoothstep(3.5, 5.0, px) * (1.0 - smoothstep(8.0, 11.0, px));
+        // Capped in world units (S.paper4.z, E044): far walls get no large dots (the owner's
+        // "snakeskin"); the largest pitch fades out over the last octave below the cap.
+        let cap = 1.0 - smoothstep(0.5 * S.paper4.z, S.paper4.z, pitch);
+        let win = smoothstep(3.5, 5.0, px) * (1.0 - smoothstep(8.0, 11.0, px)) * cap;
         if (win > 0.0) {
             sum += win * (halftone_cov(w, uv, pitch) - w);
             wsum += win;
@@ -808,51 +819,71 @@ fn halftone(w: f32, uv: vec2<f32>, gmax: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------------------
-// Surface-anchored paper (E040, paper_anchor 1). The relief of the sheet as a stack of fixed
-// world scales (S.paper4.x times 1, 2, 4 ... 2048: with the default, 2 mm to 4 m), each
-// one value-noise field with its own seed. A layer is present only while its cell is
-// between S.paper2.y and S.paper2.w pixels at 720 lines on screen (rotation-invariant
-// footprint), faded in and out by amplitude. Walking towards a wall, finer layers fade in on
-// top of coarser ones that stay: a refinement, never a swap. Far away, fewer and fewer
-// layers are large enough, so the paper fades to smooth tone instead of compressing into
-// static; grazing surfaces fade with their foreshortening. Returns the relief h, in the
-// same units as the screen sheet's (tooth and mottle already weighted).
-fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32) -> f32 {
+// Surface-anchored paper (paper_anchor 1). Since E044 the tooth is a baked fibre tile
+// (paper.rs: short fibres at random orientations, loose clumps, fine pits, no cloud)
+// sampled at fixed world scales: layer k has texels of S.paper4.x * 2^k metres. A layer is
+// present while its texel is between S.paper2.y and 4 S.paper2.y pixels at 720 lines on
+// screen (rotation-invariant footprint), faded by amplitude, so at any distance about two
+// layers are drawn, each band-limited by the tile's mips, and walking closer refines rather
+// than swaps. Layers whose texel exceeds S.paper5.x metres are not drawn, so beyond a
+// distance the paper fades to smooth tone. Each layer is rotated and offset so the tile's
+// repeat and orientation never line up. The optional mottle (S.paper2.z, 0 by default since
+// E044: it read as "photoshop clouds") is the E040 value-noise layers at large scale.
+// Returns the relief h, already weighted.
+fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy: vec2<f32>) -> f32 {
     let gmax = max(gu, gv);
-    let aniso = saturate(2.0 * min(gu, gv) / max(gmax, 1e-9));
+    // Layers are chosen by the smaller footprint and sampled with the true screen gradients
+    // and anisotropic filtering, so a foreshortened surface shows foreshortened fibres
+    // rather than streaks; only very grazing surfaces fade (E044).
+    let aniso = smoothstep(0.08, 0.2, min(gu, gv) / max(gmax, 1e-9));
     if (aniso <= 0.0) {
         return 0.0;
     }
     let plane = pcg(bitcast<u32>(i32(floor(pn * 4.0))));
-    let lo = max(S.paper2.y, 1.0);
-    let hi = max(S.paper2.w, 4.0 * lo);
+    let lo = max(S.paper2.y, 0.1);
+    let foot = min(gu, gv) * G.misc.x;
+    // Only the layers that can fall inside the window [lo, 4 lo].
+    let k0 = max(floor(log2(lo * foot / S.paper4.x)), 0.0);
     var tooth = 0.0;
     var tw = 0.0;
-    var mottle = 0.0;
-    var mw = 0.0;
-    for (var k = 0u; k < 12u; k++) {
-        let c = S.paper4.x * exp2(f32(k));
-        let px = c / max(gmax, 1e-7) / G.misc.x;
-        let w = smoothstep(lo, 2.0 * lo, px) * (1.0 - smoothstep(0.5 * hi, hi, px));
+    for (var j = 0; j < 3; j++) {
+        let k = k0 + f32(j);
+        let c = S.paper4.x * exp2(k);
+        let px = c / max(foot, 1e-9);
+        let w = smoothstep(lo, 1.4 * lo, px) * (1.0 - smoothstep(1.8 * lo, 2.6 * lo, px)) * (1.0 - smoothstep(0.5 * S.paper5.x, S.paper5.x, c));
         if (w > 0.0) {
-            // Each layer turned by its own angle, so the value-noise lattices do not line up
-            // into visible blocks.
-            let a = f32(k) * 2.39996;
+            let h = hash2(0x5851f42du ^ plane, u32(k));
+            let a = u01(h) * 6.2831853;
             let q = vec2<f32>(cos(a) * uv.x - sin(a) * uv.y, sin(a) * uv.x + cos(a) * uv.y) / c;
-            let g = 2.0 * (vnoise2(hash2(0x5851f42du ^ plane, k), q) - 0.5);
-            let m = smoothstep(0.15 * hi, 0.4 * hi, px);
-            tooth += w * (1.0 - m) * g;
-            tw += w * w * (1.0 - m) * (1.0 - m);
-            mottle += w * m * g;
-            mw += w * w * m * m;
+            let st = q / 512.0 + vec2<f32>(u01(pcg(h ^ 1u)), u01(pcg(h ^ 2u)));
+            let rot = mat2x2<f32>(vec2<f32>(cos(a), sin(a)), vec2<f32>(-sin(a), cos(a)));
+            let gx = rot * duvx / (c * 512.0);
+            let gy = rot * duvy / (c * 512.0);
+            let g = (textureSampleGrad(paper_tex, paper_smp, st, gx, gy).x - 0.5) * 4.0;
+            tooth += w * g;
+            tw += w * w;
         }
     }
-    // Normalised to the contrast of about four full layers, so the relief has the same
-    // strength wherever the layers are all present, and fades where only a few remain (far
-    // away and foreshortened).
-    let tn = tooth / sqrt(max(tw, 4.0));
-    let mn = mottle / sqrt(max(mw, 2.0));
-    return (S.paper2.x * tn + S.paper2.z * mn) * 0.7 * aniso;
+    let tn = tooth / sqrt(max(tw, 0.5));
+    var mn = 0.0;
+    if (S.paper2.z > 0.0) {
+        let mlo = max(0.15 * S.paper2.w, lo);
+        var mottle = 0.0;
+        var mw = 0.0;
+        for (var k = 0u; k < 12u; k++) {
+            let c = S.paper4.x * exp2(f32(k));
+            let px = c / max(foot, 1e-7);
+            let w = smoothstep(mlo, 2.0 * mlo, px) * (1.0 - smoothstep(0.5 * S.paper2.w, S.paper2.w, px));
+            if (w > 0.0) {
+                let a = f32(k) * 2.39996;
+                let q = vec2<f32>(cos(a) * uv.x - sin(a) * uv.y, sin(a) * uv.x + cos(a) * uv.y) / c;
+                mottle += w * 2.0 * (vnoise2(hash2(0x2545f491u ^ plane, k), q) - 0.5);
+                mw += w * w;
+            }
+        }
+        mn = mottle / sqrt(max(mw, 2.0));
+    }
+    return (S.paper2.x * tn * 0.35 + S.paper2.z * mn * 0.7) * aniso;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -861,8 +892,8 @@ fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32) -> f32 {
 // S.paper3.y * (receiver to blocker distance), capped at S.paper3.z metres. The blocker
 // distance comes from a search in the scene-wide cascade; the penumbra is then filtered in
 // the finest cascade where its radius is at most four texels, so a wide penumbra is a smooth
-// gradient rather than sparse taps. Contact stays tight; at a penumbra under about a texel
-// the hard edge is kept.
+// gradient rather than sparse taps. Contact stays tight down to S.paper4.y metres, the same
+// in every cascade, so a shadow does not change character where it crosses a cascade.
 fn soft_sun(p: vec3<f32>, n: vec3<f32>, s: vec3<f32>, hard: f32, hard_cascade: f32, dpx: vec3<f32>, dpy: vec3<f32>) -> f32 {
     let l3 = cascade_lookup(3u, p, n, s);
     if (l3.w <= 0.0 || l3.z <= 0.0 || l3.z >= 1.0) {
@@ -903,7 +934,10 @@ fn soft_sun(p: vec3<f32>, n: vec3<f32>, s: vec3<f32>, hard: f32, hard_cascade: f
     }
     let dz_per_m = abs((SH.mats[3] * vec4<f32>(s, 0.0)).z);
     let dist = (bsum / bn) / max(dz_per_m, 1e-9);
-    let w = min(S.paper3.y * dist, wmax);
+    // At least shadow_soft_min metres wide (E044): without a floor, contact penumbrae
+    // narrower than a texel were drawn soft in a fine cascade and hard in a coarse one, so
+    // one shadow switched from soft to hard and serrated at a cascade boundary.
+    let w = clamp(S.paper3.y * dist, S.paper4.y, wmax);
     // The finest cascade containing p in which the penumbra's radius is at most 4 texels,
     // blended into the next coarser one as the radius approaches that limit, so the switch
     // of cascade (which follows the penumbra width, and so the noisy blocker estimate) is
@@ -918,19 +952,13 @@ fn soft_sun(p: vec3<f32>, n: vec3<f32>, s: vec3<f32>, hard: f32, hard_cascade: f
         }
     }
     let r = 0.5 * w / cascade_texel(ci, p);
-    // Hard against soft, judged against the texel of the cascade the hard edge came from.
-    let th = cascade_texel(u32(clamp(floor(hard_cascade), 0.0, 3.0)), p);
-    let k = saturate((0.5 * w / th - 0.75) / 1.5);
-    if (k <= 0.0) {
-        return hard;
-    }
     var v = soft_pcf(ci, p, n, s, r, dpx, dpy);
     let toward = select(0.0, smoothstep(2.0, 4.0, r), ci < 3u);
     if (toward > 0.0) {
         let r2 = 0.5 * w / cascade_texel(ci + 1u, p);
         v = mix(v, soft_pcf(ci + 1u, p, n, s, r2, dpx, dpy), toward);
     }
-    return mix(hard, v, k);
+    return v;
 }
 
 // Tent-weighted 5x5 comparison taps spread over a radius of r texels in cascade ci, each
@@ -1365,7 +1393,7 @@ fn fs_main(in: VsOut) -> FsOut {
     out.ink = vec4<f32>(select(0.0, t.cov, hatch_on), select(0.0, speck, hatch_on), 0.0, 0.0);
     var ph = 0.0;
     if (S.paper3.w > 0.5 && (S.paper2.x > 0.0 || S.paper2.z > 0.0)) {
-        ph = paper_surface(vec2<f32>(u1, u2), dot(p, n), lod_u1, lod_v1);
+        ph = paper_surface(vec2<f32>(u1, u2), dot(p, n), lod_u1, lod_v1, vec2<f32>(dpdx(u1), dpdx(u2)), vec2<f32>(dpdy(u1), dpdy(u2)));
     }
     out.tone = vec2<f32>(select(0.0, wash, hatch_on), 0.5 + 2.0 * ph);
     if (view == VIEW_SHADOW) {

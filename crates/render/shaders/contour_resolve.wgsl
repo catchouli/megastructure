@@ -55,6 +55,83 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         sum += mask_bilinear(pos.xy + tangent * f32(k));
     }
     let smoothed = sum / 7.0;
-    let e = mix(centre, smoothed, coherence);
+    var e = mix(centre, smoothed, coherence);
+    // Near-axis lines (E045): a line within about 10 degrees of vertical or horizontal is a
+    // staircase with jogs many pixels apart, which the 3x3 tensor reads as exactly axial, so
+    // the average above never spreads the jog, and the jogs crawl along the line as the
+    // camera moves. Fit the line instead: its sub-pixel centre in each of the 17 rows (or
+    // columns) around the pixel, a least-squares line through them, and redraw it with
+    // box-filtered coverage at its mean width. Used only where every row has the line and the
+    // fit is good, so ends, junctions and curves keep the result above.
+    // Both axes are tried (the tensor's orientation is wrong exactly at a jog, where it
+    // sees a corner); the better fit wins.
+    let fv = axis_fit(p, true);
+    let fh = axis_fit(p, false);
+    let fit = select(fh, fv, fv.w >= fh.w);
+    if (fit.w > 0.0) {
+        e = mix(e, fit.x, fit.w);
+    }
     return vec4<f32>(0.0, 0.0, e, e);
+}
+
+// Line fit along rows (vertical lines) or columns (horizontal ones). x: coverage at p from
+// the fitted line, w: confidence 0..1 (0 when the fit does not apply).
+fn axis_fit(p: vec2<i32>, vertical: bool) -> vec4<f32> {
+    let along = select(vec2<i32>(1, 0), vec2<i32>(0, 1), vertical);
+    let across = select(vec2<i32>(0, 1), vec2<i32>(1, 0), vertical);
+    var sw = 0.0;
+    var st = 0.0;
+    var stt = 0.0;
+    var sc = 0.0;
+    var stc = 0.0;
+    var width = 0.0;
+    var cs: array<f32, 17>;
+    for (var t = -8; t <= 8; t++) {
+        var m = 0.0;
+        var mc = 0.0;
+        for (var c = -3; c <= 3; c++) {
+            let v = mask_at(p + along * t + across * c);
+            m += v;
+            mc += v * f32(c);
+        }
+        if (m < 0.3 || m > 3.5) {
+            return vec4<f32>(0.0);
+        }
+        let ctr = mc / m;
+        cs[t + 8] = ctr;
+        let ft = f32(t);
+        sw += 1.0;
+        st += ft;
+        stt += ft * ft;
+        sc += ctr;
+        stc += ft * ctr;
+        width += m;
+    }
+    let slope = (sw * stc - st * sc) / max(sw * stt - st * st, 1e-6);
+    let c0 = (sc - slope * st) / sw;
+    // Only near-axis lines (slope under 0.2 px per px, about 11 degrees), and only if the centres lie on the
+    // line within 0.8 px (straight, single line).
+    if (abs(slope) > 0.2) {
+        return vec4<f32>(0.0);
+    }
+    var worst = 0.0;
+    for (var t = -8; t <= 8; t++) {
+        worst = max(worst, abs(cs[t + 8] - (c0 + slope * f32(t))));
+    }
+    if (worst > 0.8) {
+        return vec4<f32>(0.0);
+    }
+    let w = width / sw;
+    // The line's centre is at c0 across the pixel row; its strength is the mask's peak.
+    let cov = box_cov(abs(c0), w) * cos(atan(slope));
+    let conf = saturate((0.8 - worst) / 0.3) * (1.0 - smoothstep(0.14, 0.2, abs(slope)));
+    return vec4<f32>(saturate(cov * max_strength(p, across)), 0.0, 0.0, conf);
+}
+
+fn max_strength(p: vec2<i32>, across: vec2<i32>) -> f32 {
+    var m = 0.0;
+    for (var c = -2; c <= 2; c++) {
+        m = max(m, mask_at(p + across * c));
+    }
+    return max(m, 1e-3);
 }

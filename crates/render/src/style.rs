@@ -396,6 +396,14 @@ pub struct StylePreset {
     /// With `paper_anchor` 1: the finest world cell of the paper relief in metres; coarser
     /// layers double up to 2048 times this.
     pub paper_cell: f32,
+    /// Smallest penumbra width in metres with `shadow_soft` > 0, in every cascade (E044).
+    pub shadow_soft_min: f32,
+    /// Largest halftone dot pitch in metres; coarser pitches fade out, so far surfaces are
+    /// smooth tone instead of large dots (E044).
+    pub halftone_max_pitch: f32,
+    /// Largest texel of the surface paper's fibre tile in metres; coarser layers are not
+    /// drawn, so far surfaces fade to smooth tone (E044).
+    pub paper_max_cell: f32,
 }
 
 impl StylePreset {
@@ -552,6 +560,9 @@ impl StylePreset {
             shadow_soft_max: 1.0,
             paper_anchor: 0.0,
             paper_cell: 0.002,
+            shadow_soft_min: 0.0,
+            halftone_max_pitch: 1000.0,
+            paper_max_cell: 1000.0,
         }
     }
 
@@ -599,7 +610,8 @@ impl StylePreset {
             halftone: [self.halftone, self.halftone_pitch, self.halftone_soft, self.halftone_angle.to_radians()],
             paper2: [self.paper_tooth, self.paper_tooth_px, self.paper_mottle, self.paper_mottle_px],
             paper3: [self.paper_take, self.shadow_soft, self.shadow_soft_max, self.paper_anchor],
-            paper4: [self.paper_cell, 0.0, 0.0, 0.0],
+            paper4: [self.paper_cell, self.shadow_soft_min, self.halftone_max_pitch, 0.0],
+            paper5: [self.paper_max_cell, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -749,19 +761,25 @@ impl StylePreset {
             paper_texture: 0.0,
             paper_grain: 0.0,
             paper_anchor: 1.0,
-            paper_cell: 0.002,
-            paper_tooth: 0.045,
-            paper_tooth_px: 2.0,
-            paper_mottle: 0.03,
+            paper_cell: 0.0005,
+            paper_max_cell: 0.15,
+            paper_tooth: 0.03,
+            paper_tooth_px: 0.7,
+            paper_mottle: 0.0,
             paper_mottle_px: 160.0,
             paper_take: 0.08,
-            halftone: 0.07,
+            halftone: 0.05,
             halftone_pitch: 0.01,
             halftone_soft: 0.8,
             halftone_angle: 30.0,
             // Soft cast-shadow edges, widening with distance from the occluder (E041).
             shadow_soft: 0.06,
             shadow_soft_max: 1.0,
+            shadow_soft_min: 0.15,
+            halftone_max_pitch: 0.05,
+            // No light-level cloud either: the 15 m tone noise made soft blotches in the
+            // smooth wash (E048).
+            tone_noise: 0.0,
             // Ruling: nothing near, sparse at middle distance, merging into black far down.
             fall_white: 0.28,
             fall_black: 0.05,
@@ -1025,6 +1043,9 @@ impl StylePreset {
         "shadow_soft_max",
         "paper_anchor",
         "paper_cell",
+        "shadow_soft_min",
+        "halftone_max_pitch",
+        "paper_max_cell",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1168,6 +1189,9 @@ impl StylePreset {
             "shadow_soft_max" => self.shadow_soft_max = num(value)?,
             "paper_anchor" => self.paper_anchor = num(value)?,
             "paper_cell" => self.paper_cell = num(value)?,
+            "shadow_soft_min" => self.shadow_soft_min = num(value)?,
+            "halftone_max_pitch" => self.halftone_max_pitch = num(value)?,
+            "paper_max_cell" => self.paper_max_cell = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
@@ -1233,4 +1257,5 @@ pub(crate) struct StyleGpu {
     paper2: [f32; 4],
     paper3: [f32; 4],
     paper4: [f32; 4],
+    paper5: [f32; 4],
 }

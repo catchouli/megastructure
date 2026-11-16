@@ -35,6 +35,7 @@ Per distinct vertex `p` with normal `n`:
 1. `direct[v] = max(n.S, 0)` if a shadow ray from `p + 0.03 n` towards the sun hits nothing, else 0.
 2. For each of the 64 cosine-distributed directions `d` from `p + 0.03 n`: find the closest hit. On a front face with barycentrics `w`, add `sum w_k direct[k]` to `sun` and `sum w_k ao[k]` to `sky` over the triangle's three vertices.
 3. Store `[sun / 64, sky / 64]`.
+4. Smooth (E048, `BounceSettings::smooth`, 2.5 m): each value becomes a Gaussian-weighted mean (sigma 1.25 m) over the distinct vertices within 2.5 m on the same plane (normals within about 18 degrees, plane offsets under 0.15 m), found through a hash grid. It removes blotches from the fixed ray pattern and from per-vertex sampling on 1.5 to 2 m triangles, which showed once the wash became a smooth gradient, without bleeding light round corners.
 
 A cosine-weighted mean is irradiance over pi, so with unit albedo it is the reflected light the receiver gets back. Vertices are deduplicated by exact position and normal bits before baking (164,568 vertices, 140,344 distinct in the shaft) and both steps run on all cores with `std::thread::scope`.
 
@@ -68,7 +69,7 @@ Slot 1 is created with the vertex buffer in `Renderer::upload_scene`, zero-fille
 
 ### Cost and the moving sun
 
-Measured on the shaft (Apple M3 Max, 16 cores, release build): BVH build 111 ms, bake 494 to 514 ms (64 rays per vertex), about 0.6 s in all on the first frame; 20 ms for the test scene. `mega_capture` prints `bounce bake N ms`; `cargo test --release -p mega_gen -- --ignored --nocapture shaft_bake_time` times it without a GPU.
+Measured on the shaft (Apple M3 Max, 16 cores, release build): BVH build 93 to 111 ms, bake 410 to 510 ms (64 rays per vertex, smoothing included; the smoothing pass is a few tens of milliseconds), about 0.6 s in all on the first frame; 20 ms for the test scene. `mega_capture` prints `bounce bake N ms`; `cargo test --release -p mega_gen -- --ignored --nocapture shaft_bake_time` times it without a GPU.
 
 How it copes with day and night: intensity changes (dusk, night) need no re-bake, because intensity multiplies the sun part in the shader. A change of sun direction does. The renderer re-bakes when the direction has moved by more than 0.25 degrees, synchronously inside `render`, which is a 0.5 s hitch. `Renderer::update_bounce` can be called right after `set_sun` to take that cost at a moment of the caller's choice. A day-night cycle that moves the sun continuously would need one of: baking on a worker thread and swapping the buffer when done (the bake is plain data and already thread-safe); baking a few key sun directions and interpolating between their buffers; or spreading the vertices of one bake over many frames. None is built yet. The sky part does not depend on the sun and could be baked once and kept; it is recomputed today because it comes almost free with the same rays.
 
@@ -89,4 +90,4 @@ How it copes with day and night: intensity changes (dusk, night) need no re-bake
 
 ## Related experiments
 
-E037 (bounced light), E038 (the new default), E039 (the owner's frames).
+E037 (bounced light), E038 (the new default), E039 (the owner's frames), E043 (walking pops), E048 (smoothing).

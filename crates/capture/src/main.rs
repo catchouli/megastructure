@@ -443,6 +443,7 @@ fn run() -> Result<()> {
     let mut second = Vec::new();
     let (mut mad_full, mut mad_down, mut rmad, mut rpop) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut rblur, mut ink, mut rcoarse) = (Vec::new(), Vec::new(), Vec::new());
+    let mut rrel = Vec::new();
     for i in 0..args.frames {
         let t = if args.frames == 1 {
             args.t.unwrap_or(0.5)
@@ -552,7 +553,8 @@ fn run() -> Result<()> {
             if let Some(prev) = &prev {
                 mad_full.push(mad(&prev.grey, &cur.grey));
                 mad_down.push(mad(&downsample4(&prev.grey, w, h), &downsample4(&cur.grey, w, h)));
-                let (m, pop, _) = reprojected_mad(prev, &cur, w, h, 0);
+                let (m, pop, rel, _) = reprojected_mad_rel(prev, &cur, w, h, 0);
+                rrel.push(rel);
                 let (bm, _, berr) = reprojected_mad(prev, &cur, w, h, 1);
                 let (cm, _, _) = reprojected_mad(prev, &cur, w, h, 2);
                 rblur.push(bm);
@@ -599,6 +601,14 @@ fn run() -> Result<()> {
             args.view.name(),
             pm * 100.0,
             px_ * 100.0
+        );
+        let (qm, qx) = stats(&rrel);
+        println!(
+            "metrics {} view {}: contrast-relative pops (error over half the local 3x3 contrast) mean {:.3}% max {:.3}%",
+            args.path,
+            args.view.name(),
+            qm * 100.0,
+            qx * 100.0
         );
         let (cm, cx) = stats(&rcoarse);
         println!(
@@ -659,12 +669,23 @@ struct Frame {
 /// adds to it.
 /// `blur`: 0 raw, 1 the 5x5 blur, 2 the 13x13 blur.
 fn reprojected_mad(prev: &Frame, cur: &Frame, w: u32, h: u32, blur: u32) -> (f32, f32, Vec<f32>) {
+    let (m, p, _, e) = reprojected_mad_rel(prev, cur, w, h, blur);
+    (m, p, e)
+}
+
+/// As `reprojected_mad`, plus the contrast-relative pop fraction (E046): a pixel pops when
+/// its error exceeds half the local contrast of the current frame (the range of its 3x3
+/// neighbourhood, at least 24 levels). A line edge that moves by less than half a pixel
+/// changes its pixels by less than half its contrast, so this counts changes that sub-pixel
+/// resampling cannot explain, whatever the contrast of the line against its background.
+fn reprojected_mad_rel(prev: &Frame, cur: &Frame, w: u32, h: u32, blur: u32) -> (f32, f32, f32, Vec<f32>) {
     let (pg, cg) = match blur {
         0 => (&prev.grey, &cur.grey),
         1 => (&prev.blurred, &cur.blurred),
         _ => (&prev.coarse, &cur.coarse),
     };
     let mut err = vec![0.0f32; (w * h) as usize];
+    let mut rel_pops = 0u64;
     let inv = cur.view_proj.inverse();
     let (wf, hf) = (w as f32, h as f32);
     let near = mega_render::camera::NEAR;
@@ -706,12 +727,25 @@ fn reprojected_mad(prev: &Frame, cur: &Frame, w: u32, h: u32, blur: u32) -> (f32
             if e > 64.0 {
                 pops += 1;
             }
+            if e > 12.0 {
+                let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+                for yy in y.saturating_sub(1)..(y + 2).min(h as usize) {
+                    for xx in x.saturating_sub(1)..(x + 2).min(w as usize) {
+                        let v = at(cg, xx, yy);
+                        lo = lo.min(v);
+                        hi = hi.max(v);
+                    }
+                }
+                if e > 0.5 * (hi - lo).max(24.0) {
+                    rel_pops += 1;
+                }
+            }
         }
     }
     if n == 0 {
-        return (0.0, 0.0, err);
+        return (0.0, 0.0, 0.0, err);
     }
-    ((sum / n as f64) as f32, pops as f32 / n as f32, err)
+    ((sum / n as f64) as f32, pops as f32 / n as f32, rel_pops as f32 / n as f32, err)
 }
 
 /// Separable box blur of radius r (edges clamped).

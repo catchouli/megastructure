@@ -52,11 +52,17 @@ pub struct BounceSettings {
     pub rays: usize,
     /// Worker threads (0: all available).
     pub threads: usize,
+    /// Radius in metres of the edge-aware smoothing applied after the gather (0: none). Each
+    /// value becomes a Gaussian-weighted mean over the distinct vertices within this radius
+    /// that lie on the same plane (normals within about 18 degrees, plane offsets within 0.15
+    /// m), so blotches from the fixed ray pattern and from big triangles even out without
+    /// light bleeding round corners (E048).
+    pub smooth: f32,
 }
 
 impl Default for BounceSettings {
     fn default() -> Self {
-        Self { rays: 64, threads: 0 }
+        Self { rays: 64, threads: 0, smooth: 2.5 }
     }
 }
 
@@ -367,7 +373,48 @@ impl BounceBaker {
             }
             [sun_acc / rays as f32, sky_acc / rays as f32]
         });
-        self.remap.iter().map(|&u| gathered[u as usize]).collect()
+        let smoothed = if settings.smooth > 0.0 { self.smooth(&gathered, settings.smooth, threads) } else { gathered };
+        self.remap.iter().map(|&u| smoothed[u as usize]).collect()
+    }
+
+    /// Edge-aware spatial smoothing over the distinct vertices (see `BounceSettings::smooth`).
+    fn smooth(&self, vals: &[[f32; 2]], radius: f32, threads: usize) -> Vec<[f32; 2]> {
+        let cell = radius;
+        let key = |p: Vec3| ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32, (p.z / cell).floor() as i32);
+        let mut grid: HashMap<(i32, i32, i32), Vec<u32>> = HashMap::new();
+        for (i, &p) in self.upos.iter().enumerate() {
+            grid.entry(key(p)).or_default().push(i as u32);
+        }
+        let inv2s2 = 1.0 / (2.0 * (0.5 * radius) * (0.5 * radius));
+        par_map(vals.len(), threads, |i| {
+            let (p, n) = (self.upos[i], self.unrm[i]);
+            let (cx, cy, cz) = key(p);
+            let (mut acc, mut wsum) = ([0.0f32; 2], 0.0f32);
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let Some(list) = grid.get(&(cx + dx, cy + dy, cz + dz)) else { continue };
+                        for &j in list {
+                            let j = j as usize;
+                            let q = self.upos[j];
+                            let d2 = (q - p).length_squared();
+                            if d2 > radius * radius || self.unrm[j].dot(n) < 0.95 || (q - p).dot(n).abs() > 0.15 {
+                                continue;
+                            }
+                            let w = (-d2 * inv2s2).exp();
+                            acc[0] += w * vals[j][0];
+                            acc[1] += w * vals[j][1];
+                            wsum += w;
+                        }
+                    }
+                }
+            }
+            if wsum > 0.0 {
+                [acc[0] / wsum, acc[1] / wsum]
+            } else {
+                vals[i]
+            }
+        })
     }
 }
 
@@ -469,7 +516,7 @@ mod tests {
         quad(&mut m, [Vec3::new(-4.0, 3.0, -4.0), Vec3::new(4.0, 3.0, -4.0), Vec3::new(4.0, 3.0, 4.0), Vec3::new(-4.0, 3.0, 4.0)], -Vec3::Y);
         quad(&mut m, [Vec3::new(-4.0, 3.01, -4.0), Vec3::new(-4.0, 3.01, 4.0), Vec3::new(4.0, 3.01, 4.0), Vec3::new(4.0, 3.01, -4.0)], Vec3::Y);
         let baker = BounceBaker::new(&m);
-        let b = baker.bake(BounceSun::Direction(Vec3::Y), BounceSettings { rays: 64, threads: 2 });
+        let b = baker.bake(BounceSun::Direction(Vec3::Y), BounceSettings { rays: 64, threads: 2, smooth: 0.0 });
         let at = |x: f32, y: f32, z: f32| {
             let i = m.vertices.iter().position(|v| v.position == [x, y, z] && v.normal[1] > 0.5).unwrap();
             b[i]
@@ -507,6 +554,32 @@ mod tests {
             mean[0] / b.len() as f32,
             mean[1] / b.len() as f32
         );
+    }
+
+    #[test]
+    fn smoothing_keeps_a_constant_field_and_respects_planes() {
+        // Two perpendicular walls meeting at x = 0: a floor (normal +Y) and a wall (+X).
+        let mut m = MeshData::default();
+        let mut quad = |c: [Vec3; 4], n: Vec3| {
+            let base = m.vertices.len() as u32;
+            for p in c {
+                m.vertices.push(crate::Vertex { position: p.into(), normal: n.into(), hatch_axis: [0.0, 0.0, 1.0], id_fine: 1 + base, id_coarse: 1, ao: 1.0 });
+            }
+            m.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        };
+        for i in 0..4 {
+            let z = i as f32;
+            quad([Vec3::new(0.0, 0.0, z), Vec3::new(0.0, 0.0, z + 1.0), Vec3::new(1.0, 0.0, z + 1.0), Vec3::new(1.0, 0.0, z)], Vec3::Y);
+            quad([Vec3::new(0.0, 0.0, z), Vec3::new(0.0, 1.0, z), Vec3::new(0.0, 1.0, z + 1.0), Vec3::new(0.0, 0.0, z + 1.0)], Vec3::X);
+        }
+        let baker = BounceBaker::new(&m);
+        let n = baker.sample_count();
+        // Floor 1, wall 0: smoothing must not mix them; a constant field stays constant.
+        let vals: Vec<[f32; 2]> = (0..n).map(|i| if baker.unrm[i].y > 0.5 { [1.0, 0.5] } else { [0.0, 0.5] }).collect();
+        let out = baker.smooth(&vals, 2.0, 2);
+        for i in 0..n {
+            assert!((out[i][0] - vals[i][0]).abs() < 1e-5 && (out[i][1] - 0.5).abs() < 1e-5, "{i}: {:?} {:?}", out[i], vals[i]);
+        }
     }
 
     #[test]

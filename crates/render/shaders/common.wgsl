@@ -64,7 +64,8 @@ struct Style {
     halftone: vec4<f32>,        // halftone amount, finest pitch (m), dot edge softness, screen angle (rad)
     paper2: vec4<f32>,          // paper tooth, tooth scale px, mottle, mottle scale px
     paper3: vec4<f32>,          // wash taking to the tooth, shadow softness, max penumbra (m), paper anchor
-    paper4: vec4<f32>,          // finest surface paper cell (m)
+    paper4: vec4<f32>,          // finest surface paper cell (m), min penumbra (m), max halftone pitch (m)
+    paper5: vec4<f32>,          // largest surface paper texel (m)
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;

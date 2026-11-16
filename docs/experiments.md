@@ -432,6 +432,46 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: contours off: 0.111% on, 0.048% off. All lines off: 0.002% either way. `lines` view (lines only, no tone): identical with and without bounce (0.30, 0.221%). `hatching` view: 0.002% either way. So neither the tone nor the lines pop on their own; the pop counter counts pixels off by more than 64 levels, and the same sub-pixel resampling of a stroke or contour edge crosses that threshold more often against the lighter grey that bounce gives. The blurred error is lower with bounce on (1.26 to 0.76 levels without contours).
 - Verdict: not a defect; a property of a fixed-threshold metric. Nothing changed.
 
+## E044: Fibre paper in place of clouds, and the halftone cap
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Fibre paper", "Halftone cap")
+- Question: the owner: the halftone "in the distance ... gets quite large and it starts to look a bit like snakeskin"; the paper shows "a 'photoshop clouds' effect ... a bit tacky"; try a paper fibre texture. Can the tooth come from fibres with no cloud, still fixed to surfaces and fading with distance?
+- Setup: a 512 x 512 tileable relief baked at startup (`paper.rs`: short fibres at random orientations, partly clumped, fine pits, faint tooth, no low frequencies), sampled in the surface frame at fixed world scales (0.5 mm texels times 2^k), only the layers 0.7 to 1.8 px per texel on screen, faded by amplitude, capped at 15 cm texels; `paper_mottle` 0; `halftone_max_pitch` 5 cm, halftone 0.05. Sheet `compare/E044-paper-fibre.png`: native crops, halftone off, of a wall at 2 m (`shaft_hall_wall --t 1`), the lit wall of frame 115151 (E047's camera), walls at 60 m (`shaft_spawn`) and a grazing floor (`shaft_hall_walk --t 0`): the E040 cloudy paper / fibre 0.03 (default) / fibre 0.05 / fibre with faint clouds (`--set paper_mottle=0.015`). Regenerate a cell with `mega_capture --path shaft_hall_wall --t 1 --width 2560 --height 1440 --set halftone=0 --set paper_tooth=0.05 --out <dir>`.
+- Failures on the way: (1) a 3 cm texel cap left walls past about 20 m flat; raised to 15 cm. (2) Layers chosen by the larger footprint and sampled with a single mip level blurred fibres into long streaks across grazing floors ("water ripples" on the bridge deck); now chosen by the smaller footprint and sampled with screen gradients and 16x anisotropic filtering, which also stopped a first attempt at fading floors from removing paper from every floor. (3) With a window of 0.7 to 2.8 px per texel, fibres up close were straw-sized; narrowed to 1.8.
+- Stability (61 frames, 1280x720, 5x5 blurred error, pops over 64 levels, contrast-relative pops): see E045 for the totals; the fibre paper adds little over the smooth wash (`shaft_hall_walk` 0.27 against 0.18 smooth, `shaft_spawn_yaw` 0.22 against 0.16).
+- Verdict: fibre 0.03, no clouds. Question on the sheet: fibre alone, or fibre with faint clouds?
+
+## E045: Contour crawl when moving
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("The frame", contour resolve)
+- Question: the owner finds fullscreen motion "a bit more jank". After E040 the lines are the largest source of frame-to-frame change. What shimmers?
+- Setup: metrics per debug view (`--view lines|strokes|contours|hatching`) on `shaft_bridge_walk` t 0.3..0.3267, `shaft_hall_walk` t 0..0.02333, `shaft_spawn_yaw`, and error images (`--error-png`). Findings: on the bridge, strokes dominate, almost all on railing posts; the posts are thinner than a pixel, so their strokes are drawn over the background's depth and reprojecting them with that depth counts their parallax as error (a metric artefact). In the hall, contours dominate: nearly vertical column silhouettes are stair-stepped with 1 px jogs every 10 to 30 px, and the jogs crawl along the line as the camera moves; the resolve's 3x3 structure tensor reads such a line as exactly vertical, so its tangent average never spreads a jog. Change: a second resolve stage fitting near-axis lines over 17 rows (columns) and redrawing them with box-filtered coverage (see the feature document). Clips `compare/E045-walk-1440-crop-old-new.mp4` (`shaft_hall_walk` t 0..0.0467) and `compare/E045-turn-1440-crop-old-new.mp4` (`hall_yaw` t 0.3..0.7), 121 frames at 2560x1440, centre 1280x720 crops at native size, before left, after right.
+- Failures on the way: (1) the fit gated by the tensor's coherence skipped exactly the jog pixels (a corner to the tensor); both axes are now tried everywhere. (2) A 9-row window only smoothed jogs locally and needed slopes up to 0.27 accepted, which broke shallow diagonals (floor seams) into dashes near the limit; 17 rows with slopes under 0.2.
+- Result (contours view, 5x5 error, pops over 64 levels, contrast-relative pops; before / after): `shaft_hall_walk` 0.276, 0.270%, 0.227% / 0.235, 0.151%, 0.210%; `hall_walk` 0.428, 0.458%, 0.573% / 0.404, 0.348%, 0.530%; `hall_yaw` 0.536, 0.520%, 0.895% / 0.533, 0.397%, 0.900%; `shaft_spawn_yaw` 0.159, 0.114%, 0.052% / 0.154, 0.073%, 0.045%. Whole frame, new default against the E042 default and the smooth wash (no paper, halftone or soft shadow; 5x5, pops, relative pops): `shaft_hall_walk` E042 0.289, 0.068% / new 0.265, 0.054%, 0.128% / smooth 0.177, 0.054%, 0.133%; `shaft_bridge_walk` 0.263, 0.111% / 0.267, 0.119%, 0.313% / 0.201, 0.118%, 0.314%; `shaft_spawn_yaw` 0.227, 0.016% / 0.215, 0.011%, 0.017% / 0.163, 0.011%, 0.018%; `shaft_spawn_pitch` 0.213, 0.017% / 0.185, 0.012%, 0.020% / 0.154; `hall_walk` 0.537, 0.212% / 0.478, 0.173%, 0.250% / 0.451; `hall_yaw` 0.680, 0.207% / 0.611, 0.166%, 0.362% / 0.589. At 2560x1440, `shaft_hall_walk` 0.217, 0.037% to 0.187, 0.028%, 0.075%. The new default's pops equal the smooth wash's on every path: what pops now is lines, not tone.
+- Verdict: kept. Not done: a light temporal filter on the ink buffer (not needed for the figures above; still the second choice); close parallel lines and steeper lines keep the old resolve.
+
+## E046: A contrast-relative pop metric
+- Date: 2026-11-16
+- Feature: `features/capture-tool.md`
+- Setup: `--metrics` prints, besides the 64-level pop count, the share of pixels whose reprojected error exceeds half the local 3x3 contrast of the current frame (at least 24 levels). E043 showed the fixed threshold counts a line's sub-pixel resampling as pops against light tone but not against dark; the relative count does not depend on the background.
+- Result: figures in E045; with bounce on and off on `shaft_bridge_walk` the relative pops are equal (0.314%), where the 64-level count doubled.
+- Verdict: both printed; the old one kept for continuity.
+
+## E047: The owner's frame 115151: snakeskin, hard far edge
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md`
+- Setup: frame 20261116-115151 reproduced with `mega_capture --scene shaft --camera -5.0623226,401.654,19.614002,2.0978482,-0.023957638,1.2217306 --width 3024 --height 1832`. The `shadow` debug view showed the stair's shadow soft in cascade 1 and hard in cascade 2: the soft/hard decision used the texel of the hard edge's own cascade, so a near-contact penumbra of under 8 cm was soft in one and hard (and serrated by the stair's steps) in the other. Fix: a minimum penumbra (`shadow_soft_min` 15 cm) in every cascade and no hard fallback once a blocker is found. The large dots were halftone pitches of 20 to 50 cm on walls 20 to 60 m away; capped at 5 cm (E044). Sheet `compare/E047-owner-frame-115151.png`: the frame before (committed default) and after, with native crops of the stair shadow's far end and the shaded wall strip.
+- Result: the shadow is soft along its whole length; no dots on the far walls; the dark blotch in the shadow is gone (E048); the paper is fibre. Contact shadows are 15 cm soft rather than crisp.
+- Verdict: for the owner. Question on the sheet: are the snakeskin, the hard far edge and the blotches gone?
+
+## E048: Blotchy bounce
+- Date: 2026-11-16
+- Feature: `features/bounced-light.md`
+- Question: the owner: "the GI looks a bit coarse and blotchy". With paper and halftone off, where do blotches come from?
+- Setup: frame 115151, `shaft_stair_below`, the hall and frame 000558 with `--set paper_tooth=0 --set halftone=0`. Two causes: (1) the per-vertex bake (fixed 64-ray pattern, values interpolated over 1.5 to 2 m triangles) gave diagonal patches on the stair-from-below walls; (2) the large dark blotch in the stair's shadow in 115151 was not bounce at all (it is there with bounce 0) but `tone_noise`, a 15 m value-noise cloud added to the light since E024. Changes: an edge-aware smoothing pass in the bake (2.5 m, same plane only), `tone_noise` 0 in `nihei_ink`. Sheet `compare/E048-bounce-smooth.png`: before / tone noise off, unsmoothed / after, on the four views.
+- Result: bake 410 to 510 ms with smoothing (it costs a few tens of ms). Patches on the walls gone; the 115151 blotch gone. More rays were not needed.
+- Verdict: kept. Question on the sheet: is the shading now smooth enough?
+
 ## Queued
 
 Experiments the plan already calls for, in rough order:
