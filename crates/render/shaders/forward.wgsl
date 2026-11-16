@@ -37,6 +37,8 @@ struct FsOut {
     @location(2) fill: vec4<f32>,
     // R black ink, G white ink, B line ink (written by the line passes), A unused.
     @location(3) ink: vec4<f32>,
+    // Wash coverage (continuous tone models).
+    @location(4) tone: f32,
 };
 
 // Everything one hatch layer needs about the fragment. u is the spacing coordinate (metres,
@@ -293,6 +295,260 @@ fn hatch_layer(c: LayerIn) -> LayerOut {
     let n_near = i32(jn) * step0;
     out.jit = mix(band_jit(c, n_near), band_jit(c, n_even), frac);
     return out;
+}
+
+
+// ---------------------------------------------------------------------------------------
+// Continuous ruled tone (tone_model 1, E027 onwards).
+//
+// The tone signal c (0 paper .. 1 solid ink) sets the coverage of the ruling directly:
+// every line's width is a fraction of the local pitch, width = c * pitch, so marks belong to
+// the surface (back away and lines get thinner and closer together in proportion) and tone
+// is conserved across distance. Through an octave change the odd lines narrow to nothing
+// while the even lines gain exactly that width (even c P (1 + f), odd c P (1 - f)), so mean
+// coverage is constant across the whole octave. Past about half coverage the white between
+// lines is a sliver; a merge term near c = 1 widens lines further so slivers thin, break
+// up and close into solid black: hatching and black are one quantity.
+
+struct RuleIn {
+    u: f32,
+    v: f32,
+    g: f32,
+    gv: f32,
+    lod: f32,
+    lodv: f32,
+    // dc/dv, signed, per metre: which way along the line the tone darkens.
+    cgrad: f32,
+    salt: u32,
+    c: f32,
+};
+
+// Private: the near-shadow-edge factor for shadow strokes (shadow_hatch_near).
+var<private> FNEAR: f32 = 1.0;
+
+// Weight profile along a stroke, t = 0 at its dark end, 1 at its light end: heavy and blunt
+// where the pen goes down, thinning steadily to a hairline that gives out. Normalised to
+// mean 1 over the stroke so it does not change the tone (heavy end 1.84, light end 0.07:
+// a hairline).
+fn rule_profile(t: f32) -> f32 {
+    return (1.0 - 0.96 * pow(saturate(t), 1.1)) / 0.5429;
+}
+
+// Coverage of ruled line n, centred at u = pos, with base width wb (rotation-invariant
+// pixels, before modulation). merge (0..1) fades the modulations out as the tone approaches
+// solid black, so the merge closes evenly.
+// share is the part of the pitch this line stands for (its width at full coverage).
+fn rule_line(r: RuleIn, n: i32, pos: f32, wb: f32, merge: f32, share: f32) -> f32 {
+    if (wb <= 0.0) {
+        return 0.0;
+    }
+    let key = line_key(r.salt, n);
+    let lvl = line_level(n);
+    let modamt = 1.0 - merge * merge;
+    // Weight per stroke (mean 1).
+    let vary = 1.0 + S.rule3.x * modamt * (u01(pcg(key ^ 0xa511e9b3u)) * 2.0 - 1.0);
+    // Breaks: fewer as the tone darkens. A patch run loses `gap` of its length on average
+    // plus the ragged start and end (S.feather.y: about 0.83 of it, see patch_run); that
+    // coverage is put back into width so the tone stays what c asks for.
+    let gap0 = S.hatch2.y * (1.0 - r.c);
+    let ragged = 0.83 * S.feather.y;
+    let kept0 = max(1.0 - gap0 - ragged, 0.05);
+    var w0 = wb * vary / kept0;
+    // Below the minimum width a stroke does not thin further: it breaks into dashes, so
+    // the very lightest tone is a few fine marks, not grey haze. The dashes keep pres of
+    // the usual length, so coverage is still conserved.
+    let wmin = S.rule2.y;
+    let pres = saturate(w0 / wmin);
+    w0 = max(w0, wmin);
+    let gap = 1.0 - ragged - pres * kept0;
+    if (gap >= 0.999) {
+        return 0.0;
+    }
+    var k = 1.0;
+    if (SH_GATE != 0u) {
+        k = line_shadow(r.salt, n) * FNEAR;
+    }
+    let rr = patch_run(r.salt ^ 0x9e3779b9u, key, n, lvl, r.v, gap);
+    let len = max(rr.x + rr.y, 1e-6);
+    let t = saturate(rr.x / len);
+    // Which end is dark: from the tone gradient along the line where there is one, else
+    // a random direction per stroke.
+    let srand = select(0.0, 1.0, (pcg(key ^ 0x1f83d9abu) & 1u) == 1u);
+    let gl = r.cgrad * len;
+    let sdir = saturate(mix(srand, 0.5 + 4.0 * gl, saturate(abs(gl) * 8.0)));
+    // The thinning runs over at least 24 stroke widths, so a short stroke stays near its
+    // heavy end and stops bluntly instead of being squeezed into a wedge (a dagger).
+    let kl = len / max(len, 24.0 * w0 * r.lodv);
+    let prof = mix(rule_profile(t * kl), rule_profile((1.0 - t) * kl), sdir);
+    // Pressure: low-frequency width variation along the stroke, per stroke.
+    let lam = S.hatch2.x * exp2(min(lvl, 10.0)) * 1.3;
+    let press = 1.0 + S.rule2.w * modamt * (2.0 * vnoise(key ^ 0x5be0cd19u, r.v / lam + u01(pcg(key)) * 17.0) - 1.0);
+    let weight = mix(1.0, prof, S.rule2.z * modamt) * press * k;
+    // Never wider than most of the pitch unless the tone asks for the merge into black, so
+    // neighbouring strokes do not fuse by accident.
+    let wi = min(w0 * weight, share * (0.85 + 1.5 * merge));
+    let w = wi * (r.lod / r.g);
+    let sd = abs(r.u - pos) / r.g;
+    // A short blunt ramp at both ends (1.5 px): the light end is already a hairline from the
+    // profile, so nothing ends in a point.
+    let tpS = 1.5 * G.misc.x;
+    let ends = end_taper(rr.x / r.lodv, tpS) * end_taper(rr.y / r.lodv, tpS);
+    let sharp = tent_cov(sd, w * ends) * saturate(rr.x / r.gv + 0.5) * saturate(rr.y / r.gv + 0.5);
+    let minified = saturate(r.lodv * 4.0 / rr.w - 0.5);
+    return mix(sharp, tent_cov(sd, w0 * k * (r.lod / r.g)) * (1.0 - gap), minified);
+}
+
+// Target ruling pitch in pixels at this output size (rule_target_px * px_scale^rule_res_exp).
+fn rule_target() -> f32 {
+    return S.rule.w * pow(G.misc.x, S.dark.w);
+}
+
+// Ruled coverage for tone c. With S.rule.y 0 the octave is chosen from the rotation-invariant
+// footprint (pitch between T/2 and T pixels, denser as c rises); with 1 there is one world
+// pitch and no line is ever dropped. Either way, where the pitch falls below the handover
+// (S.rule3.y pixels) the ruling dissolves into its mean coverage, c, over a factor of two.
+fn rule_layer(r: RuleIn) -> f32 {
+    let c = r.c;
+    if (c <= 0.002) {
+        return 0.0;
+    }
+    // Inside a cast shadow, flat parts (solid black, the dissolved far ruling) follow the
+    // fragment's own shadow amount; strokes are gated in rule_line.
+    let gate = select(1.0, FAMT * FNEAR, SH_GATE != 0u);
+    if (c >= 0.985) {
+        return gate;
+    }
+    let base = S.rule.z;
+    var kf = 0.0;
+    // Diagnostics (--hatch-lod): fixed keeps octave 0 (rigid by construction, the stability
+    // baseline); screen chooses the octave from the screen derivative.
+    if (S.rule.y < 0.5 && G.flags.z != 2u) {
+        let tgt = rule_target() / (1.0 + S.rule2.x * c);
+        let fp = select(r.lod, r.g, G.flags.z == 3u);
+        kf = clamp(log2(max(tgt * fp / base, 1e-6)), 0.0, 14.0);
+    }
+    let k0 = floor(kf);
+    let f = kf - k0;
+    let step0 = 1 << u32(k0);
+    let s0 = base * f32(step0);
+    let s1 = 2.0 * s0;
+    let pitch = s0 / r.lod;
+    // Handover to flat tone: with nested octaves only past the last octave (as the band
+    // model does), with one world pitch where the pitch falls below the handover.
+    let hpx = S.rule3.y * G.misc.x;
+    var hand = smoothstep(hpx, 2.0 * hpx, pitch);
+    if (S.rule.y < 0.5) {
+        hand = 1.0 - saturate(log2(max(rule_target() / (1.0 + S.rule2.x * c) * r.lod / base, 1e-6)) - 14.0);
+    }
+    if (hand <= 0.0) {
+        return c * gate;
+    }
+    let merge = smoothstep(0.55, 1.0, c);
+    let cw = c + 0.4 * merge * merge;
+    let we = cw * pitch * (1.0 + f);
+    let wo = cw * pitch * (1.0 - f);
+    let je = round(r.u / s1);
+    let sp = i32(step0);
+    let ne = i32(je) * sp * 2;
+    var sum = rule_line(r, ne, je * s1, we, merge, pitch * (1.0 + f));
+    sum += rule_line(r, ne - 2 * sp, (je - 1.0) * s1, we, merge, pitch * (1.0 + f));
+    sum += rule_line(r, ne + 2 * sp, (je + 1.0) * s1, we, merge, pitch * (1.0 + f));
+    sum += rule_line(r, ne - sp, (2.0 * je - 1.0) * s0, wo, merge, pitch * (1.0 - f));
+    sum += rule_line(r, ne + sp, (2.0 * je + 1.0) * s0, wo, merge, pitch * (1.0 - f));
+    return mix(c * gate, min(sum, 1.0), hand);
+}
+
+// Tone curve of the ruling: 0 at and above fall_white, 1 at and below fall_black.
+fn fall_curve(l: f32) -> f32 {
+    let x = saturate((S.fall.x - l) / max(S.fall.x - S.fall.y, 1e-3));
+    return pow(x, max(S.fall.z, 1e-3));
+}
+
+// Wash curve, already scaled to ink coverage.
+fn wash_curve(l: f32) -> f32 {
+    let x = saturate((S.wash.y - l) / max(S.wash.y - S.wash.z, 1e-3));
+    return pow(x, max(S.wash.w, 1e-3)) * S.wash2.x * S.wash.x;
+}
+
+// Signed derivative along v of a quantity with screen derivatives (lx, ly).
+fn grad_along_signed(ux: f32, uy: f32, vx: f32, vy: f32, lx: f32, ly: f32) -> f32 {
+    let det = ux * vy - vx * uy;
+    if (abs(det) < 1e-14) {
+        return 0.0;
+    }
+    return (ux * ly - uy * lx) / det;
+}
+
+// ---------------------------------------------------------------------------------------
+// Screentone: a threshold map T in 0..1; the wash w prints as ink where w > T.
+
+const TAU_: f32 = 6.2831853;
+
+fn dot_screen(x: vec2<f32>) -> f32 {
+    return 0.5 - 0.25 * (cos(TAU_ * x.x) + cos(TAU_ * x.y));
+}
+
+fn grain_screen(n: f32) -> f32 {
+    return saturate(0.5 + (n - 0.5) * 2.6);
+}
+
+fn screen_kind(dots: f32, grain: f32) -> f32 {
+    let k = S.wash2.z;
+    if (k < 0.5) {
+        return dots;
+    }
+    if (k < 1.5) {
+        return grain;
+    }
+    return 0.5 * (dots + grain);
+}
+
+// Threshold at this fragment for the chosen anchor. frag: pixel position; dv: unit view ray;
+// uv, gg: surface coordinates and their rotation-invariant footprints.
+fn screentone_t(frag: vec2<f32>, dv: vec3<f32>, p: vec3<f32>, uv: vec2<f32>, gg: vec2<f32>) -> f32 {
+    let px = max(S.wash3.x * G.misc.x, 1.0);
+    let a = S.wash2.w;
+    if (a < 0.5) {
+        // Screen: a 45 degree dot screen in pixels (print-true, shower-doors).
+        let q = frag / px;
+        let x = vec2<f32>(q.x + q.y, q.y - q.x) * 0.70710678;
+        let n = vnoise3(0x3243f6a8u, vec3<f32>(frag / (px * 0.4), 0.5));
+        return screen_kind(dot_screen(x), grain_screen(n));
+    }
+    if (a < 1.5) {
+        // View sphere: an equi-angular cube map of the view direction, whose dot lattice is
+        // aligned so that it mirrors seamlessly across every cube edge. Depends only on the
+        // direction in the world, so it is fixed under rotation; it slides under translation.
+        let pr0 = px * G.misc.y;
+        let pr = 1.5707963 / max(round(1.5707963 / pr0), 1.0);
+        let ad = abs(dv);
+        var ab: vec2<f32>;
+        var m: f32;
+        if (ad.x >= ad.y && ad.x >= ad.z) {
+            ab = dv.yz;
+            m = ad.x;
+        } else if (ad.y >= ad.z) {
+            ab = dv.xz;
+            m = ad.y;
+        } else {
+            ab = dv.xy;
+            m = ad.z;
+        }
+        let ang = vec2<f32>(atan(ab.x / m), atan(ab.y / m)) + 0.78539816;
+        let n = vnoise3(0x3243f6a8u, dv / (pr * 0.4));
+        return screen_kind(dot_screen(ang / pr), grain_screen(n));
+    }
+    // Surface: dots in the surface's own frame, octaves chosen from the rotation-invariant
+    // footprint and crossfaded; the octave-(k+1) screen's dots are every other dot of
+    // octave k, so the crossfade grows those and shrinks the rest.
+    let base = 0.004;
+    let kf = max(log2(max(px * max(gg.x, gg.y) / base, 1e-6)), 0.0);
+    let k0 = floor(kf);
+    let fr = kf - k0;
+    let c0 = base * exp2(k0);
+    let d = mix(dot_screen(uv / c0), dot_screen(uv / (2.0 * c0)), fr);
+    let n = mix(vnoise3(0x3243f6a8u, p / (c0 * 0.4)), vnoise3(0x85a308d3u, p / (c0 * 0.8)), fr);
+    return screen_kind(d, grain_screen(n));
 }
 
 fn sun_dir(p: vec3<f32>) -> vec3<f32> {
@@ -734,8 +990,50 @@ fn fs_main(in: VsOut) -> FsOut {
     if (!near_shadow && S.feather.z > 0.0 && S.fog2.y > 0.0 && facing > 0.5) {
         near_shadow = sun_vis_cheap(p + sax * S.feather.z) < 0.99 || sun_vis_cheap(p - sax * S.feather.z) < 0.99;
     }
+    // Continuous tone models: the light, darkened with depth into the structure (ao) and
+    // with distance from the eye, then the ruled and wash tone curves.
+    let ruled = S.rule.x > 0.5;
+    var darkf = 1.0;
+    if (S.fall.w > 0.0) {
+        darkf *= pow(max(ao, 1e-3), S.fall.w);
+    }
+    if (S.dark.y > 0.0) {
+        darkf *= exp(-max(rr - S.dark.x, 0.0) / S.dark.y);
+    }
+    if (S.wash3.w > 0.0) {
+        darkf *= exp(-max(G.camera_pos.y - p.y, 0.0) / S.wash3.w);
+    }
+    let lit_t = lit * darkf;
+    let dark_t = dark_l * darkf;
+    let c_lit = fall_curve(lit_t);
+    let c_dark = fall_curve(dark_t);
+    let cg_lit = grad_along_signed(dpdx(u1), dpdy(u1), dpdx(u2), dpdy(u2), dpdx(c_lit), dpdy(c_lit));
+    let cg_dark = grad_along_signed(dpdx(su1), dpdy(su1), dpdx(su2), dpdy(su2), dpdx(c_dark), dpdy(c_dark));
+
     var t: Tone;
-    if (amount >= 1.0 && S.feather.z <= 0.0) {
+    if (ruled) {
+        if (S.rule3.w > 0.5) {
+            FNEAR = saturate(shadow_nearby(p, n, s) * 3.0);
+        }
+        // The ruled widths need a real footprint, so the octave diagnostics are applied in
+        // rule_layer rather than by zeroing it.
+        let rl = RuleIn(u1, u2, g1, g2, lod_u1, lod_v1, cg_lit, 0x68e31da4u, c_lit);
+        var cov = rule_layer(rl) * (1.0 - amount);
+        var cblack = smoothstep(0.85, 0.985, c_lit) * (1.0 - amount);
+        if (near_shadow) {
+            SH_GATE = 1u;
+            // Shadow strokes are heavy where the occluder is (towards the sun along the
+            // surface) and trail off away from it, as a shadow hangs from what casts it.
+            let toward = dot(sax, sp);
+            let cg_sh = cg_dark + select(0.0, -sign(toward) * 10.0, abs(toward) > 0.05);
+            let rd = RuleIn(su1, su2, sg1, sg2, max(ra * length(sperp - n * (dot(sperp, dv) / nd)), 1e-7), slodv1, cg_sh, 0x7c3a91e5u, c_dark);
+            cov = max(cov, rule_layer(rd));
+            SH_GATE = 0u;
+            cblack = max(cblack, smoothstep(0.85, 0.985, c_dark) * amount * FNEAR);
+        }
+        t.cov = cov;
+        t.black = cblack;
+    } else if (amount >= 1.0 && S.feather.z <= 0.0) {
         t = tone_ink(fsh, dark_l);
     } else {
         t = tone_ink(f, lit);
@@ -753,6 +1051,22 @@ fn fs_main(in: VsOut) -> FsOut {
     }
     let light = mix(lit, dark_l, amount);
 
+    // An ink line along the cast shadow's edge (its anti-aliased 0.5 iso-line), rigid
+    // because the edge is.
+    if (S.rule3.z > 0.0 && gsv > 1e-5 && facing > 0.5 && S.fog2.y > 0.0) {
+        let dpx = (sv.x - 0.5) / gsv;
+        t.cov = max(t.cov, tent_cov(abs(dpx), S.rule3.z * G.misc.x));
+    }
+
+    // Wash, printed partly as screentone.
+    var wash = 0.0;
+    if (S.wash.x > 0.0) {
+        let w0 = mix(wash_curve(lit_t), wash_curve(dark_t), amount);
+        let tt = screentone_t(in.clip.xy, dv, p, vec2<f32>(u1, u2), vec2<f32>(lod1, lod_v1));
+        let ht = saturate((w0 - tt) / max(fwidth(tt), 0.05) + 0.5);
+        wash = mix(w0, ht, S.wash2.y);
+    }
+
     let view = G.flags.x;
     let hatch_on = view == VIEW_FINAL || view == VIEW_HATCHING;
     var white = speckle(f, in.ids.x);
@@ -761,7 +1075,11 @@ fn fs_main(in: VsOut) -> FsOut {
         let wl = hatch_layer(LayerIn(u1, u2, g1, g2, lod1, lod_v1, 0.0, 0x3c6ef372u, 0.0, 1.0, 0.0, edge, S.white.y, 0.7, S.hatch2.y));
         white = max(white, wl.cov * S.white.x);
     }
-    let speck = white * t.black;
+    var speck = white * t.black;
+    if (S.dark.z > 0.0 && S.wash.x > 0.0) {
+        // White specks in dark wash.
+        speck = max(speck, speckle(f, in.ids.x ^ 0x2545f491u) * smoothstep(0.3, 0.65, wash) * S.dark.z);
+    }
 
     var out: FsOut;
     out.id = in.ids;
@@ -770,9 +1088,11 @@ fn fs_main(in: VsOut) -> FsOut {
     // (read by the composite to turn lines white inside black).
     out.fill = vec4<f32>(0.0, band_of(light) / 3.0, ao, select(0.0, t.black, hatch_on));
     out.ink = vec4<f32>(select(0.0, t.cov, hatch_on), select(0.0, speck, hatch_on), 0.0, 0.0);
+    out.tone = select(0.0, wash, hatch_on);
     if (view == VIEW_SHADOW) {
         out.fill = vec4<f32>(0.0, sv.y / 4.0, ao, 0.0);
         out.ink = vec4<f32>(amount, 0.0, 0.0, 0.0);
+        out.tone = 0.0;
     }
     return out;
 }

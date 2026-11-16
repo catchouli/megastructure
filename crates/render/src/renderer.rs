@@ -20,6 +20,9 @@ pub const FILL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// R black ink (hatching and solid black), G white ink, B line ink (strokes and contours,
 /// turned white inside solid black by the composite), A unused.
 pub const INK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Wash: grey tone as ink coverage 0..1, already printed as screentone where the preset asks
+/// for it (continuous tone models only; 0 everywhere with the band model).
+pub const TONE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// Sun shadow map array, one layer per cascade.
 pub const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Contour strength before anti-aliasing.
@@ -283,6 +286,7 @@ struct Targets {
     normal: wgpu::TextureView,
     fill: wgpu::TextureView,
     ink: wgpu::TextureView,
+    tone: wgpu::TextureView,
     contour: wgpu::TextureView,
 }
 
@@ -313,6 +317,7 @@ impl Targets {
             normal: make_target(device, w, h, NORMAL_FORMAT, "normal"),
             fill: make_target(device, w, h, FILL_FORMAT, "fill"),
             ink: make_target(device, w, h, INK_FORMAT, "ink"),
+            tone: make_target(device, w, h, TONE_FORMAT, "tone"),
             contour: make_target(device, w, h, CONTOUR_FORMAT, "contour mask"),
         }
     }
@@ -450,7 +455,7 @@ impl Renderer {
         });
         let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("composite"),
-            entries: &[tex_entry(0, FLOAT), tex_entry(1, FLOAT), tex_entry(2, DEPTH), tex_entry(3, UINT), tex_entry(4, FLOAT)],
+            entries: &[tex_entry(0, FLOAT), tex_entry(1, FLOAT), tex_entry(2, DEPTH), tex_entry(3, UINT), tex_entry(4, FLOAT), tex_entry(5, FLOAT)],
         });
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -650,6 +655,7 @@ impl Renderer {
                     Some(NORMAL_FORMAT.into()),
                     Some(FILL_FORMAT.into()),
                     Some(INK_FORMAT.into()),
+                    Some(TONE_FORMAT.into()),
                 ],
             }),
             multiview_mask: None,
@@ -800,6 +806,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&t.depth) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&t.id) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&t.normal) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&t.tone) },
             ],
         })
     }
@@ -1044,7 +1051,7 @@ impl Renderer {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("forward"),
-                color_attachments: &[clear(&self.targets.id), clear(&self.targets.normal), clear(&self.targets.fill), clear(&self.targets.ink)],
+                color_attachments: &[clear(&self.targets.id), clear(&self.targets.normal), clear(&self.targets.fill), clear(&self.targets.ink), clear(&self.targets.tone)],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.targets.depth,
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
@@ -1149,10 +1156,10 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_wgsl() {
-        // struct Globals: two mat4x4 and seven vec4. struct Style: twenty-seven vec4.
+        // struct Globals: two mat4x4 and seven vec4. struct Style: thirty-five vec4.
         // struct ShadowU: four mat4x4 and two vec4.
         assert_eq!(std::mem::size_of::<Globals>(), 2 * 64 + 7 * 16);
-        assert_eq!(std::mem::size_of::<StyleGpu>(), 27 * 16);
+        assert_eq!(std::mem::size_of::<StyleGpu>(), 35 * 16);
         assert_eq!(std::mem::size_of::<ShadowGpu>(), 4 * 64 + 2 * 16);
     }
 
@@ -1161,6 +1168,28 @@ mod tests {
         let s = Sun::default();
         assert!(s.position.length() > Sun::DIRECTIONAL_DISTANCE);
         assert!(s.position.y > 0.0 && s.intensity > 0.0);
+    }
+
+    #[test]
+    fn every_named_preset_is_found_and_the_old_ones_keep_the_band_model() {
+        for name in StylePreset::NAMES {
+            assert!(StylePreset::by_name(name).is_some(), "{name}");
+        }
+        // nihei and nihei_vast must draw exactly as before the continuous tone models.
+        for p in [StylePreset::nihei(), StylePreset::nihei_vast()] {
+            assert_eq!(p.tone_model, 0.0);
+            assert_eq!(p.wash, 0.0);
+            assert_eq!(p.paper_texture, 0.0);
+            assert_eq!(p.shadow_edge_line, 0.0);
+            assert_eq!((p.dark_dist_len, p.dark_down_len), (0.0, 0.0));
+        }
+        assert_eq!(StylePreset::scene_default("shaft"), StylePreset::nihei_vast());
+        assert_eq!(StylePreset::scene_default("test"), StylePreset::nihei());
+        for p in [StylePreset::nihei_fall(), StylePreset::nihei_wash(), StylePreset::nihei_hybrid()] {
+            assert_eq!(p.tone_model, 1.0);
+            assert!(p.fall_white > p.fall_black && p.rule_pitch > 0.0 && p.rule_target_px > 0.0);
+        }
+        assert!(StylePreset::nihei_wash().wash > 0.0 && StylePreset::nihei_fall().wash == 0.0);
     }
 
     #[test]

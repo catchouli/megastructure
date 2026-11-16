@@ -84,6 +84,10 @@ megastructure --headless --shot screenshots/20261115-235959.json --out debug --v
 
 `crates/shot/src/lib.rs` (`Shot`, JSON, git, timestamps, unique names) and in `crates/game/src/`: `shotio.rs` (capture state, write the pair, apply a sidecar and overrides), `offscreen.rs` (offscreen target and readback, shared with the headless runner), `headless.rs` (`replay`, the `screenshot` action), `windowed.rs` (the key and the overlay message).
 
+### Replaying a frame in another preset
+
+A sidecar stores every preset field, so `--set` would need all of them to switch presets. For comparisons (E030), copy the sidecar, set `preset.name` to the other preset and empty `preset.fields`: every field then takes that preset's current default (the replay warns once per missing field). A screenshot taken with `MEGA_PRESET` set records that preset's name and fields like any other.
+
 ### Limits
 
 - `mega_render` has no getter for a preset field by name or for the shadow filter, so the game reads the preset from its `Debug` text (a test checks that every name in `StylePreset::FIELDS` is found and that the values round-trip through `set`) and records the shadow filter as `smooth`, which the game never changes. A `get(name)` on `StylePreset` and a `shadow_filter()` accessor on `Renderer` would remove both workarounds.

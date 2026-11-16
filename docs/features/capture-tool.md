@@ -23,7 +23,7 @@ Run from the workspace root: `cargo run --release -p mega_capture -- <options>`.
 |---|---|---|
 | `--path <name>` | Camera path, required | |
 | `--scene <name>` | Scene from `mega_gen::scenes::NAMES`. The scene also selects its style preset (`StylePreset::for_scene`) and sun (`Sun::for_scene`). A path tuned to another scene renders with a warning | the path's own scene (`paths::scene_of`), else `mega_gen::scenes::DEFAULT` |
-| `--preset <name>` | Style preset instead of the scene's: `nihei`, `nihei_vast` | the scene's |
+| `--preset <name>` | Style preset instead of the scene's: `nihei`, `nihei_vast`, `nihei_fall`, `nihei_wash`, `nihei_hybrid` (`StylePreset::NAMES`). Without it the scene's preset is used, or the one named by `MEGA_PRESET` if that is set | the scene's |
 | `--out <dir>` | Output directory, created if missing, required | |
 | `--frames <N>` | Number of frames. Frame `i` uses `t = i / (N - 1)` | 1 |
 | `--t <T>` | `t` in 0..1; only valid with `--frames 1` | 0.5 |
@@ -38,10 +38,11 @@ Run from the workspace root: `cargo run --release -p mega_capture -- <options>`.
 | `--sun-intensity <x>` | Sun intensity; 0 switches the sun and its shadow pass off | the scene's |
 | `--shadow-filter <m>` | Diagnostic: `smooth` (default), `bilinear`, `hard` (E012) | |
 | `--metrics` | Print temporal stability figures for the sequence (see below). Switches paper grain off | |
+| `--centre-ink` | Print the mean ink (255 minus mean grey) of the central 20% x 20% of each frame: the tone of a surface filling the middle of the view, for tone-against-distance checks (E029) | |
 | `--no-png` | Do not write frames (with `--metrics`); `--out` becomes optional | |
 | `--error-png` | With `--metrics`, also write `error_NNNN.png`: blurred reprojection residual times 8, white is none | |
 | `--bench <N>` | Render one frame (`--t`) N times without readback and print ms per frame | |
-| `--hatch-lod <m>` | Diagnostic: `directional` (default, rotation-invariant), `isotropic`, `fixed`, `screen` (the screen-derivative choice before E020) (E002, E020) | |
+| `--hatch-lod <m>` | Diagnostic: `directional` (default, rotation-invariant), `isotropic`, `fixed`, `screen` (the screen-derivative choice before E020) (E002, E020). With `tone_model` 1, `fixed` and `screen` act inside the ruled layer (octave 0, or the screen derivative) and `isotropic` has no effect | |
 | `--stroke-vis <m>` | Diagnostic: `block` (default), `centreline`, `pixel` (E003) | |
 | `--depth-tol <x>` | Override the preset's stroke depth tolerance | |
 | `--list-paths` | Print path names with their scenes and exit | |
@@ -77,6 +78,8 @@ Defined in `crates/render/src/paths.rs` as `fn(t: f32) -> Camera`, `t` clamped t
 | `still_hall` | One fixed view in the hall looking towards the arch, with the stair climbing the left wall; `t` is ignored |
 | `hall_yaw`, `hall_pitch` | From the `still_hall` position, turning 90 degrees about the vertical, or tipping from 45 degrees down to 45 up, over t 0..1: with `--frames 61` a turn at 90 degrees per second at 60 fps |
 | `hall_walk` | From the `still_hall` position, 6 m along its view direction over t 0..1; `--frames 61 --t1 0.2333` is 1.4 m/s at 60 fps |
+
+`shaft_wall_approach` faces the hall's back wall square on from 160 m to 2 m on a log scale, `d = 2 * 80^(1 - t)` (t 1, 0.7909, 0.6327, 0.3819, 0.1582, 0 for 2, 5, 10, 30, 80, 160 m; at 160 m the camera is in the shaft looking through the arch). With `--centre-ink` it gives tone against distance (E029): `mega_capture --path shaft_wall_approach --frames 21 --view hatching --centre-ink --no-png --preset nihei_fall --set paper_grain=0 --set tone_noise=0 --set dark_dist_len=0`.
 
 `shaft_hall_wall` approaches the owner's screenshot 20261116-000630 from 78 m to 2 m (t 0.85 is the screenshot's distance; E026). The shaft has the same rotation probes at the spawn: `shaft_spawn_yaw` and `shaft_spawn_pitch` (E020). Example: `mega_capture --path shaft_spawn_yaw --frames 61 --view hatching --metrics --no-png`.
 

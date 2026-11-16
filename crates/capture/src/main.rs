@@ -31,6 +31,8 @@ OPTIONS:
     --t1 <B>         end of the t range for a sequence, default 1
     --view <V>       final, id, normals, depth, bands, hatching, strokes, contours, lines
                      (default final)
+    --centre-ink     print the mean ink (255 minus mean grey) of the central 20% x 20% of
+                     each frame, for tone-against-distance checks
     --metrics        print the mean absolute difference between consecutive frames, at
                      full resolution and after a 4x4 box downsample (0..255 grey levels)
                      and after reprojecting the previous frame into the current one by
@@ -50,7 +52,8 @@ OPTIONS:
     --height <H>     image height in pixels, default 720
     --list-paths     print the available path names (with their scenes) and exit
     --list-scenes    print the available scene names and exit
-    --preset <name>  style preset instead of the scene's own: nihei, nihei_vast
+    --preset <name>  style preset instead of the scene's own: nihei, nihei_vast, nihei_fall,
+                     nihei_wash, nihei_hybrid
     --set <f>=<v>    override one preset field (repeatable), e.g. --set shadow_light_max=0.2
                      or --set sky_tone=none; --list-fields prints the names
     --list-fields    print the preset field names and exit
@@ -92,6 +95,7 @@ struct Args {
     sets: Vec<(String, String)>,
     sun: SunArgs,
     shadow_filter: ShadowFilter,
+    centre_ink: bool,
 }
 
 #[derive(Default)]
@@ -132,6 +136,7 @@ fn parse_args() -> Result<Option<Args>> {
     let mut sets = Vec::new();
     let mut sun = SunArgs::default();
     let mut shadow_filter = ShadowFilter::Smooth;
+    let mut centre_ink = false;
     fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
         it.next().ok_or_else(|| anyhow!("{flag} needs a value"))
     }
@@ -196,6 +201,7 @@ fn parse_args() -> Result<Option<Args>> {
                 })?;
             }
             "--metrics" => metrics = true,
+            "--centre-ink" => centre_ink = true,
             "--no-png" => png = false,
             "--error-png" => error_png = true,
             "--stroke-vis" => {
@@ -256,7 +262,7 @@ fn parse_args() -> Result<Option<Args>> {
             bail!("--sun-dist must be positive");
         }
     }
-    Ok(Some(Args { path, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol, sets, sun, shadow_filter }))
+    Ok(Some(Args { path, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol, sets, sun, shadow_filter, centre_ink }))
 }
 
 fn main() {
@@ -474,6 +480,20 @@ fn run() -> Result<()> {
             }
         }
         readback.unmap();
+
+        if args.centre_ink {
+            // Mean ink (255 minus mean grey) in the central 20% x 20% box: the tone of a
+            // surface filling the middle of the view, for tone-against-distance checks (E028).
+            let (x0, x1, y0, y1) = (w * 2 / 5, w * 3 / 5, h * 2 / 5, h * 3 / 5);
+            let mut sum = 0.0f64;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let o = ((y * w + x) * 4) as usize;
+                    sum += 255.0 - (pixels[o] as f64 + pixels[o + 1] as f64 + pixels[o + 2] as f64) / 3.0;
+                }
+            }
+            println!("centre-ink {} t {t:.4}: {:.2}", args.path, sum / ((x1 - x0) * (y1 - y0)) as f64);
+        }
 
         if args.metrics {
             let grey: Vec<f32> = pixels.chunks(4).map(|p| (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0).collect();

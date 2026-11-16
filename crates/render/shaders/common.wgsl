@@ -50,6 +50,14 @@ struct Style {
     strokes: vec4<f32>,         // hatch patch amount, patch width (lines), patch length, taper px
     feather: vec4<f32>,         // hatch feather (spacings), end jitter, shadow feather (m), shadow hatch dir
     feather2: vec4<f32>,        // shadow break gap, taper length in widths, max line width px
+    rule: vec4<f32>,            // tone model, rule lod, rule pitch (m), rule target px
+    rule2: vec4<f32>,           // rule density, min px, profile, pressure
+    rule3: vec4<f32>,           // stroke variation, handover px, shadow edge line px, shadow hatch near edge
+    fall: vec4<f32>,            // fall white, fall black, fall gamma, dark ao exponent
+    dark: vec4<f32>,            // dark distance start (m), dark distance length (m), wash speckle, rule resolution exponent
+    wash: vec4<f32>,            // wash, wash white, wash black, wash gamma
+    wash2: vec4<f32>,           // wash max, screentone, screentone kind, screentone anchor
+    wash3: vec4<f32>,           // screentone px, paper texture, paper texture px, dark down length (m)
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;

@@ -248,6 +248,85 @@ pub struct StylePreset {
     /// Sky: `None` keeps the fogged paper of the atmosphere, `Some(x)` is a flat tone from
     /// paper (0) to ink (1).
     pub sky_tone: Option<f32>,
+
+    // Continuous tone models (E027 onwards). `tone_model` 0 keeps the band hatching above;
+    // 1 draws ruled hatching whose coverage follows a continuous tone, with an optional
+    // wash. See "Tone models" in docs/features/ink-renderer.md.
+    /// 0: tone bands (`band_*`, the `nihei` look). 1: continuous ruled tone (`rule_*`,
+    /// `fall_*`), with the wash if `wash` > 0.
+    pub tone_model: f32,
+    /// Level of detail of the ruling: 0 nested octaves (lines drop out by narrowing, the
+    /// survivors widen so coverage is conserved), 1 one fixed world pitch with no lines
+    /// dropped, handing over to flat tone where the pitch falls below `rule_handover_px`.
+    pub rule_lod: f32,
+    /// World spacing of the ruling in metres (octave 0 with `rule_lod` 0; the only spacing
+    /// with `rule_lod` 1).
+    pub rule_pitch: f32,
+    /// With `rule_lod` 0: the line pitch in pixels (at 720 lines) the octave choice aims for.
+    pub rule_target_px: f32,
+    /// How the ruling pitch in pixels follows the output resolution: the target is
+    /// `rule_target_px * (height / 720) ^ rule_res_exp`. 1 draws the same picture at every
+    /// size; below 1 a larger output gets relatively finer ruling (a finer pen).
+    pub rule_res_exp: f32,
+    /// Ruling gets denser with tone: the target pitch is divided by `1 + rule_density * c`.
+    pub rule_density: f32,
+    /// Stroke width in real pixels below which a stroke stops thinning and is
+    /// broken into dashes instead, so light tone is a few fine marks rather than grey haze.
+    pub rule_min_px: f32,
+    /// Weight profile along each stroke, 0..1: heavy at the dark end, thinning steadily to a
+    /// hairline at the light end. 0 is a constant width.
+    pub rule_profile: f32,
+    /// Low-frequency pressure variation of width along each stroke, relative.
+    pub rule_pressure: f32,
+    /// Variation of weight between strokes, relative.
+    pub rule_vary: f32,
+    /// Pitch in pixels (at 720 lines) below which ruling hands over to flat tone (over a
+    /// factor of two).
+    pub rule_handover_px: f32,
+    /// Ruled tone curve: light at and above this is paper.
+    pub fall_white: f32,
+    /// Light at and below this is full coverage (solid black).
+    pub fall_black: f32,
+    /// Exponent of the curve between them (above 1 keeps mid tones light).
+    pub fall_gamma: f32,
+    /// Depth into the structure: the light is multiplied by `ao ^ dark_ao` (0 off).
+    pub dark_ao: f32,
+    /// Distance from the eye before light starts to fall off (metres).
+    pub dark_dist_start: f32,
+    /// Falloff length: the light is multiplied by `exp(-(d - start) / len)` (0 off).
+    pub dark_dist_len: f32,
+    /// Falloff with depth below the eye: the light is multiplied by
+    /// `exp(-max(eye_y - y, 0) / dark_down_len)` (0 off), so looking down a shaft falls into
+    /// darkness while looking across it does not.
+    pub dark_down_len: f32,
+    /// Wash strength, 0..1 (0: no wash).
+    pub wash: f32,
+    /// Wash tone curve: light at and above this has no wash.
+    pub wash_white: f32,
+    /// Light at and below this has the full wash.
+    pub wash_black: f32,
+    /// Exponent of the wash curve.
+    pub wash_gamma: f32,
+    /// Darkest wash, as ink coverage 0..1.
+    pub wash_max: f32,
+    /// How much of the wash is printed as screentone rather than smooth grey, 0..1.
+    pub screentone: f32,
+    /// Screentone kind: 0 dot screen, 1 grain (mezzotint), 2 both.
+    pub screentone_kind: f32,
+    /// Screentone anchor: 0 screen, 1 view sphere, 2 surface.
+    pub screentone_anchor: f32,
+    /// Screentone pitch in pixels (at 720 lines).
+    pub screentone_px: f32,
+    /// Strength of the screen-anchored paper texture (fibre-scale noise), 0 off.
+    pub paper_texture: f32,
+    /// Scale of that texture in pixels (at 720 lines).
+    pub paper_texture_px: f32,
+    /// White specks in dark wash (as `speckle`, but where the wash is dark), 0 off.
+    pub wash_speckle: f32,
+    /// Width in pixels (at 720 lines) of an ink line drawn along cast shadow edges, 0 off.
+    pub shadow_edge_line: f32,
+    /// 1: hatching inside a cast shadow is kept only within `indication_radius` of its edge.
+    pub shadow_hatch_near: f32,
 }
 
 impl StylePreset {
@@ -349,6 +428,39 @@ impl StylePreset {
             cross_angle_jitter: 0.0,
             cross_angle_by_panel: 0.0,
             sky_tone: None,
+
+            tone_model: 0.0,
+            rule_lod: 0.0,
+            rule_pitch: 0.02,
+            rule_target_px: 3.0,
+            rule_res_exp: 0.6,
+            rule_density: 0.5,
+            rule_min_px: 0.4,
+            rule_profile: 0.8,
+            rule_pressure: 0.25,
+            rule_vary: 0.35,
+            rule_handover_px: 1.6,
+            fall_white: 0.62,
+            fall_black: 0.3,
+            fall_gamma: 1.0,
+            dark_ao: 0.0,
+            dark_dist_start: 0.0,
+            dark_dist_len: 0.0,
+            dark_down_len: 0.0,
+            wash: 0.0,
+            wash_white: 0.9,
+            wash_black: 0.3,
+            wash_gamma: 1.0,
+            wash_max: 0.8,
+            screentone: 0.0,
+            screentone_kind: 0.0,
+            screentone_anchor: 2.0,
+            screentone_px: 2.5,
+            paper_texture: 0.0,
+            paper_texture_px: 3.0,
+            wash_speckle: 0.0,
+            shadow_edge_line: 0.0,
+            shadow_hatch_near: 0.0,
         }
     }
 
@@ -382,6 +494,14 @@ impl StylePreset {
             patch: [self.hatch_patch, self.hatch_patch_lines, self.hatch_patch_len, self.hatch_taper_px],
             feather: [self.hatch_feather, self.hatch_end_jitter, self.shadow_feather, self.shadow_hatch_dir],
             feather2: [self.shadow_break_gap, self.hatch_taper_width, self.hatch_width_max_px, 0.0],
+            rule: [self.tone_model, self.rule_lod, self.rule_pitch, self.rule_target_px],
+            rule2: [self.rule_density, self.rule_min_px, self.rule_profile, self.rule_pressure],
+            rule3: [self.rule_vary, self.rule_handover_px, self.shadow_edge_line, self.shadow_hatch_near],
+            fall: [self.fall_white, self.fall_black, self.fall_gamma, self.dark_ao],
+            dark: [self.dark_dist_start, self.dark_dist_len, self.wash_speckle, self.rule_res_exp],
+            wash: [self.wash, self.wash_white, self.wash_black, self.wash_gamma],
+            wash2: [self.wash_max, self.screentone, self.screentone_kind, self.screentone_anchor],
+            wash3: [self.screentone_px, self.paper_texture, self.paper_texture_px, self.dark_down_len],
         }
     }
 }
@@ -437,19 +557,120 @@ impl StylePreset {
         }
     }
 
+    /// Model A, "falling into darkness": `nihei_vast` with the continuous ruled tone. Lit
+    /// and moderately lit surfaces are paper; ruling comes in only as the light falls, which
+    /// it does strongly with depth into the structure and distance from the eye, and the
+    /// ruling closes continuously into black in the far depth. See "Tone models" in
+    /// docs/features/ink-renderer.md and E027.
+    pub fn nihei_fall() -> Self {
+        Self {
+            tone_model: 1.0,
+            fall_white: 0.45,
+            fall_black: 0.06,
+            fall_gamma: 1.4,
+            dark_ao: 0.6,
+            dark_dist_start: 30.0,
+            dark_dist_len: 220.0,
+            dark_down_len: 140.0,
+            hatch_patch_lines: 3.0,
+            hatch_end_jitter: 0.35,
+            hatch_break_len: 2.0,
+            shadow_light_min: 0.3,
+            shadow_light_max: 0.45,
+            white_hatch: 0.0,
+            hatch_break_gap: 0.06,
+            fog_density: 0.0015,
+            fog_max: 0.3,
+            ..Self::nihei_vast()
+        }
+    }
+
+    /// Model B, wash and halftone: tone is a graded grey wash printed partly as screentone
+    /// on textured paper; ruling only at the darkest end and along cast shadow edges.
+    pub fn nihei_wash() -> Self {
+        Self {
+            tone_model: 1.0,
+            fall_white: 0.2,
+            fall_black: 0.05,
+            fall_gamma: 1.0,
+            dark_ao: 0.5,
+            wash: 1.0,
+            wash_white: 0.72,
+            wash_black: 0.15,
+            wash_gamma: 1.3,
+            wash_max: 0.72,
+            screentone: 0.25,
+            screentone_kind: 1.0,
+            screentone_anchor: 2.0,
+            screentone_px: 2.0,
+            paper_texture: 0.06,
+            wash_speckle: 0.5,
+            shadow_hatch_near: 1.0,
+            indication_radius: 1.5,
+            shadow_light_min: 0.25,
+            shadow_light_max: 0.45,
+            white_hatch: 0.0,
+            hatch_break_gap: 0.06,
+            hatch_patch_lines: 3.0,
+            hatch_end_jitter: 0.35,
+            hatch_break_len: 2.0,
+            ..Self::nihei_vast()
+        }
+    }
+
+    /// Hybrid: the wash carries the mid tones; ruling comes in with depth and distance and
+    /// closes into black at the far depth, as in `nihei_fall`.
+    pub fn nihei_hybrid() -> Self {
+        Self {
+            wash_max: 0.5,
+            fall_white: 0.4,
+            fall_black: 0.05,
+            fall_gamma: 1.5,
+            dark_ao: 0.8,
+            dark_dist_start: 30.0,
+            dark_dist_len: 220.0,
+            dark_down_len: 140.0,
+            ..Self::nihei_wash()
+        }
+    }
+
     /// Preset names accepted by [`StylePreset::by_name`].
-    pub const NAMES: &'static [&'static str] = &["nihei", "nihei_vast"];
+    pub const NAMES: &'static [&'static str] = &["nihei", "nihei_vast", "nihei_fall", "nihei_wash", "nihei_hybrid"];
 
     pub fn by_name(name: &str) -> Option<Self> {
         match name {
             "nihei" => Some(Self::nihei()),
             "nihei_vast" => Some(Self::nihei_vast()),
+            "nihei_fall" => Some(Self::nihei_fall()),
+            "nihei_wash" => Some(Self::nihei_wash()),
+            "nihei_hybrid" => Some(Self::nihei_hybrid()),
             _ => None,
         }
     }
 
-    /// The preset a named scene is tuned for (`nihei` for anything unknown).
+    /// Environment variable that overrides [`StylePreset::for_scene`] with a named preset,
+    /// so a preset can be tried in the windowed game without code changes:
+    /// `MEGA_PRESET=nihei_wash cargo run --release --bin megastructure -- --scene shaft`.
+    pub const ENV_OVERRIDE: &'static str = "MEGA_PRESET";
+
+    /// The preset a named scene is tuned for (`nihei` for anything unknown), unless the
+    /// `MEGA_PRESET` environment variable names a preset, which then applies to every scene.
+    /// An unknown name in `MEGA_PRESET` is reported on stderr and ignored.
     pub fn for_scene(scene: &str) -> Self {
+        if let Ok(name) = std::env::var(Self::ENV_OVERRIDE) {
+            let name = name.trim();
+            if !name.is_empty() {
+                match Self::by_name(name) {
+                    Some(p) => return p,
+                    None => eprintln!("{}={name}: unknown preset; available: {}", Self::ENV_OVERRIDE, Self::NAMES.join(", ")),
+                }
+            }
+        }
+        Self::scene_default(scene)
+    }
+
+    /// The preset a named scene is tuned for, ignoring `MEGA_PRESET`.
+    pub fn scene_default(scene: &str) -> Self {
         match scene {
             "shaft" => Self::nihei_vast(),
             _ => Self::nihei(),
@@ -561,6 +782,38 @@ impl StylePreset {
         "rank_fade_end",
         "rank_min_len_px",
         "sky_tone",
+        "tone_model",
+        "rule_lod",
+        "rule_pitch",
+        "rule_target_px",
+        "rule_res_exp",
+        "rule_density",
+        "rule_min_px",
+        "rule_profile",
+        "rule_pressure",
+        "rule_vary",
+        "rule_handover_px",
+        "fall_white",
+        "fall_black",
+        "fall_gamma",
+        "dark_ao",
+        "dark_dist_start",
+        "dark_dist_len",
+        "dark_down_len",
+        "wash",
+        "wash_white",
+        "wash_black",
+        "wash_gamma",
+        "wash_max",
+        "screentone",
+        "screentone_kind",
+        "screentone_anchor",
+        "screentone_px",
+        "paper_texture",
+        "paper_texture_px",
+        "wash_speckle",
+        "shadow_edge_line",
+        "shadow_hatch_near",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -650,6 +903,38 @@ impl StylePreset {
             "cross_angle" => self.cross_angle = num(value)?,
             "cross_angle_jitter" => self.cross_angle_jitter = num(value)?,
             "cross_angle_by_panel" => self.cross_angle_by_panel = num(value)?,
+            "tone_model" => self.tone_model = num(value)?,
+            "rule_lod" => self.rule_lod = num(value)?,
+            "rule_pitch" => self.rule_pitch = num(value)?,
+            "rule_target_px" => self.rule_target_px = num(value)?,
+            "rule_res_exp" => self.rule_res_exp = num(value)?,
+            "rule_density" => self.rule_density = num(value)?,
+            "rule_min_px" => self.rule_min_px = num(value)?,
+            "rule_profile" => self.rule_profile = num(value)?,
+            "rule_pressure" => self.rule_pressure = num(value)?,
+            "rule_vary" => self.rule_vary = num(value)?,
+            "rule_handover_px" => self.rule_handover_px = num(value)?,
+            "fall_white" => self.fall_white = num(value)?,
+            "fall_black" => self.fall_black = num(value)?,
+            "fall_gamma" => self.fall_gamma = num(value)?,
+            "dark_ao" => self.dark_ao = num(value)?,
+            "dark_dist_start" => self.dark_dist_start = num(value)?,
+            "dark_dist_len" => self.dark_dist_len = num(value)?,
+            "dark_down_len" => self.dark_down_len = num(value)?,
+            "wash" => self.wash = num(value)?,
+            "wash_white" => self.wash_white = num(value)?,
+            "wash_black" => self.wash_black = num(value)?,
+            "wash_gamma" => self.wash_gamma = num(value)?,
+            "wash_max" => self.wash_max = num(value)?,
+            "screentone" => self.screentone = num(value)?,
+            "screentone_kind" => self.screentone_kind = num(value)?,
+            "screentone_anchor" => self.screentone_anchor = num(value)?,
+            "screentone_px" => self.screentone_px = num(value)?,
+            "paper_texture" => self.paper_texture = num(value)?,
+            "paper_texture_px" => self.paper_texture_px = num(value)?,
+            "wash_speckle" => self.wash_speckle = num(value)?,
+            "shadow_edge_line" => self.shadow_edge_line = num(value)?,
+            "shadow_hatch_near" => self.shadow_hatch_near = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
@@ -700,4 +985,12 @@ pub(crate) struct StyleGpu {
     patch: [f32; 4],
     feather: [f32; 4],
     feather2: [f32; 4],
+    rule: [f32; 4],
+    rule2: [f32; 4],
+    rule3: [f32; 4],
+    fall: [f32; 4],
+    dark: [f32; 4],
+    wash: [f32; 4],
+    wash2: [f32; 4],
+    wash3: [f32; 4],
 }

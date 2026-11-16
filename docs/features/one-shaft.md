@@ -76,6 +76,7 @@ Times local occlusion from the colliders at 70% strength (`kit-of-parts.md`, E00
 | `shaft_arch_view` | The arch whole from B1, across the shaft |
 | `shaft_rim_down` | From just below the rim, straight down 600 m |
 | `shaft_b2_down` | Over B2's railing at 470 m, looking down past the lower bridges |
+| `shaft_wall_approach` | Square on to the hall's back wall from 160 m to 2 m on a log scale, for tone against distance (E029; see `capture-tool.md`) |
 | `shaft_spawn_yaw`, `shaft_spawn_pitch` | At the spawn, turning 90 degrees left to right, or tipping from 45 degrees down to 45 up (rotation probes, E020) |
 
 Reproduce, from the workspace root (each writes `frame_NNNN.png` under `--out`):

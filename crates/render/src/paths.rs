@@ -33,6 +33,7 @@ pub const NAMES: &[&str] = &[
     "shaft_spawn_yaw",
     "shaft_spawn_pitch",
     "shaft_hall_wall",
+    "shaft_wall_approach",
 ];
 
 pub fn by_name(name: &str) -> Option<fn(f32) -> Camera> {
@@ -58,6 +59,7 @@ pub fn by_name(name: &str) -> Option<fn(f32) -> Camera> {
         "shaft_spawn_yaw" => shaft_spawn_yaw,
         "shaft_spawn_pitch" => shaft_spawn_pitch,
         "shaft_hall_wall" => shaft_hall_wall,
+        "shaft_wall_approach" => shaft_wall_approach,
         _ => return None,
     })
 }
@@ -141,6 +143,14 @@ pub fn shaft_spawn_pitch(t: f32) -> Camera {
 pub fn shaft_hall_wall(t: f32) -> Camera {
     let z = lerp(-60.0, -136.0, t);
     Camera::new(Vec3::new(-0.02, 432.24, z), 3.2532, 0.0387)
+}
+
+/// Square on to the back wall of the hall (z = -138) at the screenshot's height, from 160 m
+/// to 2 m on a log scale: distance `d = 2 * 80^(1 - t)` metres. For the tone-against-distance
+/// checks (E028): t 1, 0.791, 0.633, 0.382, 0.159, 0 are 2, 5, 10, 30, 80 and 160 m.
+pub fn shaft_wall_approach(t: f32) -> Camera {
+    let d = 2.0 * 80f32.powf(1.0 - t.clamp(0.0, 1.0));
+    Camera::new(Vec3::new(-0.02, 432.24, -138.0 + d), PI, 0.0)
 }
 
 // --- One Shaft -----------------------------------------------------------------------------
