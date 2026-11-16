@@ -230,9 +230,10 @@ impl Sun {
     /// the rim down to about 220 m, past the spawn level, and the stair crosses it as a dark
     /// line; below that the west rim's shadow cuts across it (E011).
     pub fn for_scene(scene: &str) -> Self {
+        // Every scene but `test` gets the shaft's sun (new generated scenes included).
         match scene {
-            "shaft" => Self::remote(Self::direction_from_angles(74.0, -110.0)),
-            _ => Self::default(),
+            "test" => Self::default(),
+            _ => Self::remote(Self::direction_from_angles(74.0, -110.0)),
         }
     }
 }

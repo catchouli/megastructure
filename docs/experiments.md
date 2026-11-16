@@ -542,9 +542,24 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: the deep hall is not dark: its walls are 172 to 184 of 255 (light to mid grey) and nearly uniform, lifted by openness and bounce, so with the pencil at the dark end there is little of it there (only on the shaded faces of the columns and the darker corners); with the shifted balance it is visible on the walls. The bottom of the shaft carries the far pencil marks either way; the lit spawn view is clean.
 - Verdict: pencil range 0.4 to 0.75 as default (light and mid shade clean). For the owner: the deep hall needs darker lighting (less openness or bounce there, or real enclosure) before it can show pencil grading into dark; that is a generator and lighting change, not done here. Question on the sheet: with pencil kept to the dark end, does it show where you want it and stay out of the lit shaft?
 
+## E057: Far pencil built up like pencil shading
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Far pencil built up like pencil")
+- Question: the owner: the E054 marks "appear a bit too suddenly and are pretty much fully black", and at lower strength look "like something alpha fading in rather than being gently shaded in in pencil".
+- Setup: tried first, the relief route: three passes of Paper004's laid lines at slightly different angles and sizes entering at different tone levels, with a sliding threshold and a low darkness cap early on. The marks were still blotchy shapes, not strokes, at their first appearance. Then approach B: procedural strokes in the surface frame (lines at a held screen pitch by nested octaves; strokes with rank, wander, tapers and pressure; a stroke drawn once the tone passes its rank; two passes combining like graphite; an earlier onset `far_white`). Sheet `compare/E057-pencil-buildup.png`: before (E054 marks) / after on `shaft_rim_down`, `shaft_gallery_down`, `shaft_rim_pitch --t 0.85` and `shaft_b2_down` at 2560x1440, with native strips down one wall into the black. Clip `compare/E057-rim-pitch-before-after.mp4` (`shaft_rim_pitch`, 121 frames, 720p). Regenerate with `mega_capture --path shaft_rim_pitch --t 0.85 --width 2560 --height 1440 --out <dir>`.
+- Failures on the way: an onset of 0.6 put strokes on sunlit walls near the rim; 0.45 keeps them in the shade and depth.
+- Result: thin grey strokes appear first, scattered, then more and heavier, crossing into a second direction, and close into black at the bottom; no depth where marks switch on.
+- Stability (61 frames, 720p; 5x5 error / pops / contrast-relative pops, before / after): `shaft_rim_pitch` 0.163, 0.014%, 0.042% / 0.161, 0.014%, 0.029%; `shaft_spawn_yaw` 0.265 / 0.265; `shaft_hall_walk` 0.295 / 0.295; `shaft_bridge_walk` 0.304 / 0.304; `shaft_rim_down` 0.118 / 0.118.
+- Verdict: kept (`far_pencil` 1.0, `far_white` 0.45). Question on the sheet: does the darkness now arrive like pencil shading, with no depth where it switches on?
+
+## E058: Where the far pencil starts
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md`
+- Setup: sheet `compare/E058-pencil-onset.png`: `far_white` 0.38 / 0.45 (default) / 0.55, native crops down from the rim and over the spawn rail; regenerate with `mega_capture --path shaft_rim_down --width 2560 --height 1440 --set far_white=0.55 --out <dir>`.
+- Verdict: 0.45. Question: should the first strokes start higher up the shaft or lower?
+
 ## Queued
 
-- A generated stroke texture (tonal art map style) for the far pencil, approach B of E054.
 
 Experiments the plan already calls for, in rough order:
 

@@ -70,7 +70,7 @@ struct Style {
     paper7: vec4<f32>,          // pencil from (wash), pencil to (wash), pencil cross, pencil angle (rad)
     paper8: vec4<f32>,          // pencil patches amount, pencil patch scale (m)
     paper9: vec4<f32>,          // distance shading mode (0 ruling, 1 wash and pencil), far pencil strength, far pencil px per texel, far stroke stretch
-    paper10: vec4<f32>,         // far pencil second direction, far tone into the wash
+    paper10: vec4<f32>,         // unused, far tone into the wash, far pencil onset light
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;

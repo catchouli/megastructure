@@ -435,10 +435,11 @@ pub struct StylePreset {
     pub far_pencil_px: f32,
     /// Lengthening of the far strokes along their direction.
     pub far_stretch: f32,
-    /// Strength of a second far stroke direction (60 degrees round) in the darkest patches.
-    pub far_cross: f32,
     /// How much of the far tone goes into the wash (1: all, to solid ink at the bottom).
     pub far_wash: f32,
+    /// Light level (after the distance darkening) at which the far pencil starts, much
+    /// earlier than the wash's far darkening (`fall_white`), so it builds up gradually (E057).
+    pub far_white: f32,
 }
 
 impl StylePreset {
@@ -611,8 +612,8 @@ impl StylePreset {
             far_pencil: 0.0,
             far_pencil_px: 3.0,
             far_stretch: 4.0,
-            far_cross: 0.0,
             far_wash: 1.0,
+            far_white: 0.6,
         }
     }
 
@@ -666,7 +667,7 @@ impl StylePreset {
             paper7: [self.pencil_from, self.pencil_to, self.pencil_cross, self.pencil_angle.to_radians()],
             paper8: [self.pencil_patches, self.pencil_patch_m, 0.0, 0.0],
             paper9: [self.far_mode, self.far_pencil, self.far_pencil_px, self.far_stretch],
-            paper10: [self.far_cross, self.far_wash, 0.0, 0.0],
+            paper10: [0.0, self.far_wash, self.far_white, 0.0],
         }
     }
 }
@@ -836,7 +837,8 @@ impl StylePreset {
             pencil_to: 0.75,
             // Distance shading as wash and pencil marks instead of ruling (E054).
             far_mode: 1.0,
-            far_pencil: 0.6,
+            far_pencil: 1.0,
+            far_white: 0.45,
             far_pencil_px: 1.0,
             far_stretch: 2.0,
             paper_take: 0.08,
@@ -932,7 +934,7 @@ impl StylePreset {
     /// `MEGA_PRESET=nihei_wash cargo run --release --bin megastructure -- --scene shaft`.
     pub const ENV_OVERRIDE: &'static str = "MEGA_PRESET";
 
-    /// The preset a named scene is tuned for (`nihei_ink_small` for anything unknown), unless the
+    /// The preset a named scene is tuned for (`nihei_ink_small` for `test`, `nihei_ink` for every other scene), unless the
     /// `MEGA_PRESET` environment variable names a preset, which then applies to every scene.
     /// An unknown name in `MEGA_PRESET` is reported on stderr and ignored.
     pub fn for_scene(scene: &str) -> Self {
@@ -950,9 +952,11 @@ impl StylePreset {
 
     /// The preset a named scene is tuned for, ignoring `MEGA_PRESET`.
     pub fn scene_default(scene: &str) -> Self {
+        // Every scene but the small closed test scene gets the shaft's look (so new
+        // generated scenes, such as `labyrinth`, need no change here).
         match scene {
-            "shaft" => Self::nihei_ink(),
-            _ => Self::nihei_ink_small(),
+            "test" => Self::nihei_ink_small(),
+            _ => Self::nihei_ink(),
         }
     }
 }
@@ -1131,8 +1135,8 @@ impl StylePreset {
         "far_pencil",
         "far_pencil_px",
         "far_stretch",
-        "far_cross",
         "far_wash",
+        "far_white",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1292,8 +1296,8 @@ impl StylePreset {
             "far_pencil" => self.far_pencil = num(value)?,
             "far_pencil_px" => self.far_pencil_px = num(value)?,
             "far_stretch" => self.far_stretch = num(value)?,
-            "far_cross" => self.far_cross = num(value)?,
             "far_wash" => self.far_wash = num(value)?,
+            "far_white" => self.far_white = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,

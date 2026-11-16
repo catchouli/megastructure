@@ -841,6 +841,74 @@ fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy
     return S.paper2.x * tn * 0.35 * env;
 }
 
+// Far pencil strokes (E057, approach B): a procedural stroke field in the surface frame,
+// tonal-art-map style. Lines of strokes run along direction `ang`; along each line, strokes of
+// 6 to 14 line-pitches start at random offsets, each with its own rank, pressure and slight
+// sideways offset, tapering at both ends (short at the start, long at the end). A stroke
+// is drawn once the tone `tm` passes its rank, so strokes appear one by one as it darkens,
+// and its pressure rises with tone: grey graphite first, near ink only at the end. The
+// line pitch is held at about S.paper9.z * 4 pixels (720 lines) by octaves, blended over
+// the octave; the octave-(k+1) lines are every other line of octave k, so the coarser
+// octave's strokes are a subset and the blend thins the field rather than swapping it.
+// Returns ink coverage 0..1.
+fn far_stroke_level(a: f32, b: f32, pitch: f32, gb_px: f32, tm: f32, seed: u32, k: u32) -> f32 {
+    let jl = floor(b / pitch + 0.5);
+    var cov = 0.0;
+    // The nearest line and its neighbours (strokes wander a little across).
+    for (var dj = -1; dj <= 1; dj++) {
+        let j = jl + f32(dj);
+        // Line identity in octave-0 units, so octaves share strokes.
+        let jid = i32(j) << k;
+        let lk = hash2(seed, bitcast<u32>(jid));
+        let len = pitch * 10.0;
+        let off = u01(lk) * len;
+        let si = floor((a + off) / len);
+        for (var ds = 0; ds <= 1; ds++) {
+            let sidx = si - f32(ds);
+            let h = hash2(lk, bitcast<u32>(i32(sidx)));
+            let rank = u01(h);
+            if (rank > tm * 1.15) {
+                continue;
+            }
+            let slen = len * (0.6 + 0.8 * u01(pcg(h ^ 3u)));
+            let s0 = sidx * len - off + len * 0.3 * u01(pcg(h ^ 5u));
+            let t = (a - s0) / slen;
+            if (t < 0.0 || t > 1.0) {
+                continue;
+            }
+            let centre = j * pitch + pitch * 0.35 * (u01(pcg(h ^ 7u)) - 0.5) + pitch * 0.15 * (t - 0.5) * (u01(pcg(h ^ 11u)) - 0.5);
+            let taper = smoothstep(0.0, 0.12, t) * (1.0 - smoothstep(0.55, 1.0, t));
+            let w_px = max(1.1 * G.misc.x * (0.7 + 0.6 * u01(pcg(h ^ 13u))) * taper, 0.0);
+            let d_px = abs(b - centre) / max(gb_px, 1e-9);
+            let c = saturate(0.5 * w_px - d_px + 0.5) * saturate(w_px);
+            // Pressure: rises with how far the tone is past this stroke's rank, and overall.
+            let press = mix(0.2, 1.0, pow(saturate(tm), 1.4)) * mix(0.5, 1.0, saturate((tm * 1.15 - rank) * 4.0)) * (0.75 + 0.25 * u01(pcg(h ^ 17u)));
+            cov = max(cov, c * press);
+        }
+    }
+    return cov;
+}
+
+fn far_strokes(uv: vec2<f32>, ang: f32, lod_u: f32, lod_v: f32, duvx: vec2<f32>, duvy: vec2<f32>, tm: f32, seed: u32) -> f32 {
+    let ca = cos(ang);
+    let sa = sin(ang);
+    // a along the strokes, b across them.
+    let a = ca * uv.x + sa * uv.y;
+    let b = -sa * uv.x + ca * uv.y;
+    // Rotation-invariant footprint of b (for the octave), true screen derivative (for AA).
+    let foot_b = length(vec2<f32>(sa * lod_u, ca * lod_v));
+    let gb = max(length(vec2<f32>(-sa * duvx.x + ca * duvx.y, -sa * duvy.x + ca * duvy.y)), 1e-7);
+    let base = 0.01;
+    let target_px = max(S.paper9.z, 0.5) * 4.0 * G.misc.x;
+    let kf = max(log2(max(target_px * foot_b / base, 1e-6)), 0.0);
+    let k0 = floor(kf);
+    let fr = kf - k0;
+    let p0 = base * exp2(k0);
+    let c0 = far_stroke_level(a, b, p0, gb, tm, seed, u32(k0));
+    let c1 = far_stroke_level(a, b, 2.0 * p0, gb, tm, seed, u32(k0) + 1u);
+    return mix(c0, c1, fr);
+}
+
 // The relief of paper kind `kind` in the surface layers, about unit standard deviation where
 // all layers are present. angle < 0: each layer at its own random rotation (no direction);
 // angle >= 0: every layer at that angle in the surface frame (one direction, for the pencil
@@ -1432,35 +1500,38 @@ fn fs_main(in: VsOut) -> FsOut {
                 wash = saturate(wash + S.paper6.z * band * env * 0.25 * pr);
             }
         }
-        // Far pencil strokes (E054): the same laid-line relief, stretched along its lines
-        // into strokes and drawn at a larger on-screen size (S.paper9.z px per texel) with no
-        // distance cap, gathering in patches as the far tone rises; a second direction 60
-        // degrees round joins in the darkest patches (S.paper10.x). Faded into the black at the
-        // end, leaving only the light side as occasional gaps.
-        if (cf > 0.0 && S.paper9.y > 0.0) {
-            var fb = smoothstep(0.03, 0.6, cf);
-            let ps = max(S.paper8.y, 0.1) * 2.0;
-            let tn = 0.65 * vnoise3(0x1b873593u, p / ps) + 0.35 * vnoise3(0xcc9e2d51u, p / (0.43 * ps));
-            let thr = saturate((tn - 0.25) * 2.0);
-            fb *= smoothstep(thr - 0.3, thr + 0.3, fb * 1.3);
-            if (fb > 0.0) {
-                let fpx = S.paper9.z;
-                var pr = paper_layers(3, S.paper7.w, vec2<f32>(u1, u2), dot(p, n) + 53.0, lod_u1, lod_v1, duv_x, duv_y, fpx, S.paper9.w, 1e6);
-                if (S.paper10.x > 0.0) {
-                    let t2 = vnoise3(0x85ebca6bu, p / ps);
-                    let cb = S.paper10.x * smoothstep(0.55, 0.9, cf) * smoothstep(0.4, 0.6, t2);
-                    if (cb > 0.0) {
-                        pr += cb * paper_layers(3, S.paper7.w + 1.0471976, vec2<f32>(u1, u2), dot(p, n) + 71.0, lod_u1, lod_v1, duv_x, duv_y, fpx, S.paper9.w, 1e6);
-                    }
+        // Far pencil (E054, built up like pencil since E057). The marks follow their own tone,
+        // tm, which starts much earlier than the wash's far darkening: the same light darkened
+        // with distance and depth (rdark, gated by rgate) through a curve from far_white
+        // (S.paper10.z) to fall_black. Three passes of the stretched laid-line relief, at
+        // slightly different angles and sizes, enter at tm 0, 0.3 and 0.55. In each pass the
+        // threshold on the relief slides down as its tone rises, so at first only the highest
+        // ridges pass (a few thin strokes), later most of them; a stroke's darkness is how far
+        // its ridge clears the threshold, capped low early (light grey graphite) and rising
+        // to near ink only at the end. Passes combine like graphite layers, 1 - prod(1 - d),
+        // so overlaps darken. Patches enter progressively over a wide range of tone.
+        if (far_pencil && ruled && S.paper9.y > 0.0) {
+            let lf = mix(lit_t, dark_t, amount) * rdark;
+            let fw = max(S.paper10.z, S.fall.y + 0.01);
+            let tm = rgate * pow(saturate((fw - lf) / (fw - S.fall.y)), 1.2);
+            if (tm > 0.0) {
+                let ps = max(S.paper8.y, 0.1) * 2.0;
+                let tn = 0.65 * vnoise3(0x1b873593u, p / ps) + 0.35 * vnoise3(0xcc9e2d51u, p / (0.43 * ps));
+                let pm = smoothstep(tn - 0.35, tn + 0.35, tm * 1.6);
+                // Two passes: the main direction, and a second 20 degrees round entering at
+                // tm 0.5; they combine like graphite layers.
+                let tmp = tm * mix(pm, 1.0, tm * tm);
+                var keep = 1.0 - saturate(S.paper9.y * far_strokes(vec2<f32>(u1, u2), S.paper7.w, lod_u1, lod_v1, duv_x, duv_y, tmp, 0x6c078965u));
+                let t2 = saturate((tmp - 0.5) / 0.5);
+                if (t2 > 0.0) {
+                    keep *= 1.0 - saturate(S.paper9.y * far_strokes(vec2<f32>(u1, u2), S.paper7.w + 0.35, lod_u1, lod_v1, duv_x, duv_y, t2, 0x9908b0dfu));
                 }
-                let amp = S.paper9.y * fb * (1.0 - 0.6 * smoothstep(0.85, 1.0, cf));
-                // Marks rather than bands: the relief's ridges, thresholded softly, darken the
-                // wash as discrete strokes (the threshold falls as the tone rises, so marks
-                // thicken and join); the troughs leave occasional light gaps.
-                let thrm = mix(1.3, 0.3, fb);
-                let mark = smoothstep(thrm - 0.35, thrm + 0.35, pr);
-                let gap = smoothstep(1.2, 2.0, -pr) * 0.5;
-                wash = saturate(wash + amp * 0.5 * (mark - gap));
+                wash = 1.0 - (1.0 - wash) * keep;
+                // Occasional light gaps in the black, from the relief's troughs.
+                if (cf > 0.8) {
+                    let g = paper_layers(3, S.paper7.w, vec2<f32>(u1, u2), dot(p, n) + 91.0, lod_u1, lod_v1, duv_x, duv_y, S.paper9.z, S.paper9.w, 1e6);
+                    wash = saturate(wash - 0.35 * smoothstep(0.8, 1.0, cf) * smoothstep(1.4, 2.2, -g));
+                }
             }
         }
     }
