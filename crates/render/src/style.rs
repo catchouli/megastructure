@@ -936,7 +936,7 @@ impl StylePreset {
             // it replaces the near laid-line pencil (E052) and the far strokes (E057).
             shade: 0.35,
             // The light end (E062): sky-lit faces print a pale wash, sunlit ones stay paper.
-            light_wash: 0.36,
+            light_wash: 0.27,
             light_white: 1.0,
             light_gamma: 1.3,
             light_sun: 4.0,
@@ -946,12 +946,12 @@ impl StylePreset {
             // never gets that low, so its cast shadows stay grey.
             // Shifted to the dark end (E070): typical surfaces dark to mid grey, paper only for
             // direct sun, solid black wherever the light is near zero.
-            wash_white: 0.95,
-            wash_black: 0.25,
-            wash_max: 0.95,
-            wash_gamma: 0.8,
-            black_point: 0.1,
-            black_range: 0.3,
+            wash_white: 0.835,
+            wash_black: 0.2,
+            wash_max: 0.9,
+            wash_gamma: 0.9,
+            black_point: 0.08,
+            black_range: 0.25,
             // The player's light, so the immediate surroundings read in the dark (E070).
             player_light: 0.6,
             player_radius: 10.0,
