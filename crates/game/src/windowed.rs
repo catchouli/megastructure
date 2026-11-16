@@ -2,11 +2,14 @@
 
 use crate::app::App as Game;
 use crate::input::InputState;
+use crate::offscreen::Offscreen;
+use crate::shotio;
 use crate::sim::MoveMode;
 use anyhow::{anyhow, Context, Result};
 use mega_gen::scenes::Scene;
 use mega_render::Renderer;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
@@ -15,6 +18,9 @@ use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, Window
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
+
+/// How long a screenshot confirmation or error stays in the overlay.
+const TOAST_SECONDS: f32 = 5.0;
 
 struct Gfx {
     window: Arc<Window>,
@@ -35,6 +41,8 @@ struct Input {
     /// F and R presses since the last frame (a press shorter than a frame still counts).
     toggle_pending: bool,
     reset_pending: bool,
+    /// P or F12 pressed since the last frame.
+    screenshot_pending: bool,
 }
 
 struct App<'a> {
@@ -48,6 +56,8 @@ struct App<'a> {
     frame_ms: f32,
     frames: u64,
     error: Option<anyhow::Error>,
+    /// Message shown in the overlay for a few seconds: text, is-error, when.
+    toast: Option<(String, bool, Instant)>,
 }
 
 fn init_gfx(event_loop: &ActiveEventLoop, scene: &Scene, move_mode: Option<MoveMode>) -> Result<(Gfx, Game)> {
@@ -104,11 +114,12 @@ impl<'a> App<'a> {
             scene,
             gfx: None,
             game: None,
-            input: Input { keys: HashSet::new(), buttons_held: 0, grabbed: false, mouse_delta: (0.0, 0.0), toggle_pending: false, reset_pending: false },
+            input: Input { keys: HashSet::new(), buttons_held: 0, grabbed: false, mouse_delta: (0.0, 0.0), toggle_pending: false, reset_pending: false, screenshot_pending: false },
             last_frame: Instant::now(),
             frame_ms: 16.0,
             frames: 0,
             error: None,
+            toast: None,
         }
     }
 
@@ -142,6 +153,7 @@ impl<'a> App<'a> {
             jump: down(KeyCode::Space),
             toggle_fly: std::mem::take(&mut toggle),
             reset: std::mem::take(&mut reset),
+            screenshot: std::mem::take(&mut inp.screenshot_pending),
             look_left: down(KeyCode::ArrowLeft),
             look_right: down(KeyCode::ArrowRight),
             look_up: down(KeyCode::ArrowUp),
@@ -156,6 +168,7 @@ impl<'a> App<'a> {
         self.last_frame = now;
         self.frame_ms += (dt * 1000.0 - self.frame_ms) * 0.05;
         let input = self.input_state();
+        let toast = self.toast.as_ref().filter(|t| t.2.elapsed().as_secs_f32() < TOAST_SECONDS).map(|t| (t.0.clone(), t.1));
         let (Some(g), Some(game)) = (self.gfx.as_mut(), self.game.as_mut()) else { return Ok(()) };
         game.update(dt, &input);
         let frame = match g.surface.get_current_texture() {
@@ -187,6 +200,11 @@ impl<'a> App<'a> {
                 ui.label(format!("pos {:.1} {:.1} {:.1}", cam.position.x, cam.position.y, cam.position.z));
                 ui.label(format!("yaw {:.0} pitch {:.0}  {status}", cam.yaw.to_degrees(), cam.pitch.to_degrees()));
                 ui.label("WASD, Shift: run/fast, Space: jump (fly: up), arrows: turn, Tab: grab, Esc: quit");
+                ui.label("P or F12: screenshot (screenshots/)");
+                if let Some((text, is_err)) = &toast {
+                    let colour = if *is_err { egui::Color32::LIGHT_RED } else { egui::Color32::LIGHT_GREEN };
+                    ui.colored_label(colour, text);
+                }
                 ui.label(if can_walk { "F: walk/fly, R: back to stable ground, E/Q/Ctrl and scroll: fly only" } else { "E/Q or Space/Ctrl: up/down, scroll: speed" });
             });
         });
@@ -229,6 +247,25 @@ impl<'a> App<'a> {
             g.egui_renderer.free_texture(id);
         }
         textures.clear();
+
+        // Screenshot: the same camera, preset and sun again, offscreen and without the overlay.
+        if input.screenshot {
+            let (w, h) = (g.config.width, g.config.height);
+            let result = Offscreen::new(&g.device, &g.queue, g.config.format, w, h)
+                .render_frame(game)
+                .and_then(|pixels| shotio::save_screenshot(game, &pixels, w, h, Path::new(shotio::SCREENSHOT_DIR)));
+            self.toast = Some(match result {
+                Ok(png) => {
+                    eprintln!("screenshot: {}", png.display());
+                    (format!("saved {}", png.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())), false, Instant::now())
+                }
+                Err(e) => {
+                    eprintln!("megastructure: screenshot failed: {e:#}");
+                    log::error!("screenshot failed: {e:#}");
+                    (format!("screenshot failed: {e:#}"), true, Instant::now())
+                }
+            });
+        }
 
         self.frames += 1;
         if self.exit_after_frames.is_some_and(|n| self.frames >= n) {
@@ -290,6 +327,7 @@ impl ApplicationHandler for App<'_> {
                             match code {
                                 KeyCode::KeyF => self.input.toggle_pending = true,
                                 KeyCode::KeyR => self.input.reset_pending = true,
+                                KeyCode::KeyP | KeyCode::F12 => self.input.screenshot_pending = true,
                                 _ => {}
                             }
                         }

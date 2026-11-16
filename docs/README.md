@@ -26,6 +26,7 @@ Constants that other systems depend on (for example, movement limits the generat
 | Machinery | `features/machinery.md` | Designed in outline |
 | Capture tool | `features/capture-tool.md` | Working |
 | Headless mode | `features/headless-mode.md` | Working |
+| Screenshots and replay | `features/screenshots.md` | Working (headless verified; windowed key untested) |
 | Ink renderer | `features/ink-renderer.md` | In progress (M0 frame, shadows and tone composition working) |
 | Kit of parts | `features/kit-of-parts.md` | In progress (M1 kit) |
 | One Shaft | `features/one-shaft.md` | Working (M1 scene) |

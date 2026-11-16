@@ -22,3 +22,4 @@ egui = { workspace = true, features = ["default_fonts"] }
 egui-wgpu.workspace = true
 egui-winit.workspace = true
 parry3d.workspace = true
+mega_shot.workspace = true

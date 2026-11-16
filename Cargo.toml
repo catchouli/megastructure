@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gen", "crates/render", "crates/capture", "crates/game"]
+members = ["crates/gen", "crates/render", "crates/capture", "crates/game", "crates/shot"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +22,10 @@ egui-winit = { version = "0.37", default-features = false }
 mega_gen = { path = "crates/gen" }
 mega_render = { path = "crates/render" }
 parry3d = "0.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+mega_shot = { path = "crates/shot" }
 
 [profile.dev]
 opt-level = 1

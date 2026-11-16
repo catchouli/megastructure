@@ -36,6 +36,7 @@ Bindings are by physical key position, so they do not depend on the keyboard lay
 | Switch between walking and the fly camera | F | both |
 | Up / down | E or Space / Q or Ctrl | flying only; in walking E, Q and Ctrl do nothing |
 | Fly speed | Scroll | flying |
+| Screenshot | P or F12 (`screenshots.md`) | both |
 | Quit | Escape | both |
 
 Arrow-key look turns at a fixed angular rate of 90 degrees per second (`ARROW_TURN_RATE_DEG` in `crates/game/src/sim.rs`), independent of frame rate, with pitch clamped as for the mouse, and works alongside mouse look.

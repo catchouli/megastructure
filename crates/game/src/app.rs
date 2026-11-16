@@ -9,16 +9,22 @@ use mega_render::{Camera, Renderer, StylePreset, Sun};
 pub struct App {
     pub sim: Sim,
     pub renderer: Renderer,
+    /// Scene name, as given to `mega_gen::scenes::by_name`.
+    pub scene_name: &'static str,
+    /// Name of the preset the renderer started from (`custom` if none matches).
+    pub preset_name: &'static str,
 }
 
 impl App {
     /// Upload `scene` to `renderer` and place the player at its spawn point, walking if the
     /// scene has colliders (unless `mode` says otherwise).
     pub fn new(mut renderer: Renderer, scene: &Scene, mode: Option<MoveMode>) -> Self {
-        renderer.set_preset(StylePreset::for_scene(scene.name));
+        let preset = StylePreset::for_scene(scene.name);
+        let preset_name = StylePreset::NAMES.iter().copied().find(|n| StylePreset::by_name(n).as_ref() == Some(&preset)).unwrap_or("custom");
+        renderer.set_preset(preset);
         renderer.set_sun(Sun::for_scene(scene.name));
         renderer.upload_scene(&scene.mesh);
-        Self { sim: Sim::for_scene(scene, mode), renderer }
+        Self { sim: Sim::for_scene(scene, mode), renderer, scene_name: scene.name, preset_name }
     }
 
     pub fn camera(&self) -> Camera {

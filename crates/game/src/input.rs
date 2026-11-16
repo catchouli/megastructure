@@ -18,6 +18,9 @@ pub struct InputState {
     pub toggle_fly: bool,
     /// R pressed: return to the last stable ground (walking only).
     pub reset: bool,
+    /// Screenshot requested this frame (P or F12 in the windowed game; a script holds it for
+    /// its segment and only the first frame counts).
+    pub screenshot: bool,
     pub look_left: bool,
     pub look_right: bool,
     pub look_up: bool,
@@ -41,6 +44,7 @@ impl InputState {
         "jump",
         "toggle_fly",
         "reset",
+        "screenshot",
         "look_left",
         "look_right",
         "look_up",
@@ -61,6 +65,7 @@ impl InputState {
             "jump" => self.jump = true,
             "toggle_fly" => self.toggle_fly = true,
             "reset" => self.reset = true,
+            "screenshot" => self.screenshot = true,
             "look_left" => self.look_left = true,
             "look_right" => self.look_right = true,
             "look_up" => self.look_up = true,

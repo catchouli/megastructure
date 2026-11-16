@@ -121,6 +121,10 @@ M0 and M1 exist to retire the two biggest risks early: lines at distance, and co
 4. **Presets.** Nihei only for now. The fill target keeps its palette index so a colour preset stays possible, but no Moebius work is scheduled.
 5. **Platforms.** Native only (macOS first, then Windows and Linux). No WebGPU, so compute, storage buffers and indirect draws are all available.
 
+## 7a. Ideas parked
+
+- **Bounced light** (raised 2026-11-15). Large fully dark regions would be rarer if light bounced. Deferred while the shading itself is being worked out. Since tone is quantised into a few bands, only low-frequency indirect light is needed, which suggests propagating sun and sky light through the coarse occupancy grid the generator already plans to keep (light propagation volumes or a flood from lit cells), re-run when the sun moves, and sampled as one extra term in the light value. No per-pixel tracing and no change to the frame.
+
 ## 8. Gaps in the research
 
 - No developer sources were found for NaissanceE, Babbdi, Kairo, Bernband, INFRA, Echo or Obra Dinn.
