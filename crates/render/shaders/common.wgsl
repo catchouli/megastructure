@@ -61,6 +61,10 @@ struct Style {
     far: vec4<f32>,             // rule near (m), rule fade-in (m), rule down gain, rule distance darkening (m)
     bounce: vec4<f32>,          // sun bounce strength, sky bounce strength, anisotropic grain
     grain: vec4<f32>,           // screentone softness, fine detail weight
+    halftone: vec4<f32>,        // halftone amount, finest pitch (m), dot edge softness, screen angle (rad)
+    paper2: vec4<f32>,          // paper tooth, tooth scale px, mottle, mottle scale px
+    paper3: vec4<f32>,          // wash taking to the tooth, shadow softness, max penumbra (m), paper anchor
+    paper4: vec4<f32>,          // finest surface paper cell (m)
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;
@@ -115,6 +119,18 @@ fn vnoise3(key: u32, x: vec3<f32>) -> f32 {
     let c = mix(u01(hash3(key, i + vec3<i32>(0, 0, 1))), u01(hash3(key, i + vec3<i32>(1, 0, 1))), w.x);
     let d = mix(u01(hash3(key, i + vec3<i32>(0, 1, 1))), u01(hash3(key, i + vec3<i32>(1, 1, 1))), w.x);
     return mix(mix(a, b, w.y), mix(c, d, w.y), w.z);
+}
+
+// 2D value noise in 0..1, one independent field per key.
+fn vnoise2(key: u32, x: vec2<f32>) -> f32 {
+    let i = vec2<i32>(floor(x));
+    let f = x - floor(x);
+    let w = f * f * (3.0 - 2.0 * f);
+    let k0 = hash2(key, bitcast<u32>(i.y));
+    let k1 = hash2(key, bitcast<u32>(i.y + 1));
+    let a = mix(u01(hash2(k0, bitcast<u32>(i.x))), u01(hash2(k0, bitcast<u32>(i.x + 1))), w.x);
+    let b = mix(u01(hash2(k1, bitcast<u32>(i.x))), u01(hash2(k1, bitcast<u32>(i.x + 1))), w.x);
+    return mix(a, b, w.y);
 }
 
 // Length of the overlap of a one-pixel box centred at distance d from a line's centre with a

@@ -362,6 +362,40 @@ pub struct StylePreset {
     /// With `screentone_aniso`: weight of the fine, sub-pixel grain lattice (the E032 grain)
     /// against a lattice twice as coarse; 1 is all fine, 0 all coarse.
     pub screentone_detail: f32,
+
+    // Paper, halftone and soft shadow edges (E040 onwards).
+    /// Strength of the soft halftone: a rotated dot screen fixed to the surface that carries
+    /// part of the mid-to-dark wash, faded by amplitude with its pitch on screen. 0 off.
+    pub halftone: f32,
+    /// Finest halftone pitch in metres; the coarser layers are 4, 16 and 64 times this.
+    pub halftone_pitch: f32,
+    /// Softness of the dot edges, in threshold units (0.02 hard, about 0.6 soft).
+    pub halftone_soft: f32,
+    /// Angle of the dot screen in the surface frame, degrees.
+    pub halftone_angle: f32,
+    /// Amplitude of the paper's tooth (fibres and fine relief), screen-anchored, on white
+    /// paper and in tone alike. 0 off.
+    pub paper_tooth: f32,
+    /// Scale of the tooth in pixels at 720 lines.
+    pub paper_tooth_px: f32,
+    /// Amplitude of the paper's large, faint unevenness. 0 off.
+    pub paper_mottle: f32,
+    /// Scale of the mottle in pixels at 720 lines.
+    pub paper_mottle_px: f32,
+    /// How much the wash settles into the tooth's hollows (darker there, mostly in mid
+    /// greys). 0 a flat wash.
+    pub paper_take: f32,
+    /// Soft cast-shadow edges: penumbra width on the receiver per metre of distance from the
+    /// occluder. 0 the hard edge.
+    pub shadow_soft: f32,
+    /// Largest penumbra width in metres.
+    pub shadow_soft_max: f32,
+    /// Paper anchoring: 0 screen (a sheet behind the image), 1 surface (fixed world scales
+    /// faded by their size on screen).
+    pub paper_anchor: f32,
+    /// With `paper_anchor` 1: the finest world cell of the paper relief in metres; coarser
+    /// layers double up to 2048 times this.
+    pub paper_cell: f32,
 }
 
 impl StylePreset {
@@ -505,6 +539,19 @@ impl StylePreset {
             screentone_aniso: 0.0,
             screentone_soft: 0.0,
             screentone_detail: 1.0,
+            halftone: 0.0,
+            halftone_pitch: 0.01,
+            halftone_soft: 0.5,
+            halftone_angle: 30.0,
+            paper_tooth: 0.0,
+            paper_tooth_px: 3.0,
+            paper_mottle: 0.0,
+            paper_mottle_px: 160.0,
+            paper_take: 0.0,
+            shadow_soft: 0.0,
+            shadow_soft_max: 1.0,
+            paper_anchor: 0.0,
+            paper_cell: 0.002,
         }
     }
 
@@ -549,6 +596,10 @@ impl StylePreset {
             far: [self.rule_near, self.rule_fade_in, self.rule_down_gain, self.rule_dist_len],
             bounce: [self.bounce, self.bounce_sky, self.screentone_aniso, 0.0],
             grain: [self.screentone_soft, self.screentone_detail, 0.0, 0.0],
+            halftone: [self.halftone, self.halftone_pitch, self.halftone_soft, self.halftone_angle.to_radians()],
+            paper2: [self.paper_tooth, self.paper_tooth_px, self.paper_mottle, self.paper_mottle_px],
+            paper3: [self.paper_take, self.shadow_soft, self.shadow_soft_max, self.paper_anchor],
+            paper4: [self.paper_cell, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -689,12 +740,28 @@ impl StylePreset {
     /// docs/features/bounced-light.md.
     pub fn nihei_ink() -> Self {
         Self {
-            // Wash: the E032 grain made soft (no two-level edges), resolved and seam-free.
+            // Wash: a smooth gradient on textured paper with a subtle halftone (E040). The
+            // E036 grain (`screentone`) is off; its fields stay set in case it is wanted.
             screentone_aniso: 1.0,
             screentone_detail: 0.3,
             screentone_soft: 2.0,
-            screentone: 0.2,
-            paper_texture: 0.04,
+            screentone: 0.0,
+            paper_texture: 0.0,
+            paper_grain: 0.0,
+            paper_anchor: 1.0,
+            paper_cell: 0.002,
+            paper_tooth: 0.045,
+            paper_tooth_px: 2.0,
+            paper_mottle: 0.03,
+            paper_mottle_px: 160.0,
+            paper_take: 0.08,
+            halftone: 0.07,
+            halftone_pitch: 0.01,
+            halftone_soft: 0.8,
+            halftone_angle: 30.0,
+            // Soft cast-shadow edges, widening with distance from the occluder (E041).
+            shadow_soft: 0.06,
+            shadow_soft_max: 1.0,
             // Ruling: nothing near, sparse at middle distance, merging into black far down.
             fall_white: 0.28,
             fall_black: 0.05,
@@ -945,6 +1012,19 @@ impl StylePreset {
         "screentone_aniso",
         "screentone_soft",
         "screentone_detail",
+        "halftone",
+        "halftone_pitch",
+        "halftone_soft",
+        "halftone_angle",
+        "paper_tooth",
+        "paper_tooth_px",
+        "paper_mottle",
+        "paper_mottle_px",
+        "paper_take",
+        "shadow_soft",
+        "shadow_soft_max",
+        "paper_anchor",
+        "paper_cell",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1075,6 +1155,19 @@ impl StylePreset {
             "screentone_aniso" => self.screentone_aniso = num(value)?,
             "screentone_soft" => self.screentone_soft = num(value)?,
             "screentone_detail" => self.screentone_detail = num(value)?,
+            "halftone" => self.halftone = num(value)?,
+            "halftone_pitch" => self.halftone_pitch = num(value)?,
+            "halftone_soft" => self.halftone_soft = num(value)?,
+            "halftone_angle" => self.halftone_angle = num(value)?,
+            "paper_tooth" => self.paper_tooth = num(value)?,
+            "paper_tooth_px" => self.paper_tooth_px = num(value)?,
+            "paper_mottle" => self.paper_mottle = num(value)?,
+            "paper_mottle_px" => self.paper_mottle_px = num(value)?,
+            "paper_take" => self.paper_take = num(value)?,
+            "shadow_soft" => self.shadow_soft = num(value)?,
+            "shadow_soft_max" => self.shadow_soft_max = num(value)?,
+            "paper_anchor" => self.paper_anchor = num(value)?,
+            "paper_cell" => self.paper_cell = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
@@ -1136,4 +1229,8 @@ pub(crate) struct StyleGpu {
     far: [f32; 4],
     bounce: [f32; 4],
     grain: [f32; 4],
+    halftone: [f32; 4],
+    paper2: [f32; 4],
+    paper3: [f32; 4],
+    paper4: [f32; 4],
 }

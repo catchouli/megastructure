@@ -399,6 +399,39 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: 000558 in `nihei_ink` has no ruling at all (the wall is about 20 m away); the stair's shadow is a light-mid grey with a darker band under the stair; the lit wall is paper. 000630 is an even mid-grey wall with soft grain.
 - Verdict: for the owner. Question on the sheet: under the stair, is the lifted grey plausible, or should the shadow stay darker?
 
+## E040: Textured paper and a subtle halftone on a smooth wash
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Paper and halftone")
+- Question: the owner: the E036 grain looks like TV static or a QR code, especially over large distant areas; the smooth wash looks best, but the result should be more textured: "textured paper + subtle halftone". On anchoring: screen space will look odd in motion, world space compresses in the distance, "the solution is going to be somewhere in between like the current grain".
+- Setup: `screentone` 0 (smooth wash) plus new layers: paper relief (`paper_tooth`, `paper_mottle`, `paper_take`) screen-anchored (`paper_anchor` 0) or surface-anchored (1: twelve fixed world scales from 2 mm, each faded in and out by amplitude by its size on screen, between `paper_tooth_px` 2 and `paper_mottle_px` 160 px at 720 lines, normalised, faded on foreshortened surfaces); halftone (`halftone`: a round-dot screen fixed to the surface, eight nested world pitches each present only at 3.5 to 11 px on screen, only in mid to dark tone, soft-edged, size varied slightly per dot). Sheet `compare/E040-paper-halftone.png`: native crops at 2560x1440 of a wall at 2 m (`shaft_hall_wall --t 1`), a large wall at 60 m (`shaft_spawn`), a grazing floor (`shaft_hall_walk --t 0`) and the far walls (`shaft_rim_down`): smooth / paper only / paper + halftone 0.04 / 0.07 (default) / 0.14. Clips `compare/E040-walk-old-new-screenpaper.mp4` (`shaft_hall_walk` t 0..0.0467, 121 frames) and `compare/E040-turn-old-new-screenpaper.mp4` (`shaft_spawn_yaw`, 121 frames), each old default / new default / new with screen-anchored paper (`--set paper_anchor=0 --set paper_tooth=0.035 --set paper_tooth_px=3`). Regenerate a cell with `mega_capture --path shaft_spawn --width 2560 --height 1440 --set halftone=0.14 --out <dir>`.
+- Failures on the way: (1) first paper amplitudes read as woven canvas (fibre layers too strong); reduced and mostly irregular tooth. (2) The first halftone used E032's cosine dot screen at 0.25 to 0.45 with dots 4 to 28 px: a large checkerboard over everything, and on the floor two pitches with differently wobbled lattices beat into bands; then at 0.08 to 0.15 still a checkerboard. Fixed by area-true round dots, nested pitches with no lattice wobble, a 3.5 to 11 px window and 0.07. (3) The first surface paper (no normalisation, amplitude 2.2) read as marble, with blocky value-noise lattices; layers now rotated by the golden angle, normalised, amplitude 0.7.
+- Stability (61 frames, 1280x720, final view; 5x5 blurred reprojected MAD in levels, pops over 64 levels, 13x13): `shaft_hall_walk` t 0..0.02333: E038 default 0.49, 0.066%, 0.22; smooth wash (no paper, halftone or soft shadow) 0.20, 0.068%, 0.12; new default 0.29, 0.068%, 0.16; new with screen paper 1.31, 0.068%, 0.58. `shaft_bridge_walk` t 0.3..0.3267: 0.41, 0.103%, 0.17 / 0.20, 0.111%, 0.09 / 0.26, 0.111%, 0.12 / 0.75, 0.112%, 0.31. Rotation `shaft_spawn_yaw`: 0.55, 0.015% / 0.17, 0.016% / 0.23, 0.016% / 3.27, 0.016%; `shaft_spawn_pitch` 0.54 / 0.16 / 0.21 / 3.30. Test scene (`nihei_ink_small`) `hall_yaw` 0.95, 0.189% to 0.68, 0.207%; `hall_walk` 0.67, 0.198% to 0.54, 0.212%. At 2560x1440, `shaft_hall_walk` 0.44, 0.036% to 0.22, 0.037%; `shaft_spawn_yaw` 0.16, 0.011%. The new default is close to the smooth wash and about half the E038 default's error; screen-anchored paper is the worst of all in motion (it does not move with the surfaces), as the owner expected.
+- Verdict: surface-anchored paper, halftone 0.07. Question on the sheet: which column has the texture of a printed page without the static?
+
+## E041: Soft cast-shadow edges
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Soft cast-shadow edges")
+- Question: the owner on E039: "The shadow edges feel a bit too hard though, if they were soft it might give it that nice gradient look from the comics too."
+- Setup: `shadow_soft` (penumbra width per metre from the occluder, capped at `shadow_soft_max`), blocker search in the scene cascade, filtering in the finest cascade that holds the penumbra in four texels, blended across cascades. Sheet `compare/E041-shadow-edge.png`: hard / 0.03 / 0.06 (default) / 0.12 on frame 000558 (`--camera`, E039), `shaft_spawn`, `shaft_stair_below`, `shaft_bridge_walk`, and a 2x zoom of the stair's shadow in 000558; regenerate with `mega_capture --path shaft_spawn --set shadow_soft=0.12 --out <dir>`.
+- Failures on the way: (1) the first version also widened the penumbra on the left edge of 000558's large shadow, which looked like the shadow growing; this was the shadow grading over 1 to 2 m as specified (cap 2 m), and the cap is now 1 m. (2) A jagged seam along the stair's shadow at 0.12: the cascade was chosen by penumbra width, which follows the noisy blocker estimate, so neighbouring pixels switched cascade; fixed by blending into the next cascade. (3) Faint staircase lines inside the penumbra: the blocker search read whole texels and stepped; now each tap is a bilinear blend of four texels.
+- Result: contact stays tight (the top of the stair's shadow, the bridge on its supports); the shadow of the stair on the wall 5 to 15 m below grades over 0.3 to 0.9 m. Railing shadows at range are softened, not fixed. Stability is not worse: with soft shadows `shaft_spawn_yaw` 0.241 against 0.246 hard, `shaft_bridge_walk` 0.275 against 0.277.
+- Verdict: 0.06 as default. Question on the sheet: which edge softness reads like the comics' gradient?
+
+## E042: Overview, previous default against new
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md`
+- Setup: sheet `compare/E042-overview.png` at 2560x1440: the E038 default (`--set screentone=0.2 --set paper_texture=0.04 --set paper_grain=0.035 --set paper_anchor=0 --set paper_tooth=0 --set paper_mottle=0 --set halftone=0 --set shadow_soft=0`) against the new default, on `shaft_rim_down`, `shaft_gallery_down`, `shaft_spawn`, frame 000558 and `shaft_hall_enter` t 0.6. Regenerate a cell with `mega_capture --path <view> --width 2560 --height 1440 --out <dir>`. Also checked at 3024x1832 (`shaft_spawn`): dots and paper hold their size.
+- Frame time: see "Measured" in `ink-renderer.md` (up 0.6 to 1 ms at 720p, 2 to 2.5 ms at 1440p).
+- Verdict: the new default. Question on the sheet: does the right column look like a printed page in grey wash, calm enough to walk around in?
+
+## E043: Why walking pops doubled with bounced light
+- Date: 2026-11-16
+- Feature: `features/bounced-light.md`
+- Question: E037 found walking pops on `shaft_bridge_walk` t 0.3..0.3267 rising from 0.046% to 0.103% with bounce on. Swimming, or measurement?
+- Setup: `--metrics` on that stretch, bounce on and off (`--set bounce=0 --set bounce_sky=0`), with contours off (`--set contour_strength=0 --set contour_fine_strength=0`), with every line off (also `--set rank_fade_start=0,0,0,0 --set rank_fade_end=0.01,0.01,0.01,0.01`), and in the `lines` and `hatching` views.
+- Result: contours off: 0.111% on, 0.048% off. All lines off: 0.002% either way. `lines` view (lines only, no tone): identical with and without bounce (0.30, 0.221%). `hatching` view: 0.002% either way. So neither the tone nor the lines pop on their own; the pop counter counts pixels off by more than 64 levels, and the same sub-pixel resampling of a stroke or contour edge crosses that threshold more often against the lighter grey that bounce gives. The blurred error is lower with bounce on (1.26 to 0.76 levels without contours).
+- Verdict: not a defect; a property of a fixed-threshold metric. Nothing changed.
+
 ## Queued
 
 Experiments the plan already calls for, in rough order:
@@ -410,5 +443,5 @@ Experiments the plan already calls for, in rough order:
 - Per-patch stroke angle and weight variation (E019, E025 follow-up).
 - Strokes stopping short of creases and face borders (E024 follow-up; needs an edge-distance attribute).
 - Calming heavy distant hatching that resamples into moire in motion (E020 follow-up).
-- A grain with a less synthetic character than value noise (blue noise, or a fibre texture) at the E036 softness (E036 follow-up).
+- A paper texture with real fibre character (a scanned or modelled tile mapped through the same layered scheme) in place of value noise (E040 follow-up).
 - Bounced light re-baked off the render thread, or interpolated between key sun directions, for a moving sun (E037 follow-up).

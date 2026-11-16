@@ -85,7 +85,7 @@ How it copes with day and night: intensity changes (dusk, night) need no re-bake
 - One bounce only, from a fixed albedo, and the stored light ignores `tone_noise`, `underside_black` and the cast-shadow clamp at the hit, so it slightly overestimates light from shadowed surfaces and underestimates from lit ones near a shadow edge (the visibility at the hit is interpolated from its vertices, about 1.5 m apart).
 - Thin parts narrower than the tessellation (railings, stair stringers) are traced, but receivers are sampled only at vertices, so the soft dark band right under the stair is as wide as a wall triangle.
 - For a kilometre-scale structure a per-vertex bake of everything will be too slow, and distant geometry beyond the streaming radius will not be in the BVH. The PLAN's coarse occupancy grid (light propagated from lit cells) is the candidate for the far field, with this bake kept for the near field.
-- With bounce on, walking pops on `shaft_bridge_walk` rose from 0.046% to 0.103% of compared pixels (E037): likely resampling of contour edges against a lighter grey, not swimming, but not confirmed.
+- With bounce on, walking pops on `shaft_bridge_walk` rose from 0.046% to 0.103% of compared pixels (E037). Explained in E043: the tone itself does not pop (0.002% with all lines removed, bounce on or off) and the lines are unchanged by bounce (the `lines` view gives identical figures); the pop counter counts pixels off by more than 64 levels, and the same sub-pixel resampling of a line edge crosses that threshold more often against lighter grey. The blurred error is lower with bounce on. Not a defect.
 
 ## Related experiments
 

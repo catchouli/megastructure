@@ -23,7 +23,8 @@ pub const FILL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const INK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Wash: grey tone as ink coverage 0..1, already printed as screentone where the preset asks
 /// for it (continuous tone models only; 0 everywhere with the band model).
-pub const TONE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+/// G: the surface-anchored paper relief, 0.5 + 2 h (E040; 0.5 when unused, 0 for sky).
+pub const TONE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
 /// Sun shadow map array, one layer per cascade.
 pub const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Contour strength before anti-aliasing.
@@ -1226,10 +1227,10 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_wgsl() {
-        // struct Globals: two mat4x4 and seven vec4. struct Style: thirty-eight vec4.
+        // struct Globals: two mat4x4 and seven vec4. struct Style: forty-two vec4.
         // struct ShadowU: four mat4x4 and two vec4.
         assert_eq!(std::mem::size_of::<Globals>(), 2 * 64 + 7 * 16);
-        assert_eq!(std::mem::size_of::<StyleGpu>(), 38 * 16);
+        assert_eq!(std::mem::size_of::<StyleGpu>(), 42 * 16);
         assert_eq!(std::mem::size_of::<ShadowGpu>(), 4 * 64 + 2 * 16);
     }
 
@@ -1263,7 +1264,12 @@ mod tests {
             assert_eq!((p.screentone_aniso, p.screentone_soft), (0.0, 0.0));
         }
         let ink = StylePreset::nihei_ink();
-        assert!(ink.bounce > 0.0 && ink.rule_fade_in > 0.0 && ink.wash > 0.0 && ink.screentone_aniso > 0.0);
+        assert!(ink.bounce > 0.0 && ink.rule_fade_in > 0.0 && ink.wash > 0.0);
+        // Since E040: smooth wash on surface-anchored paper with a halftone, soft shadows.
+        assert!(ink.screentone == 0.0 && ink.paper_anchor == 1.0 && ink.halftone > 0.0 && ink.shadow_soft > 0.0);
+        for p in [StylePreset::nihei(), StylePreset::nihei_vast(), StylePreset::nihei_wash(), StylePreset::nihei_hybrid()] {
+            assert_eq!((p.halftone, p.paper_tooth, p.paper_mottle, p.shadow_soft), (0.0, 0.0, 0.0, 0.0));
+        }
         assert_eq!(StylePreset::nihei_ink_wash().fall_white, 0.0);
         for p in [StylePreset::nihei_fall(), StylePreset::nihei_wash(), StylePreset::nihei_hybrid()] {
             assert_eq!(p.tone_model, 1.0);

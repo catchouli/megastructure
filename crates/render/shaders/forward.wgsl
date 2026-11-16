@@ -41,8 +41,8 @@ struct FsOut {
     @location(2) fill: vec4<f32>,
     // R black ink, G white ink, B line ink (written by the line passes), A unused.
     @location(3) ink: vec4<f32>,
-    // Wash coverage (continuous tone models).
-    @location(4) tone: f32,
+    // x wash coverage (continuous tone models), y surface paper relief 0.5 + 2 h.
+    @location(4) tone: vec2<f32>,
 };
 
 // Everything one hatch layer needs about the fragment. u is the spacing coordinate (metres,
@@ -507,17 +507,6 @@ fn screen_kind(dots: f32, grain: f32) -> f32 {
     return 0.5 * (dots + grain);
 }
 
-// 2D value noise in 0..1, one independent field per key.
-fn vnoise2(key: u32, x: vec2<f32>) -> f32 {
-    let i = vec2<i32>(floor(x));
-    let f = x - floor(x);
-    let w = f * f * (3.0 - 2.0 * f);
-    let k0 = hash2(key, bitcast<u32>(i.y));
-    let k1 = hash2(key, bitcast<u32>(i.y + 1));
-    let a = mix(u01(hash2(k0, bitcast<u32>(i.x))), u01(hash2(k0, bitcast<u32>(i.x + 1))), w.x);
-    let b = mix(u01(hash2(k1, bitcast<u32>(i.x))), u01(hash2(k1, bitcast<u32>(i.x + 1))), w.x);
-    return mix(a, b, w.y);
-}
 
 // Surface screentone with one octave per surface axis (screentone_aniso, E036). The cell
 // size along each surface axis is chosen from that axis's own rotation-invariant footprint,
@@ -773,6 +762,196 @@ fn sun_vis_cheap(q: vec3<f32>) -> f32 {
     return 1.0;
 }
 
+// ---------------------------------------------------------------------------------------
+// Halftone (E040): a soft-edged, rotated dot screen fixed to the surface, carrying a small
+// part of the mid-to-dark wash. It never swaps scale abruptly: there are eight fixed world
+// pitches (S.halftone.y times 1, 2, 4 ... 128), and each is faded in and out by amplitude
+// according to its pitch on screen (rotation-invariant footprint, in pixels at 720 lines),
+// present only between about 3.5 and 11 pixels. Far away every layer has faded and the wash is smooth, well
+// before the dots could reach pixel scale.
+
+fn halftone_cov(w: f32, uv: vec2<f32>, pitch: f32) -> f32 {
+    let a = S.halftone.w;
+    let r = vec2<f32>(cos(a) * uv.x - sin(a) * uv.y, sin(a) * uv.x + cos(a) * uv.y) / pitch;
+    // Slight irregularity: each dot a little larger or smaller (a threshold offset per cell).
+    // The lattice itself stays exact, so the layers stay nested (the dots of pitch 2P are
+    // every other dot of pitch P) and a crossfade between them does not beat; a wobble of
+    // the lattice, tried first, differed between layers and showed as bands (E040).
+    let cell = vec2<i32>(floor(r + 0.5));
+    let jit = u01(hash2(hash2(0x1d872b41u, bitcast<u32>(cell.x)), bitcast<u32>(cell.y))) - 0.5;
+    // Round dots, area-true (threshold pi d^2 for the distance d to the dot's centre), so
+    // mid tones stay round dots like printed screentone instead of turning into the
+    // checkerboard of the cosine screen.
+    let d = length(r - floor(r + 0.5));
+    let t = saturate(3.14159265 * d * d) + 0.08 * jit;
+    return saturate((w - t) / max(S.halftone.z, 0.02) + 0.5);
+}
+
+fn halftone(w: f32, uv: vec2<f32>, gmax: f32) -> f32 {
+    // Only mid to dark tone; paper and near-solid tone stay smooth.
+    let band = smoothstep(0.1, 0.35, w) * (1.0 - smoothstep(0.85, 0.98, w));
+    if (band <= 0.0) {
+        return w;
+    }
+    var sum = 0.0;
+    var wsum = 0.0;
+    for (var k = 0; k < 8; k++) {
+        let pitch = S.halftone.y * exp2(f32(k));
+        let px = pitch / max(gmax, 1e-7) / G.misc.x;
+        let win = smoothstep(3.5, 5.0, px) * (1.0 - smoothstep(8.0, 11.0, px));
+        if (win > 0.0) {
+            sum += win * (halftone_cov(w, uv, pitch) - w);
+            wsum += win;
+        }
+    }
+    return saturate(w + S.halftone.x * band * sum / max(wsum, 1.0));
+}
+
+// ---------------------------------------------------------------------------------------
+// Surface-anchored paper (E040, paper_anchor 1). The relief of the sheet as a stack of fixed
+// world scales (S.paper4.x times 1, 2, 4 ... 2048: with the default, 2 mm to 4 m), each
+// one value-noise field with its own seed. A layer is present only while its cell is
+// between S.paper2.y and S.paper2.w pixels at 720 lines on screen (rotation-invariant
+// footprint), faded in and out by amplitude. Walking towards a wall, finer layers fade in on
+// top of coarser ones that stay: a refinement, never a swap. Far away, fewer and fewer
+// layers are large enough, so the paper fades to smooth tone instead of compressing into
+// static; grazing surfaces fade with their foreshortening. Returns the relief h, in the
+// same units as the screen sheet's (tooth and mottle already weighted).
+fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32) -> f32 {
+    let gmax = max(gu, gv);
+    let aniso = saturate(2.0 * min(gu, gv) / max(gmax, 1e-9));
+    if (aniso <= 0.0) {
+        return 0.0;
+    }
+    let plane = pcg(bitcast<u32>(i32(floor(pn * 4.0))));
+    let lo = max(S.paper2.y, 1.0);
+    let hi = max(S.paper2.w, 4.0 * lo);
+    var tooth = 0.0;
+    var tw = 0.0;
+    var mottle = 0.0;
+    var mw = 0.0;
+    for (var k = 0u; k < 12u; k++) {
+        let c = S.paper4.x * exp2(f32(k));
+        let px = c / max(gmax, 1e-7) / G.misc.x;
+        let w = smoothstep(lo, 2.0 * lo, px) * (1.0 - smoothstep(0.5 * hi, hi, px));
+        if (w > 0.0) {
+            // Each layer turned by its own angle, so the value-noise lattices do not line up
+            // into visible blocks.
+            let a = f32(k) * 2.39996;
+            let q = vec2<f32>(cos(a) * uv.x - sin(a) * uv.y, sin(a) * uv.x + cos(a) * uv.y) / c;
+            let g = 2.0 * (vnoise2(hash2(0x5851f42du ^ plane, k), q) - 0.5);
+            let m = smoothstep(0.15 * hi, 0.4 * hi, px);
+            tooth += w * (1.0 - m) * g;
+            tw += w * w * (1.0 - m) * (1.0 - m);
+            mottle += w * m * g;
+            mw += w * w * m * m;
+        }
+    }
+    // Normalised to the contrast of about four full layers, so the relief has the same
+    // strength wherever the layers are all present, and fades where only a few remain (far
+    // away and foreshortened).
+    let tn = tooth / sqrt(max(tw, 4.0));
+    let mn = mottle / sqrt(max(mw, 2.0));
+    return (S.paper2.x * tn + S.paper2.z * mn) * 0.7 * aniso;
+}
+
+// ---------------------------------------------------------------------------------------
+// Soft cast-shadow edge (E041). A penumbra whose width on the receiver grows with the
+// distance from the occluder, as from a sun of finite size, exaggerated: width =
+// S.paper3.y * (receiver to blocker distance), capped at S.paper3.z metres. The blocker
+// distance comes from a search in the scene-wide cascade; the penumbra is then filtered in
+// the finest cascade where its radius is at most four texels, so a wide penumbra is a smooth
+// gradient rather than sparse taps. Contact stays tight; at a penumbra under about a texel
+// the hard edge is kept.
+fn soft_sun(p: vec3<f32>, n: vec3<f32>, s: vec3<f32>, hard: f32, hard_cascade: f32, dpx: vec3<f32>, dpy: vec3<f32>) -> f32 {
+    let l3 = cascade_lookup(3u, p, n, s);
+    if (l3.w <= 0.0 || l3.z <= 0.0 || l3.z >= 1.0) {
+        return hard;
+    }
+    let size = shadow_size();
+    let t3 = cascade_texel(3u, p);
+    let wmax = S.paper3.z;
+    let rs = max(0.5 * wmax / t3, 1.5);
+    let plane3 = cascade_plane(3u, dpx, dpy, cascade_w(3u, p));
+    // 3x3 taps, each read as the four texels around it with bilinear weights, so the
+    // estimate moves continuously with the receiver instead of stepping at texel edges
+    // (stepping showed as faint staircase lines inside the penumbra).
+    var bsum = 0.0;
+    var bn = 0.0;
+    let slack = 2.0 * abs(dot(plane3.xy, vec2<f32>(1.0) / size)) + 1e-5;
+    let maxc = vec2<i32>(i32(size) - 1);
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            let o = vec2<f32>(f32(i), f32(j)) * rs;
+            let zr = l3.z + dot(plane3.xy, o / size);
+            let st = l3.xy * size + o - 0.5;
+            let b0 = floor(st);
+            let f = st - b0;
+            for (var k = 0; k < 4; k++) {
+                let d = vec2<i32>(k & 1, k >> 1);
+                let wt = select(1.0 - f.x, f.x, d.x == 1) * select(1.0 - f.y, f.y, d.y == 1);
+                let z = textureLoad(shadow_tex, clamp(vec2<i32>(b0) + d, vec2<i32>(0), maxc), 3, 0);
+                if (z < zr - slack) {
+                    bsum += wt * (zr - z);
+                    bn += wt;
+                }
+            }
+        }
+    }
+    if (bn < 0.05) {
+        return hard;
+    }
+    let dz_per_m = abs((SH.mats[3] * vec4<f32>(s, 0.0)).z);
+    let dist = (bsum / bn) / max(dz_per_m, 1e-9);
+    let w = min(S.paper3.y * dist, wmax);
+    // The finest cascade containing p in which the penumbra's radius is at most 4 texels,
+    // blended into the next coarser one as the radius approaches that limit, so the switch
+    // of cascade (which follows the penumbra width, and so the noisy blocker estimate) is
+    // never a seam.
+    let margin = 3.0 / size;
+    var ci = 3u;
+    for (var i = 0u; i < 3u; i++) {
+        let l = cascade_lookup(i, p, n, s);
+        if (l.w > margin && l.z > 0.0 && 0.5 * w / cascade_texel(i, p) <= 4.0) {
+            ci = i;
+            break;
+        }
+    }
+    let r = 0.5 * w / cascade_texel(ci, p);
+    // Hard against soft, judged against the texel of the cascade the hard edge came from.
+    let th = cascade_texel(u32(clamp(floor(hard_cascade), 0.0, 3.0)), p);
+    let k = saturate((0.5 * w / th - 0.75) / 1.5);
+    if (k <= 0.0) {
+        return hard;
+    }
+    var v = soft_pcf(ci, p, n, s, r, dpx, dpy);
+    let toward = select(0.0, smoothstep(2.0, 4.0, r), ci < 3u);
+    if (toward > 0.0) {
+        let r2 = 0.5 * w / cascade_texel(ci + 1u, p);
+        v = mix(v, soft_pcf(ci + 1u, p, n, s, r2, dpx, dpy), toward);
+    }
+    return mix(hard, v, k);
+}
+
+// Tent-weighted 5x5 comparison taps spread over a radius of r texels in cascade ci, each
+// against the receiver's own plane.
+fn soft_pcf(ci: u32, p: vec3<f32>, n: vec3<f32>, s: vec3<f32>, r: f32, dpx: vec3<f32>, dpy: vec3<f32>) -> f32 {
+    let size = shadow_size();
+    let l = cascade_lookup(ci, p, n, s);
+    let plane = cascade_plane(ci, dpx, dpy, cascade_w(ci, p));
+    var v = 0.0;
+    var ws = 0.0;
+    for (var j = -2; j <= 2; j++) {
+        for (var i = -2; i <= 2; i++) {
+            let o = vec2<f32>(f32(i), f32(j)) * 0.5 * max(r, 0.5) / size;
+            let wt = f32(3 - abs(i)) * f32(3 - abs(j));
+            v += wt * textureSampleCompareLevel(shadow_tex, shadow_cmp, l.xy + o, i32(ci), l.z + dot(plane.xy, o));
+            ws += wt;
+        }
+    }
+    return v / ws;
+}
+
 // Derivative along v of a quantity with screen derivatives (lx, ly), given the screen
 // derivatives of the coordinates u and v: solves [ux vx; uy vy] [Lu Lv] = [lx ly].
 fn grad_along(ux: f32, uy: f32, vx: f32, vy: f32, lx: f32, ly: f32) -> f32 {
@@ -986,7 +1165,12 @@ fn fs_main(in: VsOut) -> FsOut {
     // anti-aliased over one pixel from its own screen gradient.
     let sv = sun_visibility(p, n, s, dpdx(p), dpdy(p));
     let gsv = length(vec2<f32>(dpdx(sv.x), dpdy(sv.x)));
-    let vis = select(step(0.5, sv.x), saturate((sv.x - 0.5) / gsv + 0.5), gsv > 1e-5);
+    var vis = select(step(0.5, sv.x), saturate((sv.x - 0.5) / gsv + 0.5), gsv > 1e-5);
+    let dpx_p = dpdx(p);
+    let dpy_p = dpdy(p);
+    if (S.paper3.y > 0.0 && SH.params.x > 0.5 && ndl > 0.05) {
+        vis = soft_sun(p, n, s, vis, sv.y, dpx_p, dpy_p);
+    }
     let cast_sh = (1.0 - vis) * S.fog2.y;
     // Cast shadow only on faces the sun would reach.
     // A hard decision per face (normals are flat), so a grazing face is either in the
@@ -1151,6 +1335,11 @@ fn fs_main(in: VsOut) -> FsOut {
         // continuous modulation of the grey with no hard edges (E036).
         let ht = saturate((w0 - tt) / max(max(fwidth(tt), 0.05), S.grain.x) + 0.5);
         wash = mix(w0, ht, S.wash2.y);
+        if (S.halftone.x > 0.0) {
+            // Faded on foreshortened surfaces, where dots would be squeezed into lines.
+            let fs = saturate(2.0 * min(lod_u1, lod_v1) / max(max(lod_u1, lod_v1), 1e-9));
+            wash = mix(wash, halftone(wash, vec2<f32>(u1, u2), max(lod_u1, lod_v1)), fs);
+        }
     }
 
     let view = G.flags.x;
@@ -1174,11 +1363,15 @@ fn fs_main(in: VsOut) -> FsOut {
     // (read by the composite to turn lines white inside black).
     out.fill = vec4<f32>(0.0, band_of(light) / 3.0, ao, select(0.0, t.black, hatch_on));
     out.ink = vec4<f32>(select(0.0, t.cov, hatch_on), select(0.0, speck, hatch_on), 0.0, 0.0);
-    out.tone = select(0.0, wash, hatch_on);
+    var ph = 0.0;
+    if (S.paper3.w > 0.5 && (S.paper2.x > 0.0 || S.paper2.z > 0.0)) {
+        ph = paper_surface(vec2<f32>(u1, u2), dot(p, n), lod_u1, lod_v1);
+    }
+    out.tone = vec2<f32>(select(0.0, wash, hatch_on), 0.5 + 2.0 * ph);
     if (view == VIEW_SHADOW) {
         out.fill = vec4<f32>(0.0, sv.y / 4.0, ao, 0.0);
         out.ink = vec4<f32>(amount, 0.0, 0.0, 0.0);
-        out.tone = 0.0;
+        out.tone = vec2<f32>(0.0, 0.5);
     }
     return out;
 }
