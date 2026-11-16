@@ -26,7 +26,7 @@ OPTIONS:
     --dt <S>                headless: seconds per frame, default 1/60
     --width <W> --height <H>  headless: image size, default 1280x720
     --input <script>        headless: scripted input, e.g. forward:2,look_right+forward:1.5,idle:0.5
-                            actions: forward back left right up down fast run jump toggle_fly
+                            actions: forward back left right up down fast walk jump toggle_fly
                             reset screenshot look_left look_right look_up look_down idle
                             (screenshot writes screenshots/<time>.png and .json, or into --out)
     --out <dir>             headless: write frame_NNNN.png here
@@ -41,7 +41,8 @@ OPTIONS:
 
 CONTROLS (windowed), walking:
     W A S D        move            Space          jump
-    Shift          run             R              back to the last stable ground
+    Shift          walk (running is the default)
+    R              back to the last stable ground
     F              switch between walking and the fly camera, at the current position
     Arrow keys     turn (90 degrees per second)
     Mouse          look while any button is held, or while the cursor is grabbed (Tab)
@@ -219,7 +220,7 @@ mod tests {
     #[test]
     fn mode_flag_and_new_actions() {
         assert_eq!(p("--mode walk").unwrap().unwrap().move_mode, Some(MoveMode::Walk));
-        assert_eq!(p("--headless --mode fly --input jump+run:1,reset:0.1,toggle_fly:0.1").unwrap().unwrap().move_mode, Some(MoveMode::Fly));
+        assert_eq!(p("--headless --mode fly --input jump+walk:1,reset:0.1,toggle_fly:0.1").unwrap().unwrap().move_mode, Some(MoveMode::Fly));
         assert_eq!(p("--headless").unwrap().unwrap().move_mode, None);
     }
 

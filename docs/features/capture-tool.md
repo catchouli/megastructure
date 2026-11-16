@@ -100,6 +100,8 @@ Defined in `crates/render/src/paths.rs` as `fn(t: f32) -> Camera`, `t` clamped t
 
 `shaft_hall_deep_in`, `shaft_hall_deep_back` and `shaft_hall_deep_side` are the darkest places in the scene, at the back of the giant hall: looking further in at the back wall, looking back towards the arch and the lit shaft, and along a side wall from the back corner; t moves the eye 4 m (E056). With `shaft_gallery_down` and `shaft_rim_down` (the bottom of the shaft) they are the views for judging pencil shading.
 
+Labyrinth paths (`lab_*`, scene `labyrinth`; fixed views supplied by the labyrinth work, metres and radians as for `--camera`; they follow that scene's layout and may go stale when it changes): `lab_spawn`, `lab_spawn_edge_down`, `lab_far_ledge_axis`, `lab_arch_ledge`, `lab_hall_from_arch`, `lab_hall_exterior_end`, `lab_gallery`, `lab_void_bottom_up`, `lab_wall_stair`, `lab_overlook`, `lab_tower_well`, `lab_undercroft`, `lab_well_bridge`, `lab_loggia`, `lab_corridor_void`. For motion metrics: `lab_axis_walk` (from the far ledge across the bridge and through the arch into the hall, z 146 to 90 at x 150; `--frames 61 --t1 0.025` is 1.4 m/s) and `lab_far_ledge_yaw` (a 90 degree turn at `lab_far_ledge_axis`). All rendered sensibly at cb3d637 (E064).
+
 To add a path, write the function, add it to `NAMES` and `by_name`, and make sure `scene_of` maps it to its scene.
 
 ### Code locations

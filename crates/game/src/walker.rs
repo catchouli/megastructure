@@ -3,6 +3,13 @@
 //! impacts and a return to the last stable ground. No window, no GPU; advanced only in fixed
 //! steps of `FIXED_DT`, so the same inputs give the same result.
 //!
+//! The velocity rules are Quake 2's player movement, re-derived in metres: on the ground,
+//! friction with a stop-speed floor and then acceleration towards the wanted direction that only
+//! adds while the speed along that direction is below the wanted speed; in the air the same rule
+//! with a small factor, which is what allows steering in flight and strafe-jumping; a jump on the
+//! press, taken before friction so a well-timed hop keeps its speed; step-and-slide moves, in
+//! the air too. Constants and their Quake origins are in `player.rs`.
+//!
 //! The position is the capsule's feet. See docs/features/player-movement.md.
 
 use crate::player::*;
@@ -18,8 +25,20 @@ pub struct WalkInput {
     pub right: f32,
     /// Facing, radians (0 looks along +Z, positive turns towards +X).
     pub yaw: f32,
-    pub run: bool,
+    /// Shift held: walk instead of run (or run instead of walk when `ALWAYS_RUN` is false).
+    pub shift: bool,
     pub jump: bool,
+}
+
+impl WalkInput {
+    /// The wanted top speed for this input, m/s.
+    pub fn wish_speed(&self) -> f32 {
+        if self.shift == ALWAYS_RUN {
+            WALK_SPEED
+        } else {
+            RUN_SPEED
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -48,6 +67,8 @@ pub struct Walker {
     /// Times the position was set directly (a death, a reset, leaving the fly camera): a renderer
     /// that interpolates must not slide across these.
     pub teleports: u32,
+    /// Jumps taken so far.
+    pub jumps: u32,
     /// Jump key state of the previous step, for the rising edge.
     jump_prev: bool,
     /// Seconds a jump press stays valid while waiting for the ground.
@@ -132,28 +153,59 @@ fn slide(world: &World, start: Vec3, motion: Vec3, mode: Mode) -> Slide {
     out
 }
 
-/// Remove from `v` its components into each surface in `normals`.
-fn clip_velocity(mut v: Vec3, normals: &[Vec3]) -> Vec3 {
-    for _ in 0..2 {
-        for n in normals {
-            let d = v.dot(*n);
-            if d < 0.0 {
-                v -= *n * d;
+/// The velocity after touching the surfaces in `normals`, as Quake 2's slide move does it: the
+/// part going into a surface is removed; if that sends it into another surface it follows the
+/// crease of the two; wedged by three or more it stops. Motion along a surface keeps its speed.
+fn clip_velocity(v: Vec3, normals: &[Vec3]) -> Vec3 {
+    let mut planes: Vec<Vec3> = Vec::new();
+    for n in normals {
+        if !planes.iter().any(|p| p.dot(*n) > 0.999) {
+            planes.push(*n);
+        }
+    }
+    if !planes.iter().any(|p| v.dot(*p) < 0.0) {
+        return v;
+    }
+    let clear = |c: Vec3, skip: &[usize]| planes.iter().enumerate().all(|(j, p)| skip.contains(&j) || c.dot(*p) >= -1e-5);
+    for (i, p) in planes.iter().enumerate() {
+        let d = v.dot(*p);
+        let c = if d < 0.0 { v - *p * d } else { v };
+        if clear(c, &[i]) {
+            return c;
+        }
+    }
+    for i in 0..planes.len() {
+        for j in i + 1..planes.len() {
+            let Some(dir) = planes[i].cross(planes[j]).try_normalize() else { continue };
+            let c = dir * v.dot(dir);
+            if clear(c, &[i, j]) {
+                return c;
             }
         }
     }
-    v
+    Vec3::ZERO
 }
 
-/// Move `v` towards `target` by at most `max_delta`.
-fn approach(v: Vec3, target: Vec3, max_delta: f32) -> Vec3 {
-    let d = target - v;
-    let len = d.length();
-    if len <= max_delta {
-        target
-    } else {
-        v + d * (max_delta / len)
+/// Quake 2's `PM_Friction` on a horizontal velocity: the speed falls by `FRICTION` times itself
+/// per second, but never by less than `FRICTION` times `STOP_SPEED`, so a stop is crisp.
+fn friction(v: Vec3, dt: f32) -> Vec3 {
+    let speed = v.length();
+    if speed < REST_SPEED {
+        return Vec3::ZERO;
     }
+    let drop = speed.max(STOP_SPEED) * FRICTION * dt;
+    v * ((speed - drop).max(0.0) / speed)
+}
+
+/// Quake 2's `PM_Accelerate`: add up to `accel * wish_speed * dt` along `wish_dir`, but only
+/// while the speed along `wish_dir` is below `wish_speed`. Speed in other directions is never
+/// taken away, which is what lets a strafing jump turn and gain speed.
+fn accelerate(v: Vec3, wish_dir: Vec3, wish_speed: f32, accel: f32, dt: f32) -> Vec3 {
+    let add = wish_speed - v.dot(wish_dir);
+    if add <= 0.0 {
+        return v;
+    }
+    v + wish_dir * (accel * dt * wish_speed).min(add)
 }
 
 /// Acceleration of a falling body: gravity and quadratic drag.
@@ -178,6 +230,7 @@ impl Walker {
             last_impact: 0.0,
             lockout: 0.0,
             teleports: 0,
+            jumps: 0,
             jump_prev: false,
             jump_buffer: 0.0,
         }
@@ -226,37 +279,37 @@ impl Walker {
         let locked = self.lockout > 0.0;
         self.lockout = (self.lockout - dt).max(0.0);
         let input = &if locked { WalkInput { yaw: input.yaw, ..Default::default() } } else { *input };
-        // A jump is a key press, not a held key; a press shortly before landing is kept.
-        if input.jump && !self.jump_prev {
+        // A jump is a key press, not a held key (unless `AUTO_HOP`); a press shortly before
+        // landing is kept.
+        if input.jump && (!self.jump_prev || AUTO_HOP) {
             self.jump_buffer = JUMP_BUFFER;
         }
         self.jump_prev = raw_jump;
         self.pos = world.depenetrate(self.pos);
         self.last_impact = 0.0;
 
-        // Wanted velocity from the keys and the facing.
+        // Wanted direction and speed from the keys and the facing (diagonals are not faster).
         let (sy, cy) = input.yaw.sin_cos();
         let fwd = Vec3::new(sy, 0.0, cy);
         let right = Vec3::new(-cy, 0.0, sy);
-        let mut dir = fwd * input.forward + right * input.right;
-        if dir.length_squared() > 1.0 {
-            dir = dir.normalize();
-        }
-        let wish = dir * if input.run { RUN_SPEED } else { WALK_SPEED };
+        let dir = fwd * input.forward + right * input.right;
+        let wish_dir = dir.normalize_or_zero();
+        let wish_speed = if wish_dir == Vec3::ZERO { 0.0 } else { input.wish_speed() * dir.length().min(1.0) };
 
+        // The jump comes first: the take-off step is an air step with no friction, so a hop
+        // pressed on (or just before) landing loses no speed.
+        if self.grounded && self.jump_buffer > 0.0 {
+            self.vel.y = self.vel.y.max(0.0) + JUMP_SPEED;
+            self.grounded = false;
+            self.jump_buffer = 0.0;
+            self.jumps += 1;
+        }
         let mut vh = horizontal(self.vel);
         if self.grounded {
-            let rate = if wish == Vec3::ZERO { GROUND_DECEL } else { GROUND_ACCEL };
-            vh = approach(vh, wish, rate * dt);
-            if self.jump_buffer > 0.0 {
-                self.vel.y = JUMP_SPEED;
-                self.grounded = false;
-                self.jump_buffer = 0.0;
-            }
-        } else if let Some(wd) = wish.try_normalize() {
-            // Air control: push along the wanted direction, but never beyond the wanted speed.
-            let add = (wish.length() - vh.dot(wd)).clamp(0.0, AIR_ACCEL * dt);
-            vh += wd * add;
+            vh = friction(vh, dt);
+            vh = accelerate(vh, wish_dir, wish_speed, GROUND_ACCEL, dt);
+        } else {
+            vh = accelerate(vh, wish_dir, wish_speed, AIR_ACCEL, dt);
         }
         self.vel.x = vh.x;
         self.vel.z = vh.z;
@@ -306,12 +359,24 @@ impl Walker {
                 }
             }
         }
+        if !stepped {
+            // Lose the speed that went into walls (as they were met: vertical) and keep the
+            // speed along them, so a held key does not store speed against a wall and a glancing
+            // touch costs only the part into it.
+            let min_y = min_ground_y();
+            let walls: Vec<Vec3> = a.normals.iter().filter(|n| n.y < min_y).filter_map(|n| horizontal(*n).try_normalize()).collect();
+            let v = clip_velocity(horizontal(self.vel), &walls);
+            self.vel = Vec3::new(v.x, 0.0, v.z);
+        }
         // Stay on the ground: follow slopes and steps down.
         let down = Vec3::NEG_Y * SNAP_DISTANCE;
         match world.cast(best, down) {
             Some(h) if h.normal.y >= min_ground_y() => {
                 let p = best + down * h.fraction;
-                let drop = best.y - p.y;
+                // What the slope under the feet accounts for is followed exactly; anything more
+                // is a step down, which the eye eases into.
+                let slope = (1.0 - h.normal.y * h.normal.y).max(0.0).sqrt() / h.normal.y;
+                let drop = best.y - p.y - horizontal_distance(start, best) * slope;
                 if !stepped && drop > EYE_SMOOTH_MIN_DROP {
                     self.eye_offset += drop;
                 }
@@ -370,27 +435,51 @@ impl Walker {
             v1 *= TERMINAL_VELOCITY / speed;
         }
         let v_avg = (v0 + v1) * 0.5;
-        let s = slide(world, self.pos, v_avg * dt, Mode::Air);
+        let start = self.pos;
+        let s = slide(world, start, v_avg * dt, Mode::Air);
         self.pos = s.pos;
 
         let impact = s.normals.iter().map(|n| -v_avg.dot(*n)).fold(0.0f32, f32::max);
         self.last_impact = impact;
-        if impact > FATAL_IMPACT_SPEED {
+        if impact > fatal_impact_speed() {
             return true;
         }
 
         let floor = s.normals.iter().find(|n| n.y >= min_ground_y());
-        if let (Some(n), true) = (floor, v1.y <= 0.0) {
+        if let (Some(n), true) = (floor, v1.y < LAND_MAX_RISE) {
             // Landed: keep the horizontal speed, lose the vertical.
             self.grounded = true;
             self.ground_normal = *n;
             self.vel = Vec3::new(v1.x, 0.0, v1.z);
-        } else {
-            self.vel = clip_velocity(v1, &s.normals);
+            return false;
         }
+        if s.wall && v1.y <= 0.0 {
+            // Coming down against something steep: as in Quake 2 the step-up works in the air
+            // too, so a ledge whose top is within a step of the feet is landed on instead of
+            // slid down. The landing is an impact like any other.
+            let progress = horizontal_distance(start, s.pos);
+            if let Some(b) = self.try_step(world, start, horizontal(v_avg) * dt) {
+                if horizontal_distance(start, b) > progress + 1e-3 {
+                    let down = (-v1.y).max(0.0);
+                    self.last_impact = self.last_impact.max(down);
+                    if down > fatal_impact_speed() {
+                        return true;
+                    }
+                    self.eye_offset -= (b.y - s.pos.y).max(0.0);
+                    self.eye_offset = self.eye_offset.clamp(-STEP_HEIGHT * 1.5, STEP_HEIGHT * 1.5);
+                    self.pos = b;
+                    self.grounded = true;
+                    self.ground_normal = Vec3::Y;
+                    self.vel = Vec3::new(v1.x, 0.0, v1.z);
+                    return false;
+                }
+            }
+        }
+        self.vel = clip_velocity(v1, &s.normals);
         false
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -413,8 +502,14 @@ mod tests {
     /// Facing +X.
     const EAST: f32 = std::f32::consts::FRAC_PI_2;
 
+    /// Forward, running (the default).
     fn forward(yaw: f32) -> WalkInput {
         WalkInput { forward: 1.0, yaw, ..Default::default() }
+    }
+
+    /// Forward with Shift: walking.
+    fn walking(yaw: f32) -> WalkInput {
+        WalkInput { shift: true, ..forward(yaw) }
     }
 
     fn run(w: &mut Walker, world: &World, input: WalkInput, seconds: f32) {
@@ -425,6 +520,19 @@ mod tests {
 
     fn settle(w: &mut Walker, world: &World) {
         run(w, world, WalkInput::default(), 1.0);
+    }
+
+    fn hspeed(w: &Walker) -> f32 {
+        horizontal(w.vel).length()
+    }
+
+    #[test]
+    fn the_constants_are_quake_2_scaled_to_the_body() {
+        assert!((QUAKE_UNIT - 0.032143).abs() < 1e-5);
+        assert!((RUN_SPEED - 9.643).abs() < 0.01 && (GRAVITY - 25.71).abs() < 0.01 && (JUMP_SPEED - 8.679).abs() < 0.01);
+        // The fatal speed is the speed after the fatal height, with drag: about 21.7 m/s.
+        assert!((fatal_impact_speed() - 21.7).abs() < 0.1, "{}", fatal_impact_speed());
+        assert!(WALK_SPEED < STOP_SPEED && STOP_SPEED < RUN_SPEED);
     }
 
     #[test]
@@ -448,6 +556,56 @@ mod tests {
     }
 
     #[test]
+    fn starts_are_quick_top_speed_is_exact_and_stops_are_crisp() {
+        let world = World::new(&[floor()]);
+        let mut w = walker_at(Vec3::ZERO);
+        settle(&mut w, &world);
+        // From rest: 90 percent of run speed within 0.25 s, all of it within 0.5 s, never more.
+        let (mut t90, mut t99, mut top) = (None, None, 0.0f32);
+        for i in 1..=120 {
+            w.tick(&world, &forward(EAST));
+            let v = hspeed(&w);
+            top = top.max(v);
+            if t90.is_none() && v >= 0.9 * RUN_SPEED {
+                t90 = Some(i as f32 * FIXED_DT);
+            }
+            if t99.is_none() && v >= 0.99 * RUN_SPEED {
+                t99 = Some(i as f32 * FIXED_DT);
+            }
+        }
+        let (t90, t99) = (t90.expect("never reached 90%"), t99.expect("never reached 99%"));
+        println!("run: 90% at {t90:.3} s, 99% at {t99:.3} s");
+        assert!(t90 <= 0.25 && t99 <= 0.5, "90% at {t90}, 99% at {t99}");
+        assert!(top <= RUN_SPEED + 1e-4, "top {top}");
+        assert!(w.pos.z.abs() < 1e-4 && w.grounded);
+        // Diagonal keys are not faster.
+        let mut d = walker_at(Vec3::ZERO);
+        settle(&mut d, &world);
+        run(&mut d, &world, WalkInput { right: 1.0, ..forward(EAST) }, 1.0);
+        assert!((hspeed(&d) - RUN_SPEED).abs() < 1e-3, "diagonal {}", hspeed(&d));
+        // Let go: friction with the stop-speed floor stops it in about a third of a second, over
+        // about 1.3 m.
+        let x0 = w.pos.x;
+        let mut stop = 0;
+        while hspeed(&w) > 0.0 && stop < 120 {
+            w.tick(&world, &WalkInput { yaw: EAST, ..Default::default() });
+            stop += 1;
+        }
+        let (t, dist) = (stop as f32 * FIXED_DT, w.pos.x - x0);
+        println!("stop from run: {t:.3} s over {dist:.3} m");
+        assert!((0.25..0.45).contains(&t) && (1.0..1.6).contains(&dist), "stopped in {t} s over {dist} m");
+        // Walking (Shift): top speed is the walk speed, and it stops in under a fifth of a second.
+        run(&mut w, &world, walking(EAST), 1.0);
+        assert!((hspeed(&w) - WALK_SPEED).abs() < 1e-3, "walk {}", hspeed(&w));
+        let mut stop = 0;
+        while hspeed(&w) > 0.0 && stop < 60 {
+            w.tick(&world, &WalkInput { yaw: EAST, ..Default::default() });
+            stop += 1;
+        }
+        assert!(stop as f32 * FIXED_DT < 0.2, "walk stop {stop} steps");
+    }
+
+    #[test]
     fn a_wall_stops_a_walker_and_is_slid_along_when_approached_at_an_angle() {
         let wall = aabb([3.0, 0.0, -50.0], [4.0, 5.0, 50.0]);
         let world = World::new(&[floor(), wall]);
@@ -456,38 +614,65 @@ mod tests {
         run(&mut w, &world, forward(EAST), 3.0);
         assert!((w.pos.x - (3.0 - CAPSULE_RADIUS)).abs() < 0.02, "stopped at x {}", w.pos.x);
         assert!(w.pos.z.abs() < 1e-3 && w.grounded);
+        // Against the wall the stored speed is zero, not building up into it.
+        assert!(hspeed(&w) < 1e-3, "speed into the wall {}", hspeed(&w));
 
         // 45 degrees into the wall: x stays at the wall, z carries on.
         let mut w = walker_at(Vec3::ZERO);
         settle(&mut w, &world);
         run(&mut w, &world, forward(EAST / 2.0), 3.0);
         assert!(w.pos.x < 3.0 - CAPSULE_RADIUS + 0.01 && w.pos.x > 3.0 - CAPSULE_RADIUS - 0.02, "x {}", w.pos.x);
-        assert!(w.pos.z > 3.0, "slid only to z {}", w.pos.z);
+        assert!(w.pos.z > 8.0, "slid only to z {}", w.pos.z);
         assert!(w.grounded);
     }
 
-    fn ledge_test(height: f32) -> Walker {
+    #[test]
+    fn a_wall_met_at_a_glancing_angle_keeps_the_speed_along_it() {
+        let wall = aabb([3.0, 0.0, -50.0], [4.0, 5.0, 50.0]);
+        let world = World::new(&[floor(), wall]);
+        for deg in [10.0f32, 30.0, 60.0] {
+            // Run along +Z at full speed beside the wall, then turn `deg` towards it.
+            let mut w = walker_at(Vec3::new(3.0 - CAPSULE_RADIUS - 0.3, 0.0, -40.0));
+            settle(&mut w, &world);
+            run(&mut w, &world, forward(0.0), 1.0);
+            let yaw = deg.to_radians();
+            let along = RUN_SPEED * yaw.cos();
+            let mut least = f32::MAX;
+            let mut touched = false;
+            for _ in 0..60 {
+                w.tick(&world, &forward(yaw));
+                if w.pos.x > 3.0 - CAPSULE_RADIUS - 0.01 {
+                    touched = true;
+                    least = least.min(w.vel.z);
+                }
+            }
+            assert!(touched, "{deg}: never reached the wall");
+            // The part along the wall is never lost; the key held at an angle keeps pushing along it.
+            assert!(least > along - 0.05, "{deg} degrees: speed along the wall fell to {least}, expected at least {along}");
+            assert!(w.vel.x.abs() < 1e-3, "{deg}: speed into the wall {}", w.vel.x);
+            println!("{deg} degrees into a wall: {:.2} m/s along it", w.vel.z);
+        }
+    }
+
+    fn ledge_test(height: f32, input: WalkInput) -> Walker {
         let ledge = aabb([2.0, -1.0, -50.0], [50.0, height, 50.0]);
         let world = World::new(&[floor(), ledge]);
         let mut w = walker_at(Vec3::ZERO);
         settle(&mut w, &world);
-        run(&mut w, &world, forward(EAST), 3.0);
+        run(&mut w, &world, input, 3.0);
         w
     }
 
     #[test]
-    fn a_quarter_metre_ledge_is_stepped_up_and_a_35_cm_ledge_is_not() {
-        let w = ledge_test(0.25);
-        assert!(w.pos.x > 3.5 && (w.pos.y - 0.25).abs() < 0.02 && w.grounded, "{:?}", w.pos);
-        let w = ledge_test(0.35);
-        assert!(w.pos.x < 2.0 - CAPSULE_RADIUS + 0.02 && w.pos.y < 0.02 && w.grounded, "{:?}", w.pos);
-        // Also at a run, and a 0.3 m ledge.
-        let ledge = aabb([2.0, -1.0, -50.0], [50.0, 0.29, 50.0]);
-        let world = World::new(&[floor(), ledge]);
-        let mut w = walker_at(Vec3::ZERO);
-        settle(&mut w, &world);
-        run(&mut w, &world, WalkInput { run: true, ..forward(EAST) }, 2.0);
-        assert!(w.pos.x > 5.0 && (w.pos.y - 0.29).abs() < 0.02, "{:?}", w.pos);
+    fn a_forty_cm_ledge_is_stepped_up_and_a_half_metre_ledge_is_not() {
+        for input in [forward(EAST), walking(EAST)] {
+            for h in [0.25f32, 0.4, 0.44] {
+                let w = ledge_test(h, input);
+                assert!(w.pos.x > 3.5 && (w.pos.y - h).abs() < 0.02 && w.grounded, "{h} m, shift {}: {:?}", input.shift, w.pos);
+            }
+            let w = ledge_test(0.5, input);
+            assert!(w.pos.x < 2.0 - CAPSULE_RADIUS + 0.02 && w.pos.y < 0.02 && w.grounded, "0.5 m, shift {}: {:?}", input.shift, w.pos);
+        }
     }
 
     /// A floor, a ramp rising at `deg` degrees from x = 2 over `len` metres along the slope,
@@ -503,30 +688,62 @@ mod tests {
 
     #[test]
     fn a_35_degree_ramp_can_be_climbed_and_a_45_degree_ramp_cannot() {
-        let (world, end) = ramp_world(35.0, 6.0);
-        let mut w = walker_at(Vec3::ZERO);
-        settle(&mut w, &world);
-        run(&mut w, &world, forward(EAST), 6.0);
-        assert!(w.grounded && (w.pos.y - end.y).abs() < 0.05 && w.pos.x > end.x + 1.0, "{:?} vs {end:?}", w.pos);
+        for input in [forward(EAST), walking(EAST)] {
+            // Long enough to climb, short enough not to run off the 50 m landing.
+            let secs = 25.0 / input.wish_speed();
+            let (world, end) = ramp_world(35.0, 6.0);
+            let mut w = walker_at(Vec3::ZERO);
+            settle(&mut w, &world);
+            run(&mut w, &world, input, secs);
+            assert!(w.grounded && (w.pos.y - end.y).abs() < 0.05 && w.pos.x > end.x + 1.0, "{:?} vs {end:?}", w.pos);
 
-        let (world, end) = ramp_world(45.0, 6.0);
-        let mut w = walker_at(Vec3::ZERO);
-        settle(&mut w, &world);
-        run(&mut w, &world, forward(EAST), 6.0);
-        assert!(w.grounded && w.pos.y < 0.05 && w.pos.x < 2.0, "climbed a 45 degree ramp: {:?} (top {end:?})", w.pos);
-        run(&mut w, &world, WalkInput { run: true, ..forward(EAST) }, 4.0);
-        assert!(w.pos.y < 0.05 && w.pos.x < 2.0, "ran up a 45 degree ramp: {:?}", w.pos);
-        // A 39 degree ramp is fine, 41 is not.
-        let (world, end) = ramp_world(39.0, 6.0);
-        let mut w = walker_at(Vec3::ZERO);
-        settle(&mut w, &world);
-        run(&mut w, &world, forward(EAST), 8.0);
-        assert!(w.pos.y > end.y - 0.05, "39 degrees: {:?}", w.pos);
-        let (world, _) = ramp_world(41.0, 6.0);
-        let mut w = walker_at(Vec3::ZERO);
-        settle(&mut w, &world);
-        run(&mut w, &world, forward(EAST), 8.0);
-        assert!(w.pos.y < 0.05, "41 degrees: {:?}", w.pos);
+            let (world, end) = ramp_world(45.0, 6.0);
+            let mut w = walker_at(Vec3::ZERO);
+            settle(&mut w, &world);
+            run(&mut w, &world, input, secs);
+            assert!(w.grounded && w.pos.y < 0.05 && w.pos.x < 2.0, "climbed a 45 degree ramp: {:?} (top {end:?})", w.pos);
+            // A 39 degree ramp is fine, 41 is not.
+            let (world, end) = ramp_world(39.0, 6.0);
+            let mut w = walker_at(Vec3::ZERO);
+            settle(&mut w, &world);
+            run(&mut w, &world, input, secs);
+            assert!(w.pos.y > end.y - 0.05, "39 degrees: {:?}", w.pos);
+            // Back down the 39 degree ramp: on the ground throughout and the eye follows the
+            // slope exactly (no step smoothing; at run speed it drops 0.13 m a step).
+            let mut worst = 0.0f32;
+            for _ in 0..((secs / FIXED_DT) as usize) {
+                w.tick(&world, &WalkInput { yaw: -EAST, ..input });
+                if w.pos.x > 2.5 && w.pos.x < end.x - 0.5 {
+                    worst = worst.max(w.eye_offset.abs());
+                    assert!(w.grounded, "39 degrees down: airborne at {:?}", w.pos);
+                }
+            }
+            assert!(worst < 1e-3 && w.pos.y < 0.05, "39 degrees down: eye offset up to {worst}, ended {:?}", w.pos);
+            let (world, _) = ramp_world(41.0, 6.0);
+            let mut w = walker_at(Vec3::ZERO);
+            settle(&mut w, &world);
+            run(&mut w, &world, input, secs);
+            assert!(w.pos.y < 0.05, "41 degrees: {:?}", w.pos);
+        }
+    }
+
+    #[test]
+    fn a_steep_slope_landed_on_is_slid_down() {
+        // Dropped onto a 55 degree slope: it cannot be stood on, so the walker slides off its foot.
+        let (s, c) = 55.0f32.to_radians().sin_cos();
+        let start = Vec3::new(2.0, 0.0, 0.0);
+        let end = start + Vec3::new(6.0 * c, 6.0 * s, 0.0);
+        let ramp = Collider::Ramp { start: start.to_array(), end: end.to_array(), half_width: 2.0, thickness: 0.4 };
+        let world = World::new(&[floor(), ramp]);
+        let mut w = walker_at(Vec3::new(4.0, 4.5, 0.0));
+        let mut on_slope = 0;
+        for _ in 0..180 {
+            w.tick(&world, &WalkInput::default());
+            on_slope += (!w.grounded && w.pos.x < 4.0 && w.pos.y > 0.1) as u32;
+        }
+        assert!(on_slope > 3, "never slid on the slope");
+        assert!(w.grounded && w.pos.y < 0.02 && w.pos.x < 2.0, "ended at {:?}", w.pos);
+        assert_eq!(w.deaths, 0);
     }
 
     #[test]
@@ -540,11 +757,11 @@ mod tests {
         let landing = aabb([end.x, end.y - 1.0, -0.75], [end.x + 10.0, end.y, 0.75]);
         let foot = aabb([-10.0, -1.0, -0.75], [2.0, 0.0, 0.75]);
         let world = World::new(&[foot, ramp, landing]);
-        for (speed_run, name) in [(false, "walk"), (true, "run")] {
-            let dt_speed = if speed_run { RUN_SPEED } else { WALK_SPEED };
+        for (shift, name) in [(true, "walk"), (false, "run")] {
+            let speed = if shift { WALK_SPEED } else { RUN_SPEED };
             let mut w = walker_at(Vec3::ZERO);
             settle(&mut w, &world);
-            let input = WalkInput { run: speed_run, ..forward(EAST) };
+            let input = WalkInput { shift, ..forward(EAST) };
             let mut eye = vec![w.eye().y];
             let mut airborne = 0;
             for _ in 0..(40 * 60) {
@@ -558,10 +775,10 @@ mod tests {
             settle(&mut w, &world);
             assert!(w.pos.x > end.x + 0.5 && (w.pos.y - end.y).abs() < 0.02, "{name}: ended at {:?}, top {end:?}", w.pos);
             assert_eq!(airborne, 0, "{name}: left the ground {airborne} times going up");
-            check_smooth(&eye, 1, dt_speed, &format!("{name} up"));
+            check_smooth(&eye, 1, speed, &format!("{name} up"));
 
             // And back down.
-            let back = WalkInput { run: speed_run, ..forward(-EAST) };
+            let back = WalkInput { shift, ..forward(-EAST) };
             let mut eye = vec![w.eye().y];
             let mut airborne = 0;
             for _ in 0..(40 * 60) {
@@ -574,11 +791,12 @@ mod tests {
             }
             assert!(w.pos.x < 2.0 && w.pos.y.abs() < 0.02, "{name}: ended at {:?}", w.pos);
             assert_eq!(airborne, 0, "{name}: skipped off the stairs {airborne} times going down");
-            check_smooth(&eye, -1, dt_speed, &format!("{name} down"));
+            check_smooth(&eye, -1, speed, &format!("{name} down"));
         }
     }
 
-    /// The eye moves one way only (`dir`), by at most the slope's worth per step, and never by a jump.
+    /// The eye moves one way only (`dir`), by at most the slope's worth per step at `speed`, and
+    /// never by a jump.
     fn check_smooth(eye: &[f32], dir: i32, speed: f32, what: &str) {
         let slope = 0.17 / 0.30;
         let max_step = speed * slope * FIXED_DT * 1.25 + 0.002;
@@ -594,8 +812,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_jump_peaks_about_half_a_metre_high_and_lands_without_harm() {
+    /// Jump from rest on a floor: (apex above the start, steps in the air).
+    fn jump_profile() -> (f32, u32) {
         let world = World::new(&[floor()]);
         let mut w = walker_at(Vec3::ZERO);
         settle(&mut w, &world);
@@ -609,37 +827,52 @@ mod tests {
             apex = apex.max(w.pos.y - base);
             air += 1;
         }
-        assert!((0.47..0.56).contains(&apex), "apex {apex}");
-        assert!((35..45).contains(&air), "{air} steps in the air");
         assert!(w.grounded && w.deaths == 0);
+        (apex, air)
+    }
+
+    #[test]
+    fn a_jump_is_quakes_jump_scaled_to_the_body() {
+        // 8.68 m/s against 25.7 m/s^2: 1.47 m and 0.675 s without drag; drag takes a little off.
+        let (apex, air) = jump_profile();
+        println!("jump apex {apex:.3} m, {air} steps in the air");
+        assert!((1.38..1.47).contains(&apex), "apex {apex}");
+        assert!((38..42).contains(&air), "{air} steps in the air");
         // Not while airborne: holding jump does not add speed in the air.
+        let world = World::new(&[floor()]);
         let mut w = walker_at(Vec3::new(0.0, 5.0, 0.0));
         for _ in 0..10 {
             w.tick(&world, &WalkInput { jump: true, ..Default::default() });
         }
         assert!(w.vel.y < 0.0);
+        // The take-off keeps the running speed.
+        let mut w = walker_at(Vec3::ZERO);
+        settle(&mut w, &world);
+        run(&mut w, &world, forward(EAST), 1.0);
+        w.tick(&world, &WalkInput { jump: true, ..forward(EAST) });
+        // Less only the air drag of one step (k v^2 dt, 1.3 cm/s).
+        assert!(!w.grounded && (hspeed(&w) - RUN_SPEED).abs() < 0.02, "{}", hspeed(&w));
     }
 
     #[test]
     fn free_fall_approaches_terminal_velocity_and_never_exceeds_it() {
         let world = World::new(&[]);
         let mut w = walker_at(Vec3::new(0.0, 1.0e5, 0.0));
-        let mut v8 = 0.0;
+        let mut v2 = 0.0;
         let mut top = 0.0f32;
         for i in 0..(60 * 60) {
             w.tick(&world, &WalkInput::default());
             top = top.max(-w.vel.y);
-            if i + 1 == 8 * 60 {
-                v8 = -w.vel.y;
+            if i + 1 == 2 * 60 {
+                v2 = -w.vel.y;
             }
         }
         assert!(top <= TERMINAL_VELOCITY, "exceeded terminal: {top}");
         assert!(top > TERMINAL_VELOCITY - 0.01, "never got there: {top}");
-        assert!((v8 / TERMINAL_VELOCITY - 0.89).abs() < 0.015, "after 8 s: {v8} = {:.3} of terminal", v8 / TERMINAL_VELOCITY);
         assert!(!w.grounded && w.deaths == 0);
-        // Analytic: v = vt tanh(g t / vt).
-        let exact = TERMINAL_VELOCITY * (GRAVITY * 8.0 / TERMINAL_VELOCITY).tanh();
-        assert!((v8 - exact).abs() < 0.1, "{v8} vs {exact}");
+        // Analytic: v = vt tanh(g t / vt), 73 percent of terminal after 2 s.
+        let exact = TERMINAL_VELOCITY * (GRAVITY * 2.0 / TERMINAL_VELOCITY).tanh();
+        assert!((v2 - exact).abs() < 0.1, "{v2} vs {exact}");
     }
 
     /// A platform at `top` (x -6..3) over a floor at y = 0.
@@ -648,20 +881,22 @@ mod tests {
     }
 
     #[test]
-    fn a_five_metre_drop_is_survived_and_a_fifteen_metre_drop_kills() {
-        for (top, dies) in [(5.0f32, false), (8.0, false), (15.0, true), (40.0, true)] {
-            let world = platform_world(top);
-            let mut w = walker_at(Vec3::new(-2.0, top, 0.0));
-            run(&mut w, &world, WalkInput::default(), 1.0);
-            // Walk 5 m to the edge at x = 3 and a little over (2 s), then let go and wait.
-            run(&mut w, &world, forward(EAST), 2.2);
-            run(&mut w, &world, WalkInput::default(), 8.0);
-            assert_eq!(w.deaths, if dies { 1 } else { 0 }, "drop {top}: deaths {}, pos {:?}", w.deaths, w.pos);
-            assert!(w.grounded);
-            if dies {
-                assert!(w.pos.y > top - 0.01, "drop {top}: respawned at {:?}", w.pos);
-            } else {
-                assert!(w.pos.y < 0.01, "drop {top}: ended at {:?}", w.pos);
+    fn drops_up_to_nine_metres_are_survived_and_from_eleven_they_kill() {
+        for (top, dies) in [(5.0f32, false), (8.0, false), (9.0, false), (11.0, true), (15.0, true), (40.0, true)] {
+            for input in [forward(EAST), walking(EAST)] {
+                let world = platform_world(top);
+                let mut w = walker_at(Vec3::new(-2.0, top, 0.0));
+                run(&mut w, &world, WalkInput::default(), 1.0);
+                // To the edge at x = 3 and over it, then let go and wait.
+                run(&mut w, &world, input, 5.5 / input.wish_speed() + 0.2);
+                run(&mut w, &world, WalkInput::default(), 8.0);
+                assert_eq!(w.deaths, if dies { 1 } else { 0 }, "drop {top} (shift {}): deaths {}, pos {:?}", input.shift, w.deaths, w.pos);
+                assert!(w.grounded);
+                if dies {
+                    assert!(w.pos.y > top - 0.01, "drop {top}: respawned at {:?}", w.pos);
+                } else {
+                    assert!(w.pos.y < 0.01, "drop {top}: ended at {:?}", w.pos);
+                }
             }
         }
     }
@@ -671,13 +906,13 @@ mod tests {
         let world = platform_world(20.0);
         let mut w = walker_at(Vec3::new(-5.0, 20.0, 0.0));
         run(&mut w, &world, WalkInput::default(), 1.0);
-        // Walk 2 m (0.8 s), stand 1 s: that spot is stable.
-        run(&mut w, &world, forward(EAST), 0.8);
+        // Walk 2.3 m (0.8 s), stand 1 s: that spot is stable.
+        run(&mut w, &world, walking(EAST), 0.8);
         run(&mut w, &world, WalkInput::default(), 1.0);
         let spot = w.pos;
         assert_eq!(w.stable_pos, spot);
-        // Walk off the edge at x = 3 (it takes 2.4 s) and let go.
-        run(&mut w, &world, forward(EAST), 2.8);
+        // Walk off the edge at x = 3 (it takes about 2 s) and let go.
+        run(&mut w, &world, walking(EAST), 2.8);
         assert!(!w.grounded, "still on the platform at {:?}", w.pos);
         let leaving = w.stable_pos;
         assert!(leaving.x > spot.x + 1.0 && leaving.x < 3.0 && (leaving.y - 20.0).abs() < 0.01, "stable spot {leaving:?}");
@@ -688,7 +923,7 @@ mod tests {
         assert!(w.grounded && w.vel == Vec3::ZERO);
         assert!((w.pos - leaving).length() < 0.01, "{:?} vs {leaving:?}", w.pos);
         // Walk back 1 s and stand; R puts the player back at the stable spot.
-        run(&mut w, &world, forward(-EAST), 1.0);
+        run(&mut w, &world, walking(-EAST), 1.0);
         run(&mut w, &world, WalkInput::default(), 1.0);
         assert!(w.pos.x < leaving.x - 1.0);
         let here = w.stable_pos;
@@ -705,12 +940,13 @@ mod tests {
         run(&mut w, &world, WalkInput::default(), 1.0);
         let origin = w.stable_pos;
         // Jump at once and keep hopping: never on the ground for half a second.
-        for _ in 0..4 {
-            w.tick(&world, &WalkInput { jump: true, forward: 1.0, yaw: EAST, ..Default::default() });
-            for _ in 0..30 {
-                w.tick(&world, &WalkInput { forward: 1.0, yaw: EAST, ..Default::default() });
+        for _ in 0..3 {
+            w.tick(&world, &WalkInput { jump: true, ..walking(EAST) });
+            for _ in 0..45 {
+                w.tick(&world, &walking(EAST));
             }
         }
+        assert_eq!(w.jumps, 3);
         assert!(w.ground_time < STABLE_GROUND_TIME);
         // The spot is whatever was stable before the hops began: still on the platform's -X side.
         assert!(w.stable_pos.x >= origin.x);
@@ -737,40 +973,140 @@ mod tests {
     #[test]
     fn the_same_script_gives_bit_identical_results() {
         let ledge = aabb([8.0, -1.0, -50.0], [50.0, 0.25, 50.0]);
-        let (ramp_world, _) = ramp_world(30.0, 6.0);
-        let _ = ramp_world;
-        let world = World::new(&[floor(), ledge, aabb([-20.0, 9.0, -50.0], [-10.0, 10.0, 50.0])]);
+        let world = World::new(&[floor(), ledge, aabb([-20.0, 9.0, -50.0], [-10.0, 10.0, 50.0]), aabb([-3.0, 0.0, 5.0], [-2.0, 1.2, 6.0])]);
         let script = |w: &mut Walker| {
             run(w, &world, WalkInput::default(), 0.5);
-            run(w, &world, WalkInput { run: true, ..forward(EAST) }, 1.0);
+            run(w, &world, forward(EAST), 1.0);
             w.tick(&world, &WalkInput { jump: true, ..forward(EAST) });
             run(w, &world, forward(EAST / 2.0), 2.0);
             run(w, &world, WalkInput { right: 1.0, yaw: 1.0, ..Default::default() }, 1.0);
-            run(w, &world, forward(-EAST), 3.0);
+            for i in 0..120 {
+                w.tick(&world, &WalkInput { jump: i % 3 == 0, right: 1.0, yaw: -EAST + i as f32 * 0.02, ..forward(0.0) });
+            }
+            run(w, &world, walking(-EAST), 3.0);
         };
         let (mut a, mut b) = (walker_at(Vec3::new(0.0, 0.0, 0.0)), walker_at(Vec3::new(0.0, 0.0, 0.0)));
         script(&mut a);
         script(&mut b);
         assert_eq!(a.pos.to_array().map(f32::to_bits), b.pos.to_array().map(f32::to_bits));
         assert_eq!(a.vel.to_array().map(f32::to_bits), b.vel.to_array().map(f32::to_bits));
-        assert!(a.pos.x != 0.0, "the script did not move");
+        assert!(a.pos.x != 0.0 && a.jumps > 3, "the script did not move");
     }
 
     #[test]
-    fn air_control_is_limited() {
+    fn air_control_steers_a_jump_but_is_limited() {
         let world = World::new(&[floor()]);
+        // From a standing jump, half a second of forward in the air gives at most
+        // AIR_ACCEL * RUN_SPEED * 0.5 = 4.8 m/s, not the run speed.
         let mut w = walker_at(Vec3::ZERO);
         settle(&mut w, &world);
         w.tick(&world, &WalkInput { jump: true, ..Default::default() });
-        let x0 = w.pos.x;
-        let mut input = forward(EAST);
-        input.run = true;
-        for _ in 0..30 {
+        run(&mut w, &world, forward(EAST), 0.5);
+        assert!(w.vel.x > 4.0 && w.vel.x < AIR_ACCEL * RUN_SPEED * 0.5 + 0.1, "air speed {}", w.vel.x);
+        // Running east and jumping, then holding left strafe and turning: the heading turns
+        // in the air. Without keys it goes straight.
+        let heading = |turn: bool| {
+            let mut w = walker_at(Vec3::ZERO);
+            settle(&mut w, &world);
+            run(&mut w, &world, forward(EAST), 1.0);
+            w.tick(&world, &WalkInput { jump: true, ..forward(EAST) });
+            let mut yaw = EAST;
+            while !w.grounded {
+                let input = if turn {
+                    yaw += 60f32.to_radians() * FIXED_DT;
+                    WalkInput { right: -1.0, yaw, ..Default::default() }
+                } else {
+                    WalkInput { yaw, ..Default::default() }
+                };
+                w.tick(&world, &input);
+            }
+            (w.vel.z.atan2(w.vel.x).to_degrees(), hspeed(&w))
+        };
+        let (straight, s0) = heading(false);
+        let (turned, s1) = heading(true);
+        println!("air turn: heading {straight:.1} -> {turned:.1} degrees, speed {s0:.2} -> {s1:.2}");
+        assert!(straight.abs() < 0.01);
+        assert!(turned.abs() > 15.0, "heading only turned {turned} degrees");
+        assert!(s1 > s0 - 0.1, "turning in the air lost speed: {s0} -> {s1}");
+    }
+
+    /// The strafe-jump bot: hop on every landing, hold one strafe key and turn so that the key's
+    /// direction stays at the angle to the velocity that gains the most per step.
+    fn strafe_jump(seconds: f32, strafe: bool) -> (Walker, f32) {
+        let world = World::new(&[aabb([-1000.0, -2.0, -1000.0], [1000.0, 0.0, 1000.0])]);
+        let mut w = walker_at(Vec3::ZERO);
+        settle(&mut w, &world);
+        run(&mut w, &world, forward(EAST), 1.0);
+        let mut best = 0.0f32;
+        for i in 0..(seconds / FIXED_DT) as usize {
+            let jump = i % 2 == 0;
+            let v = horizontal(w.vel);
+            let input = if strafe && !w.grounded && v.length() > 1.0 {
+                let a = AIR_ACCEL * FIXED_DT * RUN_SPEED;
+                let theta = ((RUN_SPEED - a) / v.length()).clamp(-1.0, 1.0).acos();
+                let phi = v.z.atan2(v.x) + theta;
+                let wish = Vec3::new(phi.cos(), 0.0, phi.sin());
+                // `right` is (-cos yaw, 0, sin yaw).
+                let yaw = wish.z.atan2(-wish.x);
+                WalkInput { right: 1.0, yaw, jump, ..Default::default() }
+            } else {
+                let yaw = v.x.atan2(v.z);
+                WalkInput { jump, ..forward(yaw) }
+            };
             w.tick(&world, &input);
+            best = best.max(hspeed(&w));
         }
-        // Half a second of air at 6 m/s^2 gives at most 3 m/s sideways, not 6.
-        assert!(w.vel.x > 1.0 && w.vel.x < 3.1, "air speed {}", w.vel.x);
-        assert!(w.pos.x - x0 < 1.0);
+        (w, best)
+    }
+
+    #[test]
+    fn strafe_jumping_gains_speed_and_plain_hopping_does_not() {
+        let (w, best) = strafe_jump(5.0, true);
+        println!("strafe-jumping 5 s: {best:.2} m/s ({} hops)", w.jumps);
+        assert!(best > 1.5 * RUN_SPEED, "strafe-jumping reached only {best}");
+        assert!(w.deaths == 0 && w.jumps > 5);
+        let (w, best) = strafe_jump(5.0, false);
+        assert!(best <= RUN_SPEED + 1e-3, "plain hopping reached {best}");
+        assert!(w.jumps > 5);
+    }
+
+    #[test]
+    fn nothing_tunnels_through_thin_walls_at_speed() {
+        // A railing-like wall 6 cm thick and a 6 cm plate, hit at 10 to 55 m/s from many angles.
+        let rail = aabb([5.0, -100.0, -20.0], [5.06, 1.1, 20.0]);
+        let plate = aabb([-20.0, -0.06, -20.0], [-6.0, 0.0, 20.0]);
+        let world = World::new(&[rail, plate]);
+        for speed in [10.0f32, 20.0, 35.0, TERMINAL_VELOCITY] {
+            for k in 0..24 {
+                // Horizontally into the rail at angles up to 80 degrees off its normal.
+                let ang = (-80.0 + k as f32 * 160.0 / 23.0).to_radians();
+                let mut w = walker_at(Vec3::new(0.0, -0.5, 0.0));
+                w.vel = Vec3::new(ang.cos(), 0.0, ang.sin()) * speed;
+                for _ in 0..30 {
+                    w.tick(&world, &WalkInput::default());
+                    assert!(w.pos.x < 5.0 - CAPSULE_RADIUS + 1e-3, "through the rail at {speed} m/s, {} degrees: {:?}", ang.to_degrees(), w.pos);
+                    assert!(!world.overlaps(w.pos), "inside the rail at {speed} m/s: {:?}", w.pos);
+                    if w.deaths > 0 {
+                        break;
+                    }
+                }
+                // Down onto the plate, steeply or obliquely.
+                let tilt = (k as f32 * 3.0).to_radians();
+                let mut w = walker_at(Vec3::new(-13.0, 3.0, 0.0));
+                w.vel = Vec3::new(tilt.sin(), -tilt.cos(), 0.0) * speed;
+                for _ in 0..30 {
+                    let before = w.pos;
+                    w.tick(&world, &WalkInput::default());
+                    if w.deaths > 0 {
+                        break;
+                    }
+                    // Over the plate (not beside its edge) the feet never go below its top.
+                    let over = before.x < -6.0 - CAPSULE_RADIUS && w.pos.x < -6.0 - CAPSULE_RADIUS;
+                    assert!(!over || w.pos.y > -1e-3, "through the plate at {speed} m/s, tilt {k}: {:?}", w.pos);
+                    assert!(!world.overlaps(w.pos), "inside the plate at {speed} m/s, tilt {k}: {:?}", w.pos);
+                }
+            }
+        }
     }
 
     #[test]
@@ -778,11 +1114,43 @@ mod tests {
         // A thin wall (a railing) beside the stair lane: walking along it slides.
         let rail = aabb([-50.0, 0.0, 0.5], [50.0, 1.1, 0.56]);
         let world = World::new(&[floor(), rail]);
+        for input in [forward(EAST * 0.8), walking(EAST * 0.8)] {
+            let mut w = walker_at(Vec3::ZERO);
+            settle(&mut w, &world);
+            run(&mut w, &world, input, 4.0);
+            assert!(w.pos.z < 0.2 + 1e-3 && w.pos.z > 0.1, "z {}", w.pos.z);
+            assert!(w.pos.x > 5.0);
+        }
+    }
+
+    #[test]
+    fn a_running_jump_lands_on_a_block_up_to_about_the_body_height_and_clears_a_railing() {
+        // The step-up works in the air on the way down, so the reach is the apex plus a step.
+        for (h, onto) in [(1.2f32, true), (1.6, true), (1.8, true), (2.1, false)] {
+            let block = aabb([4.0, 0.0, -10.0], [40.0, h, 10.0]);
+            let world = World::new(&[floor(), block]);
+            let mut w = walker_at(Vec3::ZERO);
+            settle(&mut w, &world);
+            // Run at it and jump 1.2 m short of the face.
+            while w.pos.x < 4.0 - CAPSULE_RADIUS - 1.2 {
+                w.tick(&world, &forward(EAST));
+            }
+            w.tick(&world, &WalkInput { jump: true, ..forward(EAST) });
+            run(&mut w, &world, forward(EAST), 1.5);
+            assert_eq!((w.pos.y - h).abs() < 0.02, onto, "block {h} m: ended at {:?}", w.pos);
+            assert!(w.grounded && w.deaths == 0);
+        }
+        // A 1.1 m railing, 6 cm thick, is jumped over from a run.
+        let rail = aabb([4.0, 0.0, -10.0], [4.06, 1.1, 10.0]);
+        let world = World::new(&[floor(), rail]);
         let mut w = walker_at(Vec3::ZERO);
         settle(&mut w, &world);
-        run(&mut w, &world, forward(EAST * 0.8), 4.0);
-        assert!(w.pos.z < 0.2 + 1e-3 && w.pos.z > 0.1, "z {}", w.pos.z);
-        assert!(w.pos.x > 5.0);
+        while w.pos.x < 4.0 - CAPSULE_RADIUS - 1.5 {
+            w.tick(&world, &forward(EAST));
+        }
+        w.tick(&world, &WalkInput { jump: true, ..forward(EAST) });
+        run(&mut w, &world, forward(EAST), 1.0);
+        assert!(w.pos.x > 4.5, "did not clear the railing: {:?}", w.pos);
     }
 
     #[test]
@@ -791,7 +1159,7 @@ mod tests {
         let mut w = walker_at(Vec3::new(-5.0, 20.0, 0.0));
         run(&mut w, &world, WalkInput::default(), 1.0);
         // Forward stays held the whole time, running: off the edge at x = 3, fall, die.
-        let input = WalkInput { run: true, ..forward(EAST) };
+        let input = forward(EAST);
         let mut ticks = 0;
         while w.deaths == 0 && ticks < 60 * 20 {
             w.tick(&world, &input);
@@ -875,5 +1243,26 @@ mod tests {
             }
             assert_eq!(w.pos.y > 0.05, jumps, "press {early} steps before landing: grounded {} y {}", w.grounded, w.pos.y);
         }
+    }
+
+    #[test]
+    fn a_buffered_hop_loses_no_speed_to_friction() {
+        // Running, hop, and press again just before landing: the second take-off is at full speed.
+        let world = World::new(&[floor()]);
+        let mut w = walker_at(Vec3::ZERO);
+        settle(&mut w, &world);
+        run(&mut w, &world, forward(EAST), 1.0);
+        w.tick(&world, &WalkInput { jump: true, ..forward(EAST) });
+        let mut i = 0;
+        while w.jumps < 2 && i < 200 {
+            // Press every other step: the press before landing is buffered.
+            w.tick(&world, &WalkInput { jump: i % 2 == 0, ..forward(EAST) });
+            i += 1;
+            if w.jumps == 2 {
+                // Less only the air drag of the take-off step; friction would take 0.96 m/s.
+                assert!((hspeed(&w) - RUN_SPEED).abs() < 0.02, "second take-off at {}", hspeed(&w));
+            }
+        }
+        assert_eq!(w.jumps, 2);
     }
 }

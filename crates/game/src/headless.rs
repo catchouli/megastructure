@@ -115,12 +115,13 @@ fn init_gpu(w: u32, h: u32) -> Result<(wgpu::Device, wgpu::Queue, Arc<AtomicBool
     Ok((device, queue, gpu_failed))
 }
 
-/// The final state line. The first six fields are the fly camera's; the rest describe the walker.
+/// The final state line. The first six fields are the fly camera's; the rest describe the walker
+/// (`hspeed` is its horizontal speed, m/s).
 pub fn state_line(sim: &Sim, frames: u64) -> String {
     let c = sim.camera;
-    let (grounded, vy, deaths, resets) = sim.walker().map_or((false, 0.0, 0, 0), |w| (w.grounded, w.vel.y, w.deaths, w.resets));
+    let (grounded, vy, hspeed, deaths, resets) = sim.walker().map_or((false, 0.0, 0.0, 0, 0), |w| (w.grounded, w.vel.y, glam::Vec2::new(w.vel.x, w.vel.z).length(), w.deaths, w.resets));
     format!(
-        "state frames={} x={:.4} y={:.4} z={:.4} yaw_deg={:.3} pitch_deg={:.3} mode={} grounded={} vy={:.4} died={} deaths={} resets={}",
+        "state frames={} x={:.4} y={:.4} z={:.4} yaw_deg={:.3} pitch_deg={:.3} mode={} grounded={} vy={:.4} died={} deaths={} resets={} hspeed={:.4}",
         frames,
         c.position.x,
         c.position.y,
@@ -132,7 +133,8 @@ pub fn state_line(sim: &Sim, frames: u64) -> String {
         vy,
         deaths > 0,
         deaths,
-        resets
+        resets,
+        hspeed
     )
 }
 

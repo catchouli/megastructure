@@ -147,6 +147,38 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: with it on, the per-frame movement is the same to within 10 percent (mean 10.4 mm per frame at walking speed); with it off, more than half of the frames do not move at all and the rest move by a whole step. The cost is a lag: the picture shows the position of up to one step (17 ms, 4 cm at walking speed, 10 cm running) ago, and exact multiples of the step show the position one step back. Extrapolating forward instead would remove the lag but overshoots when the player stops or hits a wall; not tried. Headless output is unchanged: the route script ends at the same state line to the digit, and every frame's camera equals the walker's eye bit for bit.
 - Verdict: kept, windowed only. Whether the lag is felt at 120 Hz has not been judged by hand (nothing was run in a window).
 
+## E107: Quake 2 player movement, and the scale to convert it by
+- Date: 2026-11-16
+- Feature: `features/player-movement.md`
+- Question: the owner found the walker "a tiny bit clumsy" and asked for Quake 2's agile movement. Does Quake 2's model (friction with a stop-speed floor, acceleration limited along the wanted direction on the ground and in the air, an immediate jump, step-and-slide) carry over to this capsule and these scenes, and at what scale?
+- Setup: the velocity rules of Quake 2's `pmove.c` re-derived in `walker.rs`, with the collision of E101 to E103 unchanged. Two scales considered: a unit as an inch (the player 1.42 m tall; run 7.6 m/s, gravity 20.3 m/s^2, jump 6.9 m/s, apex 1.16 m) and a unit as 1.8 / 56 m, so the 56-unit player is this one's 1.8 m (run 9.64 m/s, gravity 25.7 m/s^2, jump 8.68 m/s, apex 1.47 m). Both keep Quake's times. The second was built, with Quake's friction 6, stop speed 100 units, ground acceleration 10 and air acceleration 1 (Quake 2's own default: its ground rule with factor 1 in the air), always-run with Shift to walk at 3 m/s, a fresh press per jump with the existing 0.1 s buffer, step height 0.45 m (Quake's 18 units would be 0.58 m), the step-up also in the air, and the fatal impact speed re-derived from the 10 m fall height. Measured by `walker::tests` and the shaft scripts in `shaft_tests.rs`, with no window.
+- Result: 90 percent of run speed in 0.13 s and all of it in 0.15 s; a stop from a run in 0.35 s over 1.2 m; jump apex 1.447 m and 41 steps (0.68 s) in the air; a strafe-jump bot reached 21 m/s in 5 s while hopping straight never exceeded 9.64 m/s; a keyboard turn of 90 degrees per second gains only to about 12 m/s, a steady 30 degrees per second to 20 m/s. The fatal speed is 21.7 m/s (9 m survived, 11 m fatal). The shaft route runs end to end in 33 s (54 s before) and hopping the bridge and the stair is safe once E108 was fixed. Side effects: drag (2.6 times stronger with Quake gravity) takes 0.5 m/s off a run per jump; pressing into a wall at 30 degrees runs along it at 10.8 m/s, above the run speed (Quake's rule with the velocity clipped each step); walking reaches 3 m/s in 0.28 s because Quake's stop speed is above the walk speed; a 400 m fall takes 8.8 s instead of 11.
+- Verdict: kept, the height scale, because the jump and run then stand to the body as in Quake and the faster run suits the distances. The feel is unjudged until the owner runs it in a window. Railings are the main consequence (E109).
+
+## E108: Landing while still rising on a slope
+- Date: 2026-11-16
+- Feature: `features/player-movement.md`
+- Question: the air move landed only when the vertical speed was zero or downward. Is that enough with Quake's jump on the shaft's 29.5 degree stair?
+- Setup: `shaft_tests::hopping_along_the_bridge_and_up_and_down_the_stair_is_safe` hops (a press every 0.1 s) along B1, up the stair and down it, and records the greatest height above the last ground stood on.
+- Result: hopping up the stair, the capsule met the slope while still rising; the air slide turned its horizontal speed into speed up the slope, so it stayed airborne and surfed up the ramp, 6.08 m above the last ground (a jump is 1.45 m). Quake 2 treats the player as on the ground whenever walkable ground is under them and they rise slower than 180 units/s. With that rule (`LAND_MAX_RISE`, 5.79 m/s) the highest rise was 1.447 m, exactly a jump, over 40 hops, with no death.
+- Verdict: Quake's rule kept.
+
+## E109: Railings against the Quake jump
+- Date: 2026-11-16
+- Feature: `features/player-movement.md`, `features/one-shaft.md`
+- Question: the shaft's railings (6 cm boxes, 1.1 m high) kept the old 0.52 m jump in. Do they still?
+- Setup: `walker::tests::a_running_jump_lands_on_a_block_up_to_about_the_body_height_and_clears_a_railing` (blocks of 1.2, 1.6, 1.8, 2.1 m and a 1.1 m railing) and `shaft_tests::the_bridge_railing_can_be_jumped_and_that_is_a_fatal_fall_back_to_the_bridge` (a running jump at B1's north railing). Also seen in the hopping test of E108.
+- Result: a running jump clears a 1.1 m railing, and B1's railing in the shaft: a 400 m fall, death, return to the bridge. With the air step-up a jump lands on blocks of 1.2 to 1.8 m and not 2.1 m. Hopping down the stair at full speed carried the player across the 12 m landing and over its end railing.
+- Verdict: left as it is and put to the owner, with the options in `player-movement.md` (open questions): keep, taller railings in the generator, a lower jump, or no air step-up.
+
+## E110: Eye smoothing on a steep ramp at run speed
+- Date: 2026-11-16
+- Feature: `features/player-movement.md`
+- Question: E103 smoothed the eye after any snap down of more than 0.12 m and relied on slopes giving less than that per step. Does that hold at 9.64 m/s?
+- Setup: `walker::tests::a_35_degree_ramp_can_be_climbed_and_a_45_degree_ramp_cannot` runs back down a 39 degree ramp and records the eye offset on the slope, with E103's rule and with a rule that smooths only the drop beyond what the slope under the feet accounts for (horizontal travel times the tangent of the landing normal's slope).
+- Result: running down 39 degrees snaps 0.13 m a step, over the threshold, so E103's rule added each step's drop to the offset and the eye floated up to 0.49 m above where it should be, catching up only at the foot. The slope-corrected rule kept the offset under 1 mm on the slope. The shaft's 29.5 degree stair (0.09 m a step at run speed) was under the threshold either way.
+- Verdict: slope-corrected rule kept; step-downs are still smoothed.
+
 ## E011: Sun shadows, and what a shadow is drawn as
 - Date: 2026-11-15
 - Feature: `features/ink-renderer.md`, `features/sun-and-sky.md`, `features/one-shaft.md`
@@ -628,6 +660,13 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Setup: sheet `compare/E204-labyrinth-sun.png`: elevation 32 / 50 / 65 at azimuth 135 on three views (spawn ledge looking down, across the void from the arch ledge, the hall from its exterior end). Regenerate with `mega_capture --scene labyrinth --camera 150,43.65,108,0,0.15,1.4 --preset nihei_ink --sun-elev 65 --sun-azim 135 --out <dir>`.
 - Result: at 32 degrees no sun reaches the void below the spawn ledge; the hall's far end is lit through its windows at every elevation. At 50 a sliver reaches the far void wall; at 65 the sun cuts a long bright shaft down the void walls, the contrast the owner asked for.
 - Verdict: about 62 degrees, azimuth 135, used for the E201 captures; to be set in `Sun::for_scene("labyrinth")` by whoever owns the render crate. Question on the sheet: is a high sun the right default here?
+
+## E064: The labyrinth in the current look
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md`, `features/capture-tool.md`
+- Setup: the labyrinth scene (cb3d637; 183k vertices, 181k triangles, 16.9k strokes), sun 62 degrees up at azimuth 135, default `nihei_ink`, no retuning. New paths `lab_*`. Sheet `compare/E064-labyrinth-look.png`: nine views at 2560x1440; regenerate a cell with `mega_capture --path lab_undercroft --width 2560 --height 1440 --out <dir>`.
+- Result: all fifteen views render sensibly. Tone: the scene sits mostly in mid to dark grey (non-sky pixels under 150 of 255: `lab_spawn` 59%, `lab_far_ledge_axis` 90%, `lab_gallery` 93%, `lab_undercroft` and `lab_corridor_void` 100%); paper white appears only on the few sunlit faces and lit openings, so the light end (E062) has little to do here and the frames are darker overall than the shaft. Pencil shading covers most surfaces, since most of the scene is past `shade_from`; in the undercroft and corridors it is a uniform dark grey with pencil at low contrast and the white specks of `wash_speckle` prominent. Soft dark smudges sit around protruding blocks on the void walls (per-vertex AO and bounce on coarse faces, or the soft shadow's minimum penumbra; not diagnosed). No visible cascade seams in these views. Bounce bake 0.8 s (1.6 s on a cold first run). Contours are dense on the stonework but clean. Motion (61 frames, 720p; 5x5 error, pops, relative pops): `lab_axis_walk` t 0..0.025 0.360, 0.033%, 0.312%; `lab_far_ledge_yaw` 0.402, 0.019%, 0.147%. Frame time (best of three, noisy with other agents building): `lab_spawn` 2.07 / 6.75 ms, `lab_far_ledge_axis` 3.48 / 8.40 ms, `lab_gallery` 2.51 / 8.19 ms, `lab_undercroft` 2.60 / 10.45 ms at 1280x720 / 2560x1440.
+- Verdict: no change this round. Candidates: lift the mid tones for enclosed scenes (bounce, ambient or the wash curve) so the darkest places stand out; less `wash_speckle` in large dark areas; diagnose the smudges around blocks.
 
 ## Queued
 

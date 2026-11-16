@@ -9,7 +9,8 @@ pub struct InputState {
     pub right: bool,
     pub up: bool,
     pub down: bool,
-    /// Shift: run when walking, fast when flying (`run` in a script).
+    /// Shift: walk instead of run when walking (`walk` in a script; see `ALWAYS_RUN`), fast
+    /// when flying (`fast`). Both script names hold the same key.
     pub fast: bool,
     /// Space: jump when walking, up when flying.
     pub jump: bool,
@@ -40,7 +41,7 @@ impl InputState {
         "up",
         "down",
         "fast",
-        "run",
+        "walk",
         "jump",
         "toggle_fly",
         "reset",
@@ -61,7 +62,7 @@ impl InputState {
             "right" => self.right = true,
             "up" => self.up = true,
             "down" => self.down = true,
-            "fast" | "run" => self.fast = true,
+            "fast" | "walk" => self.fast = true,
             "jump" => self.jump = true,
             "toggle_fly" => self.toggle_fly = true,
             "reset" => self.reset = true,

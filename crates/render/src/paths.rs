@@ -36,6 +36,23 @@ pub const NAMES: &[&str] = &[
     "shaft_wall_approach",
     "shaft_hall_walk",
     "shaft_rim_pitch",
+    "lab_spawn",
+    "lab_spawn_edge_down",
+    "lab_far_ledge_axis",
+    "lab_arch_ledge",
+    "lab_hall_from_arch",
+    "lab_hall_exterior_end",
+    "lab_gallery",
+    "lab_void_bottom_up",
+    "lab_wall_stair",
+    "lab_overlook",
+    "lab_tower_well",
+    "lab_undercroft",
+    "lab_well_bridge",
+    "lab_loggia",
+    "lab_corridor_void",
+    "lab_axis_walk",
+    "lab_far_ledge_yaw",
     "shaft_hall_deep_in",
     "shaft_hall_deep_back",
     "shaft_hall_deep_side",
@@ -67,6 +84,23 @@ pub fn by_name(name: &str) -> Option<fn(f32) -> Camera> {
         "shaft_wall_approach" => shaft_wall_approach,
         "shaft_hall_walk" => shaft_hall_walk,
         "shaft_rim_pitch" => shaft_rim_pitch,
+        "lab_spawn" => lab_spawn,
+        "lab_spawn_edge_down" => lab_spawn_edge_down,
+        "lab_far_ledge_axis" => lab_far_ledge_axis,
+        "lab_arch_ledge" => lab_arch_ledge,
+        "lab_hall_from_arch" => lab_hall_from_arch,
+        "lab_hall_exterior_end" => lab_hall_exterior_end,
+        "lab_gallery" => lab_gallery,
+        "lab_void_bottom_up" => lab_void_bottom_up,
+        "lab_wall_stair" => lab_wall_stair,
+        "lab_overlook" => lab_overlook,
+        "lab_tower_well" => lab_tower_well,
+        "lab_undercroft" => lab_undercroft,
+        "lab_well_bridge" => lab_well_bridge,
+        "lab_loggia" => lab_loggia,
+        "lab_corridor_void" => lab_corridor_void,
+        "lab_axis_walk" => lab_axis_walk,
+        "lab_far_ledge_yaw" => lab_far_ledge_yaw,
         "shaft_hall_deep_in" => shaft_hall_deep_in,
         "shaft_hall_deep_back" => shaft_hall_deep_back,
         "shaft_hall_deep_side" => shaft_hall_deep_side,
@@ -77,7 +111,13 @@ pub fn by_name(name: &str) -> Option<fn(f32) -> Camera> {
 /// The scene (a `mega_gen::scenes` name) a path is tuned to, or None for an unknown path.
 pub fn scene_of(name: &str) -> Option<&'static str> {
     by_name(name)?;
-    Some(if name.starts_with("shaft_") { "shaft" } else { "test" })
+    Some(if name.starts_with("shaft_") {
+        "shaft"
+    } else if name.starts_with("lab_") {
+        "labyrinth"
+    } else {
+        "test"
+    })
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -199,6 +239,97 @@ pub fn shaft_hall_deep_back(t: f32) -> Camera {
 pub fn shaft_hall_deep_side(t: f32) -> Camera {
     let y = shaft::hall_floor() + EYE_HEIGHT;
     Camera::new(Vec3::new(-26.0, y, lerp(-134.0, -130.0, t)), 0.35, 0.12)
+}
+
+// --- Labyrinth (fixed views given by the labyrinth agent; positions follow its layout and
+// may go stale as the layout changes). Metres and radians as for `--camera`. -----------
+
+/// The labyrinth spawn.
+pub fn lab_spawn(_t: f32) -> Camera {
+    Camera { position: Vec3::new(162.0, 73.65, 149.8), yaw: 3.1416, pitch: -0.15, fov_y: 1.4 }
+}
+
+/// At the spawn's edge, looking down into the void.
+pub fn lab_spawn_edge_down(_t: f32) -> Camera {
+    Camera { position: Vec3::new(158.0, 73.65, 147.0), yaw: 3.5, pitch: -0.6, fov_y: 1.4 }
+}
+
+/// The far ledge, looking along the axis towards the bridge and arch.
+pub fn lab_far_ledge_axis(_t: f32) -> Camera {
+    Camera { position: Vec3::new(150.0, 43.65, 146.0), yaw: 3.1416, pitch: 0.1, fov_y: 1.4 }
+}
+
+/// On the ledge by the arch, looking back across the void.
+pub fn lab_arch_ledge(_t: f32) -> Camera {
+    Camera { position: Vec3::new(150.0, 43.65, 108.0), yaw: 0.0, pitch: 0.15, fov_y: 1.4 }
+}
+
+/// In the arch, looking into the hall.
+pub fn lab_hall_from_arch(_t: f32) -> Camera {
+    Camera { position: Vec3::new(150.0, 43.65, 100.0), yaw: 3.1416, pitch: 0.15, fov_y: 1.4 }
+}
+
+/// At the hall's far end, looking back along it.
+pub fn lab_hall_exterior_end(_t: f32) -> Camera {
+    Camera { position: Vec3::new(142.0, 43.65, 8.0), yaw: 0.0, pitch: 0.2, fov_y: 1.4 }
+}
+
+/// On a gallery, looking down across the void.
+pub fn lab_gallery(_t: f32) -> Camera {
+    Camera { position: Vec3::new(117.0, 61.65, 80.0), yaw: 1.9, pitch: -0.3, fov_y: 1.4 }
+}
+
+/// At the bottom of the void, looking up.
+pub fn lab_void_bottom_up(_t: f32) -> Camera {
+    Camera { position: Vec3::new(146.0, 1.65, 128.0), yaw: 0.3, pitch: 1.1, fov_y: 1.5 }
+}
+
+/// On the wall stair low in the void.
+pub fn lab_wall_stair(_t: f32) -> Camera {
+    Camera { position: Vec3::new(165.0, 13.65, 108.0), yaw: 0.2, pitch: 0.25, fov_y: 1.4 }
+}
+
+/// High overlook, looking steeply down.
+pub fn lab_overlook(_t: f32) -> Camera {
+    Camera { position: Vec3::new(127.3, 115.65, 138.0), yaw: 1.5708, pitch: -0.9, fov_y: 1.4 }
+}
+
+/// In a tower well, looking up.
+pub fn lab_tower_well(_t: f32) -> Camera {
+    Camera { position: Vec3::new(114.0, 37.65, 134.0), yaw: 0.0, pitch: 1.2, fov_y: 1.5 }
+}
+
+/// In the undercroft.
+pub fn lab_undercroft(_t: f32) -> Camera {
+    Camera { position: Vec3::new(236.0, 1.65, 200.0), yaw: 0.3, pitch: 0.05, fov_y: 1.4 }
+}
+
+/// On the well bridge.
+pub fn lab_well_bridge(_t: f32) -> Camera {
+    Camera { position: Vec3::new(46.5, 67.65, 40.0), yaw: 1.5708, pitch: -0.1, fov_y: 1.4 }
+}
+
+/// In the loggia.
+pub fn lab_loggia(_t: f32) -> Camera {
+    Camera { position: Vec3::new(186.0, 43.65, 6.0), yaw: 3.1416, pitch: -0.1, fov_y: 1.4 }
+}
+
+/// In a corridor opening onto the void.
+pub fn lab_corridor_void(_t: f32) -> Camera {
+    Camera { position: Vec3::new(170.0, 73.65, 134.0), yaw: 0.0, pitch: 0.0, fov_y: 1.3 }
+}
+
+/// From the far ledge along the axis, across the bridge and through the arch into the hall:
+/// z 146 to 90 at x 150, looking along -z. The whole path is 56 m; `--frames 61 --t1 0.025`
+/// is 1.4 m/s at 60 fps.
+pub fn lab_axis_walk(t: f32) -> Camera {
+    Camera { position: Vec3::new(150.0, 43.65, lerp(146.0, 90.0, t)), yaw: PI, pitch: 0.05, fov_y: 1.4 }
+}
+
+/// At `lab_far_ledge_axis`, turning 90 degrees left to right.
+pub fn lab_far_ledge_yaw(t: f32) -> Camera {
+    let c = lab_far_ledge_axis(0.0);
+    Camera { yaw: c.yaw + lerp(-0.25 * PI, 0.25 * PI, t), ..c }
 }
 
 // --- One Shaft -----------------------------------------------------------------------------

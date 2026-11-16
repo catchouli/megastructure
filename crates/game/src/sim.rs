@@ -195,7 +195,7 @@ impl Sim {
             forward: axis(input.forward, input.back),
             right: axis(input.right, input.left),
             yaw: self.camera.yaw,
-            run: input.fast,
+            shift: input.fast,
             jump: input.jump,
         };
         let step = FIXED_DT as f64;
@@ -227,7 +227,7 @@ impl Sim {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::player::EYE_HEIGHT;
+    use crate::player::{EYE_HEIGHT, RUN_SPEED, WALK_SPEED};
 
     fn sim() -> Sim {
         Sim::new(Vec3::new(1.0, 2.0, 3.0), 0.0)
@@ -395,7 +395,7 @@ mod tests {
             sim.update(1.0 / 60.0, &InputState::default());
             apex = apex.max(sim.camera.position.y - rest.y);
         }
-        assert!((0.45..0.6).contains(&apex), "jump apex {apex}");
+        assert!((1.38..1.47).contains(&apex), "jump apex {apex}");
         // Fly mode: E and Space go up, Q and Ctrl down, as before.
         let mut fly = Sim::for_scene(&floor_scene(), Some(MoveMode::Fly));
         let y0 = fly.camera.position.y;
@@ -425,7 +425,7 @@ mod tests {
         frames(&mut sim, &InputState::default(), 2);
         frames(&mut sim, &held(|i| i.reset = true), 1);
         assert_eq!(sim.walker().unwrap().resets, 2);
-        // Run is faster than walk.
+        // Running is the default; Shift walks.
         let mut a = Sim::for_scene(&floor_scene(), None);
         let mut b = a.clone();
         frames(&mut a, &held(|i| i.forward = true), 60);
@@ -433,7 +433,8 @@ mod tests {
             i.forward = true;
             i.fast = true;
         }), 60);
-        assert!((a.camera.position.z - 2.5 * (1.0 - 0.04)).abs() < 0.2 && (b.camera.position.z - 6.0 * (1.0 - 0.1)).abs() < 0.4, "{} {}", a.camera.position.z, b.camera.position.z);
+        let (run_z, walk_z) = (a.camera.position.z, b.camera.position.z);
+        assert!(run_z > RUN_SPEED * 0.9 && run_z < RUN_SPEED && walk_z > WALK_SPEED * 0.85 && walk_z < WALK_SPEED, "{run_z} {walk_z}");
     }
 
     #[test]
@@ -456,7 +457,7 @@ mod tests {
         // A stall does not run away: at most MAX_TICKS_PER_FRAME steps, the rest dropped.
         let mut d = Sim::for_scene(&floor_scene(), None);
         d.update(10.0, &input);
-        assert!(d.camera.position.z < 8.0 * (1.0 / 60.0) * 2.5 + 0.01);
+        assert!(d.camera.position.z < 8.0 * (1.0 / 60.0) * RUN_SPEED + 0.01);
     }
 
     #[test]
@@ -470,8 +471,11 @@ mod tests {
 
     #[test]
     fn interpolated_walking_moves_the_eye_smoothly_between_fixed_steps_and_off_it_is_exact() {
-        // 240 Hz frames over a 60 Hz simulation.
-        let input = held(|i| i.forward = true);
+        // 240 Hz frames over a 60 Hz simulation, walking (Shift).
+        let input = held(|i| {
+            i.forward = true;
+            i.fast = true;
+        });
         let run = |interpolate: bool| {
             let mut sim = Sim::for_scene(&floor_scene(), None);
             sim.interpolate = interpolate;
@@ -485,7 +489,7 @@ mod tests {
         let steady = |z: &[f32]| z[120..].windows(2).map(|p| p[1] - p[0]).collect::<Vec<f32>>();
         let (smooth, stepped) = (steady(&run(true)), steady(&run(false)));
         let mean = smooth.iter().sum::<f32>() / smooth.len() as f32;
-        assert!((mean - 2.5 / 240.0).abs() < 1e-4, "mean step {mean}");
+        assert!((mean - WALK_SPEED / 240.0).abs() < 1e-4, "mean step {mean}");
         for d in &smooth {
             assert!((d - mean).abs() < 0.1 * mean, "interpolated step {d} against mean {mean}");
         }
@@ -499,7 +503,7 @@ mod tests {
             a.update(1.0 / 240.0, &input);
             b.update(1.0 / 240.0, &input);
             assert!(a.camera.position.z <= b.camera.position.z + 1e-6);
-            assert!(b.camera.position.z - a.camera.position.z < 2.5 / 60.0 + 1e-4);
+            assert!(b.camera.position.z - a.camera.position.z < WALK_SPEED / 60.0 + 1e-4);
         }
         // No sliding across a reset.
         a.walker_mut().unwrap().place_eye(Vec3::new(20.0, 30.0, 20.0));
@@ -539,7 +543,8 @@ mod tests {
                 b.update(1.0 / 60.0, input);
             }
         }
-        assert!((b.camera.position - sim.camera.position).length() < 0.11);
+        // One step behind at up to run speed (0.16 m), or in the jump.
+        assert!((b.camera.position - sim.camera.position).length() < 0.2, "{:?} {:?}", b.camera.position, sim.camera.position);
     }
 
     #[test]

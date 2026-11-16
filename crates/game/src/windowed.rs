@@ -190,7 +190,7 @@ impl<'a> App<'a> {
         let raw = g.egui_state.take_egui_input(&g.window);
         let (cam, ms, speed) = (game.camera(), self.frame_ms, game.sim.speed);
         let status = match (game.sim.mode, game.sim.walker()) {
-            (MoveMode::Walk, Some(w)) => format!("walking{} deaths {}", if w.grounded { "" } else { ", airborne" }, w.deaths),
+            (MoveMode::Walk, Some(w)) => format!("walking{}, {:.1} m/s, deaths {}", if w.grounded { "" } else { ", airborne" }, glam::Vec2::new(w.vel.x, w.vel.z).length(), w.deaths),
             _ => format!("flying, speed {speed:.1} m/s"),
         };
         let can_walk = game.sim.can_walk();
@@ -199,7 +199,7 @@ impl<'a> App<'a> {
                 ui.label(format!("frame {ms:.2} ms ({:.0} fps)", 1000.0 / ms.max(0.001)));
                 ui.label(format!("pos {:.1} {:.1} {:.1}", cam.position.x, cam.position.y, cam.position.z));
                 ui.label(format!("yaw {:.0} pitch {:.0}  {status}", cam.yaw.to_degrees(), cam.pitch.to_degrees()));
-                ui.label("WASD, Shift: run/fast, Space: jump (fly: up), arrows: turn, Tab: grab, Esc: quit");
+                ui.label("WASD, Shift: walk (fly: fast), Space: jump (fly: up), arrows: turn, Tab: grab, Esc: quit");
                 ui.label("P or F12: screenshot (screenshots/)");
                 if let Some((text, is_err)) = &toast {
                     let colour = if *is_err { egui::Color32::LIGHT_RED } else { egui::Color32::LIGHT_GREEN };
