@@ -404,6 +404,28 @@ pub struct StylePreset {
     /// Paper001, 2 Paper002, 3 Paper004, 4 Paper006 (ambientCG scans, CC0; see
     /// `mega_render::paper::PAPER_KINDS` and assets/paper/README.md).
     pub paper_kind: f32,
+    /// Distance in metres over which the paper's amplitude rises to full (E051).
+    pub paper_near_dist: f32,
+    /// Paper amplitude at the eye, relative (1: no near calming).
+    pub paper_near_amp: f32,
+    /// Pencil shading in shade (E052): strength of a second paper relief laid on the wash
+    /// in one direction, coming in with the wash's darkness. 0 off.
+    pub pencil: f32,
+    /// Paper kind of the pencil layer (3: Paper004's laid lines).
+    pub pencil_kind: f32,
+    /// Wash coverage where the pencil starts to come in...
+    pub pencil_from: f32,
+    /// ...and where it is at full strength.
+    pub pencil_to: f32,
+    /// Strength of a second pencil direction at right angles, coming in from `pencil_to`
+    /// to full wash (soft crosshatching). 0 off.
+    pub pencil_cross: f32,
+    /// Direction of the pencil lines in the surface frame, degrees from the hatch axis.
+    pub pencil_angle: f32,
+    /// How much the pencil arrives in patches (0: a pure function of tone; 1: patches), E053.
+    pub pencil_patches: f32,
+    /// Size of the pencil patches in metres.
+    pub pencil_patch_m: f32,
 }
 
 impl StylePreset {
@@ -562,6 +584,16 @@ impl StylePreset {
             halftone_max_pitch: 1000.0,
             paper_max_cell: 1000.0,
             paper_kind: 0.0,
+            paper_near_dist: 0.0,
+            paper_near_amp: 1.0,
+            pencil: 0.0,
+            pencil_kind: 3.0,
+            pencil_from: 0.15,
+            pencil_to: 0.5,
+            pencil_cross: 0.0,
+            pencil_angle: 45.0,
+            pencil_patches: 0.0,
+            pencil_patch_m: 2.5,
         }
     }
 
@@ -611,6 +643,9 @@ impl StylePreset {
             paper3: [self.paper_take, self.shadow_soft, self.shadow_soft_max, self.paper_anchor],
             paper4: [self.paper_cell, self.shadow_soft_min, self.halftone_max_pitch, 0.0],
             paper5: [self.paper_max_cell, self.paper_kind, 0.0, 0.0],
+            paper6: [self.paper_near_dist, self.paper_near_amp, self.pencil, self.pencil_kind],
+            paper7: [self.pencil_from, self.pencil_to, self.pencil_cross, self.pencil_angle.to_radians()],
+            paper8: [self.pencil_patches, self.pencil_patch_m, 0.0, 0.0],
         }
     }
 }
@@ -761,12 +796,20 @@ impl StylePreset {
             paper_grain: 0.0,
             paper_anchor: 1.0,
             paper_cell: 0.0005,
-            paper_max_cell: 0.15,
+            paper_max_cell: 0.5,
             // A scanned sheet since E049 (ambientCG Paper002, CC0), in place of the generated
             // fibres, which read as worms.
-            paper_kind: 2.0,
-            paper_tooth: 0.06,
-            paper_tooth_px: 0.8,
+            // Paper001 (watercolour-like) since E051, folded so its tooth stays fine, quieter
+            // up close.
+            paper_kind: 1.0,
+            paper_tooth: 0.012,
+            paper_tooth_px: 0.6,
+            paper_near_dist: 40.0,
+            paper_near_amp: 0.5,
+            // Pencil shading in shade from Paper004's laid lines, laid in patches (E052, E053).
+            pencil: 0.15,
+            pencil_kind: 3.0,
+            pencil_patches: 1.0,
             paper_take: 0.08,
             halftone: 0.05,
             halftone_pitch: 0.01,
@@ -1045,6 +1088,16 @@ impl StylePreset {
         "halftone_max_pitch",
         "paper_max_cell",
         "paper_kind",
+        "paper_near_dist",
+        "paper_near_amp",
+        "pencil",
+        "pencil_kind",
+        "pencil_from",
+        "pencil_to",
+        "pencil_cross",
+        "pencil_angle",
+        "pencil_patches",
+        "pencil_patch_m",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1190,6 +1243,16 @@ impl StylePreset {
             "halftone_max_pitch" => self.halftone_max_pitch = num(value)?,
             "paper_max_cell" => self.paper_max_cell = num(value)?,
             "paper_kind" => self.paper_kind = num(value)?,
+            "paper_near_dist" => self.paper_near_dist = num(value)?,
+            "paper_near_amp" => self.paper_near_amp = num(value)?,
+            "pencil" => self.pencil = num(value)?,
+            "pencil_kind" => self.pencil_kind = num(value)?,
+            "pencil_from" => self.pencil_from = num(value)?,
+            "pencil_to" => self.pencil_to = num(value)?,
+            "pencil_cross" => self.pencil_cross = num(value)?,
+            "pencil_angle" => self.pencil_angle = num(value)?,
+            "pencil_patches" => self.pencil_patches = num(value)?,
+            "pencil_patch_m" => self.pencil_patch_m = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
@@ -1256,4 +1319,7 @@ pub(crate) struct StyleGpu {
     paper3: [f32; 4],
     paper4: [f32; 4],
     paper5: [f32; 4],
+    paper6: [f32; 4],
+    paper7: [f32; 4],
+    paper8: [f32; 4],
 }

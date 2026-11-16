@@ -831,34 +831,53 @@ fn halftone(w: f32, uv: vec2<f32>, gmax: f32) -> f32 {
 // array chosen by S.paper5.y (the generated fibre tile or a scanned sheet); a scan is
 // stretched back to its own aspect (PAPER_ASPECT), so its texels stay square in the world.
 // The E040 mottle was removed in E049. Returns the relief h, already weighted.
-fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy: vec2<f32>) -> f32 {
+fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy: vec2<f32>, r: f32) -> f32 {
+    let kind = i32(clamp(round(S.paper5.y), 0.0, 4.0));
+    let tn = paper_layers(kind, -1.0, uv, pn, gu, gv, duvx, duvy);
+    // Calmer up close (E051): the amplitude rises from paper_near_amp at the eye to 1 at
+    // paper_near_dist metres, smoothly, so walking up to a wall the paper quietens instead
+    // of turning to embossed stucco.
+    let env = mix(S.paper6.y, 1.0, smoothstep(0.0, max(S.paper6.x, 1e-3), r));
+    return S.paper2.x * tn * 0.35 * env;
+}
+
+// The relief of paper kind `kind` in the surface layers, about unit standard deviation where
+// all layers are present. angle < 0: each layer at its own random rotation (no direction);
+// angle >= 0: every layer at that angle in the surface frame (one direction, for the pencil
+// layer). Layer weights are an energy-preserving window in log2 of the on-screen texel size
+// (E051): w = sin(pi/2 t) over the first octave of the window and cos(pi/2 (t - 1)) over
+// the second, t = log2(px / lo), so the two layers present at any distance always have
+// w_a^2 + w_b^2 = 1 and contrast is the same at every distance (the E044 window left
+// octave-periodic dips to about 0.7, which showed as blotchy zones on a wall seen at an
+// angle). Faded by the world cap S.paper5.x over two octaves and on grazing surfaces.
+fn paper_layers(kind: i32, angle: f32, uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy: vec2<f32>) -> f32 {
     let gmax = max(gu, gv);
-    // Layers are chosen by the smaller footprint and sampled with the true screen gradients
-    // and anisotropic filtering, so a foreshortened surface shows foreshortened fibres
-    // rather than streaks; only very grazing surfaces fade (E044).
     let aniso = smoothstep(0.08, 0.2, min(gu, gv) / max(gmax, 1e-9));
     if (aniso <= 0.0) {
         return 0.0;
     }
-    let plane = pcg(bitcast<u32>(i32(floor(pn * 4.0))));
+    let plane = pcg(bitcast<u32>(i32(floor(pn * 4.0))) ^ u32(kind) * 0x9e3779b9u);
     let lo = max(S.paper2.y, 0.1);
     let foot = min(gu, gv) * G.misc.x;
-    let kind = i32(clamp(round(S.paper5.y), 0.0, 4.0));
     // Width over height of each relief (mega_render::paper::PAPER_ASPECT).
     var aspects = array<f32, 5>(1.0, 1.7066667, 0.7753906, 1.0, 1.0);
     let aspect = aspects[kind];
-    // Only the layers that can fall inside the window [lo, 4 lo].
     let k0 = max(floor(log2(lo * foot / S.paper4.x)), 0.0);
     var tooth = 0.0;
-    var tw = 0.0;
     for (var j = 0; j < 3; j++) {
         let k = k0 + f32(j);
         let c = S.paper4.x * exp2(k);
-        let px = c / max(foot, 1e-9);
-        let w = smoothstep(lo, 1.4 * lo, px) * (1.0 - smoothstep(1.8 * lo, 2.6 * lo, px)) * (1.0 - smoothstep(0.5 * S.paper5.x, S.paper5.x, c));
+        let t = log2(max(c / max(foot, 1e-9), 1e-9) / lo);
+        var w = 0.0;
+        if (t > 0.0 && t < 1.0) {
+            w = sin(1.5707963 * t);
+        } else if (t >= 1.0 && t < 2.0) {
+            w = cos(1.5707963 * (t - 1.0));
+        }
+        w *= 1.0 - smoothstep(0.25 * S.paper5.x, S.paper5.x, c);
         if (w > 0.0) {
             let h = hash2(0x5851f42du ^ plane, u32(k));
-            let a = u01(h) * 6.2831853;
+            let a = select(u01(h) * 6.2831853, angle, angle >= 0.0);
             let q = vec2<f32>(cos(a) * uv.x - sin(a) * uv.y, sin(a) * uv.x + cos(a) * uv.y) / c;
             let sa = vec2<f32>(1.0 / (512.0 * aspect), 1.0 / 512.0);
             let st = q * sa + vec2<f32>(u01(pcg(h ^ 1u)), u01(pcg(h ^ 2u)));
@@ -867,11 +886,9 @@ fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy
             let gy = (rot * duvy / c) * sa;
             let g = (textureSampleGrad(paper_tex, paper_smp, st, kind, gx, gy).x - 0.5) * 4.0;
             tooth += w * g;
-            tw += w * w;
         }
     }
-    let tn = tooth / sqrt(max(tw, 0.5));
-    return S.paper2.x * tn * 0.35 * aniso;
+    return tooth * aniso;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1114,6 +1131,8 @@ fn fs_main(in: VsOut) -> FsOut {
     let u3 = dot(p, e2);
     let v3 = dot(p, d2);
     let g1 = max(length(vec2<f32>(dpdx(u1), dpdy(u1))), 1e-7);
+    let duv_x = vec2<f32>(dpdx(u1), dpdx(u2));
+    let duv_y = vec2<f32>(dpdy(u1), dpdy(u2));
     let g2 = max(length(vec2<f32>(dpdx(u2), dpdy(u2))), 1e-7);
     let g3 = max(length(vec2<f32>(dpdx(u3), dpdy(u3))), 1e-7);
     let gv3 = max(length(vec2<f32>(dpdx(v3), dpdy(v3))), 1e-7);
@@ -1356,6 +1375,44 @@ fn fs_main(in: VsOut) -> FsOut {
             let fs = saturate(2.0 * min(lod_u1, lod_v1) / max(max(lod_u1, lod_v1), 1e-9));
             wash = mix(wash, halftone(wash, vec2<f32>(u1, u2), max(lod_u1, lod_v1)), fs);
         }
+        // Pencil shading in shade (E052): a second paper relief (S.paper6.w, Paper004's laid
+        // lines by default) in one direction on the surface, darkening and lightening the wash
+        // along its lines, coming in with the darkness of the wash from S.paper7.x to
+        // S.paper7.y; S.paper7.z adds the same relief at right angles in the darkest tone
+        // (soft crosshatching). Zero mean, so tone is kept; 0 strength leaves the wash as is.
+        if (S.paper6.z > 0.0) {
+            var band = smoothstep(S.paper7.x, S.paper7.y, w0);
+            // Patches (E053, S.paper8.x > 0): the pencil arrives patch by patch rather than as
+            // one front along the shadow's shape. A low-frequency world noise T (two octaves,
+            // S.paper8.y metres) sets where in the tone range each spot starts; a spot is
+            // drawn as the tone passes T, over a wide feathered ramp, so early patches appear in
+            // light shade, more join as it darkens, and all are present in the deepest shade.
+            // Fixed in the world, faded only by amplitude: still under walking.
+            if (S.paper8.x > 0.0) {
+                let ps = max(S.paper8.y, 0.1);
+                let tn = 0.65 * vnoise3(0x7f4a7c15u, p / ps) + 0.35 * vnoise3(0x94d049bbu, p / (0.43 * ps));
+                let thr = saturate((tn - 0.25) * 2.0);
+                let pmask = smoothstep(thr - 0.25, thr + 0.25, band * 1.25);
+                band = mix(band, band * pmask, S.paper8.x);
+            }
+            if (band > 0.0) {
+                let pk = i32(clamp(round(S.paper6.w), 0.0, 4.0));
+                let env = mix(S.paper6.y, 1.0, smoothstep(0.0, max(S.paper6.x, 1e-3), rr));
+                var pr = paper_layers(pk, S.paper7.w, vec2<f32>(u1, u2), dot(p, n) + 17.0, lod_u1, lod_v1, duv_x, duv_y);
+                if (S.paper7.z > 0.0) {
+                    var cb = smoothstep(S.paper7.y, 1.0, w0) * S.paper7.z;
+                    if (S.paper8.x > 0.0) {
+                        // The second direction only in some patches.
+                        let t2 = vnoise3(0x2c1b3c6du, p / max(S.paper8.y, 0.1));
+                        cb *= mix(1.0, smoothstep(0.45, 0.65, t2), S.paper8.x);
+                    }
+                    if (cb > 0.0) {
+                        pr += cb * paper_layers(pk, S.paper7.w + 1.5707963, vec2<f32>(u1, u2), dot(p, n) + 31.0, lod_u1, lod_v1, duv_x, duv_y);
+                    }
+                }
+                wash = saturate(wash + S.paper6.z * band * env * 0.25 * pr);
+            }
+        }
     }
 
     let view = G.flags.x;
@@ -1381,7 +1438,7 @@ fn fs_main(in: VsOut) -> FsOut {
     out.ink = vec4<f32>(select(0.0, t.cov, hatch_on), select(0.0, speck, hatch_on), 0.0, 0.0);
     var ph = 0.0;
     if (S.paper3.w > 0.5 && S.paper2.x > 0.0) {
-        ph = paper_surface(vec2<f32>(u1, u2), dot(p, n), lod_u1, lod_v1, vec2<f32>(dpdx(u1), dpdx(u2)), vec2<f32>(dpdy(u1), dpdy(u2)));
+        ph = paper_surface(vec2<f32>(u1, u2), dot(p, n), lod_u1, lod_v1, duv_x, duv_y, rr);
     }
     out.tone = vec2<f32>(select(0.0, wash, hatch_on), 0.5 + 2.0 * ph);
     if (view == VIEW_SHADOW) {

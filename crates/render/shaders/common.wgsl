@@ -66,6 +66,9 @@ struct Style {
     paper3: vec4<f32>,          // wash taking to the tooth, shadow softness, max penumbra (m), paper anchor
     paper4: vec4<f32>,          // finest surface paper cell (m), min penumbra (m), max halftone pitch (m)
     paper5: vec4<f32>,          // largest surface paper texel (m), paper kind (texture array layer)
+    paper6: vec4<f32>,          // paper near distance (m), paper near amplitude, pencil strength, pencil kind
+    paper7: vec4<f32>,          // pencil from (wash), pencil to (wash), pencil cross, pencil angle (rad)
+    paper8: vec4<f32>,          // pencil patches amount, pencil patch scale (m)
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;

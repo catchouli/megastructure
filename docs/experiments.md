@@ -489,6 +489,33 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: 0.03 is barely there on lit walls; 0.1 is clearly paper on lit walls and slightly coarse at 2 m.
 - Verdict: 0.06. Question on the sheet: how strong should the paper be?
 
+## E051: Paper001 soft at every distance
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Paper001 up close")
+- Question: the owner: Paper001 looks great far away (frame 124919) and harsh, like embossed stucco, 21 m closer (124923). Why, and can it look like the far version everywhere, quieter up close?
+- Setup: both frames reproduced with `mega_capture --scene shaft --width 3024 --height 1832 --set paper_kind=1 --set paper_tooth=0.1 --camera <sidecar camera>`. Approach sequence toward the same wall: `--camera 0.9,408.5,<30 - d>,0.0238813,0.16,1.2217306` for d = 48, 35, 27, 20, 12, 6, 2 m. Causes: Paper001's bumps are 6 to 10 texels, magnified by the 0.8 to 2 px-per-texel window to 10 to 30 px; the far frame was soft only because the 15 cm texel cap faded it there; the layer window's weights left octave-periodic contrast dips (blotchy zones across a wall at an angle); and the wash's settling into the tooth was normalised by the strength, so it ignored strength and fades (it was most of the texture on grey walls). Changes: Paper001 folded 2 x 2 in its tile (`PAPER_FOLD`), an energy-preserving layer window (sin/cos in log2 of texel size), `paper_take` scaled by the relief, cap 50 cm over two octaves, strength 0.012, window 0.6 px, near envelope 0.5 at the eye to 1 at 40 m. Sheet `compare/E051-paper-approach.png`: before (`paper_kind 1`, 0.1, as in the owner's frames) and after at the seven distances, native crops.
+- Failures on the way: a 4 x 4 fold made the tile's repeat visible as a diagonal lattice at 2 m; first strengths (0.08, 0.035) still showed no change because of the `paper_take` normalisation, which the strength sweep exposed.
+- Result: the after row is a fine soft tooth at 48 m that gets finer and quieter towards the wall, with no zone where it turns harsh.
+- Stability (61 frames, 720p; 5x5 error, pops over 64 levels, contrast-relative pops), E049 default / new: `shaft_hall_walk` 0.295, 0.055%, 0.126% / 0.317, 0.055%, 0.132%; `shaft_bridge_walk` 0.300, 0.118%, 0.312% / 0.309, 0.118%, 0.311%; `shaft_spawn_yaw` 0.232, 0.011%, 0.017% / 0.274, 0.011%, 0.016%; `hall_walk` 0.506 / 0.481. Pops unchanged; blurred error up to 18% on the spawn turn (paper now present on walls 30 to 60 m away, where the old cap faded it).
+- Verdict: kept. Question on the sheet: does the paper now stay soft all the way in?
+
+## E052: The owner's frames 124919 and 124923
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md`
+- Setup: sheet `compare/E052-owner-frames-paper.png`: native crops of the far wall in both frames, before (as captured) and after (new default); regenerate with `mega_capture --scene shaft --width 3024 --height 1832 --camera 1.1281985,410.21255,2.826289,0.023881283,0.15622053,1.2217306 --out <dir>` (and 0.6241791,406.4932,-18.274935,0.023881283,0.2608904,1.2217306).
+- Result: the near frame is now as soft as the far one; the far one keeps a fine tooth, slightly more present than before.
+- Verdict: for the owner. Question: does the near frame now look like the far one?
+
+## E053: Pencil shading in shade, in patches
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Pencil shading in shade")
+- Question: the owner: Paper004 has a "pencil shaded" effect; use it in shade, faded in "carefully ... in patches".
+- Setup: Paper004 relief on the wash in one direction (45 degrees in the surface frame), coming in with wash 0.15 to 0.5, optionally at right angles in the darkest tone, and in patches set by a 2.5 m world noise. Sheet `compare/E053-pencil-shade.png`: none / 0.15 without patches / 0.15 in patches (default) / 0.3 in patches / patches with crossing, on a shaded wall at 10 m (`shaft_hall_wall --t 0.9`), the hall (`shaft_hall_enter --t 0.6`), under the stair (frame 000558's camera) and a shaded wall at 30 m (`shaft_spawn`); regenerate with `mega_capture --path shaft_hall_enter --t 0.6 --width 2560 --height 1440 --set pencil=0.3 --out <dir>`.
+- Failures on the way: first strengths (0.6, 1.2) made the hall a field of heavy black diagonal scratches; per-layer random rotation (as for the paper) made the lines cross into mesh, so one direction is used.
+- Result: at 0.15 the dark walls get a fine diagonal pencil grain, varying from patch to patch, with no edge where it starts; lit and mid tones are untouched; crossing in the darkest patches is barely visible at this strength. Motion: `shaft_hall_walk` 0.330 against 0.319 without pencil (pops unchanged).
+- Could it replace the distance ruling? Not as built: it is a texture fixed at a few pixels per texel and fades out with distance like the paper, so it cannot draw the long strokes that close into black far down the shaft. A version gated by distance instead of faded, at larger on-screen scale, could take that job; untried.
+- Verdict: on at 0.15 with patches, no crossing. Question on the sheet: does the pencil shading in shade add to the drawing or clutter it?
+
 ## Queued
 
 Experiments the plan already calls for, in rough order:

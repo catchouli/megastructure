@@ -120,7 +120,7 @@ pub fn relief_of(k: usize) -> Vec<f32> {
     if k == 0 {
         paper_relief()
     } else {
-        scanned_relief(SCANS[k - 1])
+        scanned_relief_folded(SCANS[k - 1], PAPER_FOLD[k])
     }
 }
 
@@ -136,7 +136,20 @@ pub const PAPER_ASPECT: [f32; 5] = [1.0, 1024.0 / 600.0, 794.0 / 1024.0, 1.0, 1.
 ///    creases or cloud survive, only tooth and fibre;
 /// 3. normalised to zero mean and unit standard deviation, clamped at +-3 (renormalised).
 pub fn scanned_relief(jpg: &[u8]) -> Vec<f32> {
-    let n = PAPER_TILE;
+    scanned_relief_folded(jpg, 1)
+}
+
+/// How many times each kind's scan is repeated across the tile (E051): the scan is resampled
+/// to `PAPER_TILE / fold` and tiled `fold` x `fold` (it tiles natively), so its features are
+/// `fold` times fewer texels wide. Paper001's tooth is about 6 to 10 texels across at fold 1,
+/// which the 1 to 4 px-per-texel window magnified into 10 to 30 px bumps up close (the
+/// owner's "harsh" frame 124923); at fold 4 a bump is about 2 texels.
+pub const PAPER_FOLD: [usize; 5] = [1, 2, 1, 2, 1];
+
+/// `scanned_relief` with the scan repeated `fold` x `fold` times across the tile.
+pub fn scanned_relief_folded(jpg: &[u8], fold: usize) -> Vec<f32> {
+    let full = PAPER_TILE;
+    let n = PAPER_TILE / fold.max(1);
     let img = image::load_from_memory(jpg).expect("embedded paper scan decodes").to_luma32f();
     let (w, h) = (img.width() as usize, img.height() as usize);
     let (sx, sy) = (w as f32 / n as f32, h as f32 / n as f32);
@@ -156,7 +169,7 @@ pub fn scanned_relief(jpg: &[u8]) -> Vec<f32> {
             t[y * n + x] = acc / cnt.max(1.0);
         }
     }
-    let blur = gaussian_wrap(&t, n, 8.0);
+    let blur = gaussian_wrap(&t, n, (8.0 / fold as f32).max(2.0));
     let mut out: Vec<f32> = t.iter().zip(&blur).map(|(a, b)| a - b).collect();
     for _ in 0..2 {
         let mean = out.iter().sum::<f32>() / out.len() as f32;
@@ -166,7 +179,16 @@ pub fn scanned_relief(jpg: &[u8]) -> Vec<f32> {
     let mean = out.iter().sum::<f32>() / out.len() as f32;
     let sd = (out.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / out.len() as f32).sqrt().max(1e-6);
     out.iter_mut().for_each(|v| *v = (*v - mean) / sd);
-    out
+    if n == full {
+        return out;
+    }
+    let mut tiled = vec![0.0f32; full * full];
+    for y in 0..full {
+        for x in 0..full {
+            tiled[y * full + x] = out[(y % n) * n + x % n];
+        }
+    }
+    tiled
 }
 
 fn gaussian_wrap(src: &[f32], n: usize, sigma: f32) -> Vec<f32> {

@@ -73,7 +73,10 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         var toothn = 0.0;
         if (S.paper3.w > 0.5) {
             rel = select((tone2.y - 0.5) * 0.5, 0.0, sky);
-            toothn = rel / max(S.paper2.x, 0.01);
+            // Scales with the relief itself (E051): until E051 it was normalised by the
+            // strength, so the wash's settling into the tooth, the main texture on grey walls,
+            // ignored both the strength and the near calming.
+            toothn = rel / 0.012;
         } else {
             let sh = paper_sheet(pos.xy);
             rel = S.paper2.x * sh;
