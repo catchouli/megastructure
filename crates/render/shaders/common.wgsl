@@ -62,10 +62,10 @@ struct Style {
     bounce: vec4<f32>,          // sun bounce strength, sky bounce strength, anisotropic grain
     grain: vec4<f32>,           // screentone softness, fine detail weight
     halftone: vec4<f32>,        // halftone amount, finest pitch (m), dot edge softness, screen angle (rad)
-    paper2: vec4<f32>,          // paper tooth, tooth scale px, mottle, mottle scale px
+    paper2: vec4<f32>,          // paper tooth, tooth scale px
     paper3: vec4<f32>,          // wash taking to the tooth, shadow softness, max penumbra (m), paper anchor
     paper4: vec4<f32>,          // finest surface paper cell (m), min penumbra (m), max halftone pitch (m)
-    paper5: vec4<f32>,          // largest surface paper texel (m)
+    paper5: vec4<f32>,          // largest surface paper texel (m), paper kind (texture array layer)
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;

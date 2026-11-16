@@ -378,10 +378,6 @@ pub struct StylePreset {
     pub paper_tooth: f32,
     /// Scale of the tooth in pixels at 720 lines.
     pub paper_tooth_px: f32,
-    /// Amplitude of the paper's large, faint unevenness. 0 off.
-    pub paper_mottle: f32,
-    /// Scale of the mottle in pixels at 720 lines.
-    pub paper_mottle_px: f32,
     /// How much the wash settles into the tooth's hollows (darker there, mostly in mid
     /// greys). 0 a flat wash.
     pub paper_take: f32,
@@ -404,6 +400,10 @@ pub struct StylePreset {
     /// Largest texel of the surface paper's fibre tile in metres; coarser layers are not
     /// drawn, so far surfaces fade to smooth tone (E044).
     pub paper_max_cell: f32,
+    /// Which paper relief the surface paper uses (E049): 0 the generated fibre tile, 1
+    /// Paper001, 2 Paper002, 3 Paper004, 4 Paper006 (ambientCG scans, CC0; see
+    /// `mega_render::paper::PAPER_KINDS` and assets/paper/README.md).
+    pub paper_kind: f32,
 }
 
 impl StylePreset {
@@ -553,8 +553,6 @@ impl StylePreset {
             halftone_angle: 30.0,
             paper_tooth: 0.0,
             paper_tooth_px: 3.0,
-            paper_mottle: 0.0,
-            paper_mottle_px: 160.0,
             paper_take: 0.0,
             shadow_soft: 0.0,
             shadow_soft_max: 1.0,
@@ -563,6 +561,7 @@ impl StylePreset {
             shadow_soft_min: 0.0,
             halftone_max_pitch: 1000.0,
             paper_max_cell: 1000.0,
+            paper_kind: 0.0,
         }
     }
 
@@ -608,10 +607,10 @@ impl StylePreset {
             bounce: [self.bounce, self.bounce_sky, self.screentone_aniso, 0.0],
             grain: [self.screentone_soft, self.screentone_detail, 0.0, 0.0],
             halftone: [self.halftone, self.halftone_pitch, self.halftone_soft, self.halftone_angle.to_radians()],
-            paper2: [self.paper_tooth, self.paper_tooth_px, self.paper_mottle, self.paper_mottle_px],
+            paper2: [self.paper_tooth, self.paper_tooth_px, 0.0, 0.0],
             paper3: [self.paper_take, self.shadow_soft, self.shadow_soft_max, self.paper_anchor],
             paper4: [self.paper_cell, self.shadow_soft_min, self.halftone_max_pitch, 0.0],
-            paper5: [self.paper_max_cell, 0.0, 0.0, 0.0],
+            paper5: [self.paper_max_cell, self.paper_kind, 0.0, 0.0],
         }
     }
 }
@@ -763,10 +762,11 @@ impl StylePreset {
             paper_anchor: 1.0,
             paper_cell: 0.0005,
             paper_max_cell: 0.15,
-            paper_tooth: 0.03,
-            paper_tooth_px: 0.7,
-            paper_mottle: 0.0,
-            paper_mottle_px: 160.0,
+            // A scanned sheet since E049 (ambientCG Paper002, CC0), in place of the generated
+            // fibres, which read as worms.
+            paper_kind: 2.0,
+            paper_tooth: 0.06,
+            paper_tooth_px: 0.8,
             paper_take: 0.08,
             halftone: 0.05,
             halftone_pitch: 0.01,
@@ -1036,8 +1036,6 @@ impl StylePreset {
         "halftone_angle",
         "paper_tooth",
         "paper_tooth_px",
-        "paper_mottle",
-        "paper_mottle_px",
         "paper_take",
         "shadow_soft",
         "shadow_soft_max",
@@ -1046,6 +1044,7 @@ impl StylePreset {
         "shadow_soft_min",
         "halftone_max_pitch",
         "paper_max_cell",
+        "paper_kind",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1182,8 +1181,6 @@ impl StylePreset {
             "halftone_angle" => self.halftone_angle = num(value)?,
             "paper_tooth" => self.paper_tooth = num(value)?,
             "paper_tooth_px" => self.paper_tooth_px = num(value)?,
-            "paper_mottle" => self.paper_mottle = num(value)?,
-            "paper_mottle_px" => self.paper_mottle_px = num(value)?,
             "paper_take" => self.paper_take = num(value)?,
             "shadow_soft" => self.shadow_soft = num(value)?,
             "shadow_soft_max" => self.shadow_soft_max = num(value)?,
@@ -1192,6 +1189,7 @@ impl StylePreset {
             "shadow_soft_min" => self.shadow_soft_min = num(value)?,
             "halftone_max_pitch" => self.halftone_max_pitch = num(value)?,
             "paper_max_cell" => self.paper_max_cell = num(value)?,
+            "paper_kind" => self.paper_kind = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,

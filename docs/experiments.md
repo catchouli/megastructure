@@ -472,6 +472,23 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: bake 410 to 510 ms with smoothing (it costs a few tens of ms). Patches on the walls gone; the 115151 blotch gone. More rays were not needed.
 - Verdict: kept. Question on the sheet: is the shading now smooth enough?
 
+## E049: Scanned CC0 paper in place of generated fibres
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Scanned paper"), `assets/paper/README.md`
+- Question: the owner: the generated fibres "look a bit like worms"; try a CC0 scan such as ambientCG Paper002, and other papers from there. Do the maps tile as shipped?
+- Setup: ambientCG's Paper category (all CC0 1.0) has Paper001 to Paper006; Paper003 (creased) and Paper005 (crumpled) were not used; Paper001, Paper002, Paper004 and Paper006 kept (colour and displacement 1K JPGs in `assets/paper/`). Seam check on the displacement maps: mean difference across the wrap edge against neighbouring rows and unrelated columns, x / y: Paper001 18.4 against 15.0 (unrelated 25.6) / 20.7 against 18.1; Paper002 5.95 against 5.74 (8.17) / 6.18 against 5.52; Paper004 4.90 against 4.76 (16.4) / 5.88 against 7.23; Paper006 7.01 against 6.55 (8.44) / 6.48 against 5.83. All tile already, so no seam processing: each map is resampled whole to 512 x 512 (aspect restored in the shader), high-passed and normalised. A first version cropped a centre square and blended an offset copy for seams; dropped once the measurement showed it was not needed (cropping would have broken the native tiling). Displacement rather than colour luminance: it carries the tooth in all four without the colour scans' specks. A new `paper_kind` selects the texture array layer. Sheet `compare/E049-paper-scans.png`: fibre (0.03, its tuned strength) / Paper002 / Paper001 / Paper004 / Paper006 (scans at 0.06), native crops at 2560x1440 of a 2 m wall (halftone off), the lit wall of frame 115151, a shaded wall at 30 m and a grazing floor, and the spawn view at 720p. Regenerate a cell with `mega_capture --path shaft_hall_wall --t 1 --width 2560 --height 1440 --set halftone=0 --set paper_kind=1 --out <dir>`.
+- Result: Paper002 and Paper006 are a fine, even grain (like printed paper stock); Paper001 a soft cold-pressed tooth, the nearest to watercolour paper; Paper004 laid lines that read as diagonal hatching once rotated per layer. All are even across near and far, lit and shaded walls. At 1.4 px per texel the scans went mushy; 0.8 kept. At 0.03 the scans vanish on lit walls; 0.06 chosen. The ambientCG category has no rougher sheet than Paper001 (no true rough watercolour paper).
+- Stability (61 frames, 720p, 5x5 error / pops / contrast-relative pops), fibre 0.03 / Paper002 0.06 / Paper001 0.06 / smooth wash: `shaft_hall_walk` 0.265 / 0.295 / 0.286 / 0.177, pops 0.054% / 0.055% / 0.055% / 0.054%, relative 0.128% / 0.126% / 0.129% / 0.133%; `shaft_bridge_walk` 0.267 / 0.300 / 0.290 / 0.201, relative 0.313% / 0.312% / 0.312% / 0.314%; `shaft_spawn_yaw` 0.215 / 0.232 / 0.220 / 0.163; `hall_walk` 0.478 / 0.506 / 0.494 / 0.451. About 10% more blurred error than the fibres at twice the strength; pops unchanged.
+- Cost: frame time unchanged (`shaft_spawn` 2.01 ms at 720p, 5.97 ms at 1440p); startup about 70 ms more (decoding and preparing four maps); `mega_capture` binary 7.8 to 10.7 MB (embedded maps and the JPEG decoder).
+- Verdict: Paper002 at 0.06 as default; the others selectable. Question on the sheet: which paper should the walls be made of?
+
+## E050: Paper strength
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md`
+- Setup: sheet `compare/E050-paper-strength.png`: Paper002 and Paper001 at 0.03 / 0.06 / 0.1, native crops of the lit wall of frame 115151, a shaded wall at 30 m and a 2 m wall, halftone on as in the default; regenerate with `mega_capture --path shaft_hall_wall --t 1 --width 2560 --height 1440 --set paper_kind=1 --set paper_tooth=0.1 --out <dir>`.
+- Result: 0.03 is barely there on lit walls; 0.1 is clearly paper on lit walls and slightly coarse at 2 m.
+- Verdict: 0.06. Question on the sheet: how strong should the paper be?
+
 ## Queued
 
 Experiments the plan already calls for, in rough order:
@@ -483,5 +500,4 @@ Experiments the plan already calls for, in rough order:
 - Per-patch stroke angle and weight variation (E019, E025 follow-up).
 - Strokes stopping short of creases and face borders (E024 follow-up; needs an edge-distance attribute).
 - Calming heavy distant hatching that resamples into moire in motion (E020 follow-up).
-- A paper texture with real fibre character (a scanned or modelled tile mapped through the same layered scheme) in place of value noise (E040 follow-up).
 - Bounced light re-baked off the render thread, or interpolated between key sun directions, for a moving sun (E037 follow-up).

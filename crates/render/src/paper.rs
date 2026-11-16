@@ -1,4 +1,8 @@
-//! A tileable paper relief texture, generated once at startup (E044).
+//! Paper relief textures for the surface-anchored paper: one generated (E044) and scanned CC0
+//! sheets from ambientCG (E049, `assets/paper/README.md`), all prepared at startup into
+//! square, seamless, zero-mean, unit-variance tiles of `PAPER_TILE` texels with mips.
+//!
+//! The generated tile, below:
 //!
 //! Short fibres at random orientations, some lighter and some darker than the sheet, laid
 //! partly in loose clumps; fine pits; no low-frequency cloud. The forward pass samples it in
@@ -100,9 +104,112 @@ pub fn paper_relief() -> Vec<f32> {
     h
 }
 
-/// The tile as R8 mip levels, largest first: `0.5 + 0.25 h`, clamped.
+/// Paper kinds, in the order of the texture array layers and of `StylePreset::paper_kind`.
+pub const PAPER_KINDS: &[&str] = &["fibre", "Paper001", "Paper002", "Paper004", "Paper006"];
+
+/// The scanned displacement maps, embedded so the binaries are self-contained.
+const SCANS: [&[u8]; 4] = [
+    include_bytes!("../../../assets/paper/Paper001/Paper001_1K-JPG_Displacement.jpg"),
+    include_bytes!("../../../assets/paper/Paper002/Paper002_1K-JPG_Displacement.jpg"),
+    include_bytes!("../../../assets/paper/Paper004/Paper004_1K-JPG_Displacement.jpg"),
+    include_bytes!("../../../assets/paper/Paper006/Paper006_1K-JPG_Displacement.jpg"),
+];
+
+/// The relief of paper kind `k` (index into `PAPER_KINDS`).
+pub fn relief_of(k: usize) -> Vec<f32> {
+    if k == 0 {
+        paper_relief()
+    } else {
+        scanned_relief(SCANS[k - 1])
+    }
+}
+
+/// Width over height of each scan, for the shader to undo the resampling to a square tile.
+pub const PAPER_ASPECT: [f32; 5] = [1.0, 1024.0 / 600.0, 794.0 / 1024.0, 1.0, 1.0];
+
+/// A scanned sheet's displacement as a tile (E049):
+/// 1. luminance of the whole map, area-resampled to `PAPER_TILE` square (the shader stretches
+///    it back by `PAPER_ASPECT`); ambientCG's maps already tile (measured in E049: the
+///    wrap-around difference equals the difference between neighbouring rows), so no seam
+///    processing is applied and resampling the whole map keeps the tiling;
+/// 2. high-pass: minus a wrapping Gaussian blur of 8 texels, so no sheet-wide gradient,
+///    creases or cloud survive, only tooth and fibre;
+/// 3. normalised to zero mean and unit standard deviation, clamped at +-3 (renormalised).
+pub fn scanned_relief(jpg: &[u8]) -> Vec<f32> {
+    let n = PAPER_TILE;
+    let img = image::load_from_memory(jpg).expect("embedded paper scan decodes").to_luma32f();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let (sx, sy) = (w as f32 / n as f32, h as f32 / n as f32);
+    let mut t = vec![0.0f32; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            let (x0, y0) = ((x as f32 * sx) as usize, (y as f32 * sy) as usize);
+            let (x1, y1) = ((((x + 1) as f32 * sx) as usize).max(x0 + 1).min(w), (((y + 1) as f32 * sy) as usize).max(y0 + 1).min(h));
+            let mut acc = 0.0f32;
+            let mut cnt = 0.0f32;
+            for yy in y0..y1 {
+                for xx in x0..x1 {
+                    acc += img.get_pixel(xx as u32, yy as u32).0[0];
+                    cnt += 1.0;
+                }
+            }
+            t[y * n + x] = acc / cnt.max(1.0);
+        }
+    }
+    let blur = gaussian_wrap(&t, n, 8.0);
+    let mut out: Vec<f32> = t.iter().zip(&blur).map(|(a, b)| a - b).collect();
+    for _ in 0..2 {
+        let mean = out.iter().sum::<f32>() / out.len() as f32;
+        let sd = (out.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / out.len() as f32).sqrt().max(1e-6);
+        out.iter_mut().for_each(|v| *v = ((*v - mean) / sd).clamp(-3.0, 3.0));
+    }
+    let mean = out.iter().sum::<f32>() / out.len() as f32;
+    let sd = (out.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / out.len() as f32).sqrt().max(1e-6);
+    out.iter_mut().for_each(|v| *v = (*v - mean) / sd);
+    out
+}
+
+fn gaussian_wrap(src: &[f32], n: usize, sigma: f32) -> Vec<f32> {
+    let r = (3.0 * sigma).ceil() as i32;
+    let k: Vec<f32> = (-r..=r).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
+    let ks: f32 = k.iter().sum();
+    let mut tmp = vec![0.0f32; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            let mut a = 0.0;
+            for (j, kv) in k.iter().enumerate() {
+                let xx = (x as i32 + j as i32 - r).rem_euclid(n as i32) as usize;
+                a += kv * src[y * n + xx];
+            }
+            tmp[y * n + x] = a / ks;
+        }
+    }
+    let mut out = vec![0.0f32; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            let mut a = 0.0;
+            for (j, kv) in k.iter().enumerate() {
+                let yy = (y as i32 + j as i32 - r).rem_euclid(n as i32) as usize;
+                a += kv * tmp[yy * n + x];
+            }
+            out[y * n + x] = a / ks;
+        }
+    }
+    out
+}
+
+/// Mip levels of paper kind `k` as R8, largest first: `0.5 + 0.25 h`, clamped.
+pub fn kind_mips(k: usize) -> Vec<Vec<u8>> {
+    mips_of(relief_of(k))
+}
+
+/// The generated tile as R8 mip levels, largest first: `0.5 + 0.25 h`, clamped.
 pub fn paper_mips() -> Vec<Vec<u8>> {
-    let mut level: Vec<f32> = paper_relief();
+    mips_of(paper_relief())
+}
+
+fn mips_of(relief: Vec<f32>) -> Vec<Vec<u8>> {
+    let mut level: Vec<f32> = relief;
     let mut size = PAPER_TILE;
     let mut out = Vec::new();
     loop {
@@ -139,5 +246,20 @@ mod tests {
         let wrap: f32 = (0..n).map(|y| (h[y * n] - h[y * n + n - 1]).abs()).sum::<f32>() / n as f32;
         assert!(wrap < 1.5 * inner, "wrap {wrap} inner {inner}");
         assert_eq!(paper_mips().len(), 10);
+    }
+
+    #[test]
+    fn scans_are_normalised_and_seamless() {
+        let n = PAPER_TILE;
+        for k in 1..PAPER_KINDS.len() {
+            let h = relief_of(k);
+            assert_eq!(h.len(), n * n);
+            let mean = h.iter().sum::<f32>() / h.len() as f32;
+            let sd = (h.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / h.len() as f32).sqrt();
+            assert!(mean.abs() < 1e-3 && (sd - 1.0).abs() < 1e-3, "{}: {mean} {sd}", PAPER_KINDS[k]);
+            let inner: f32 = (0..n).map(|y| (h[y * n + 1] - h[y * n]).abs()).sum::<f32>() / n as f32;
+            let wrap: f32 = (0..n).map(|y| (h[y * n] - h[y * n + n - 1]).abs()).sum::<f32>() / n as f32;
+            assert!(wrap < 1.3 * inner, "{}: wrap {wrap} inner {inner}", PAPER_KINDS[k]);
+        }
     }
 }

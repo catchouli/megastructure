@@ -626,7 +626,7 @@ struct ShadowU {
 @group(1) @binding(0) var shadow_tex: texture_depth_2d_array;
 @group(1) @binding(1) var shadow_cmp: sampler_comparison;
 @group(1) @binding(2) var<uniform> SH: ShadowU;
-@group(1) @binding(3) var paper_tex: texture_2d<f32>;
+@group(1) @binding(3) var paper_tex: texture_2d_array<f32>;
 @group(1) @binding(4) var paper_smp: sampler;
 
 fn shadow_size() -> f32 {
@@ -827,9 +827,10 @@ fn halftone(w: f32, uv: vec2<f32>, gmax: f32) -> f32 {
 // layers are drawn, each band-limited by the tile's mips, and walking closer refines rather
 // than swaps. Layers whose texel exceeds S.paper5.x metres are not drawn, so beyond a
 // distance the paper fades to smooth tone. Each layer is rotated and offset so the tile's
-// repeat and orientation never line up. The optional mottle (S.paper2.z, 0 by default since
-// E044: it read as "photoshop clouds") is the E040 value-noise layers at large scale.
-// Returns the relief h, already weighted.
+// repeat and orientation never line up. Since E049 the relief is one layer of a texture
+// array chosen by S.paper5.y (the generated fibre tile or a scanned sheet); a scan is
+// stretched back to its own aspect (PAPER_ASPECT), so its texels stay square in the world.
+// The E040 mottle was removed in E049. Returns the relief h, already weighted.
 fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy: vec2<f32>) -> f32 {
     let gmax = max(gu, gv);
     // Layers are chosen by the smaller footprint and sampled with the true screen gradients
@@ -842,6 +843,10 @@ fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy
     let plane = pcg(bitcast<u32>(i32(floor(pn * 4.0))));
     let lo = max(S.paper2.y, 0.1);
     let foot = min(gu, gv) * G.misc.x;
+    let kind = i32(clamp(round(S.paper5.y), 0.0, 4.0));
+    // Width over height of each relief (mega_render::paper::PAPER_ASPECT).
+    var aspects = array<f32, 5>(1.0, 1.7066667, 0.7753906, 1.0, 1.0);
+    let aspect = aspects[kind];
     // Only the layers that can fall inside the window [lo, 4 lo].
     let k0 = max(floor(log2(lo * foot / S.paper4.x)), 0.0);
     var tooth = 0.0;
@@ -855,35 +860,18 @@ fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy
             let h = hash2(0x5851f42du ^ plane, u32(k));
             let a = u01(h) * 6.2831853;
             let q = vec2<f32>(cos(a) * uv.x - sin(a) * uv.y, sin(a) * uv.x + cos(a) * uv.y) / c;
-            let st = q / 512.0 + vec2<f32>(u01(pcg(h ^ 1u)), u01(pcg(h ^ 2u)));
+            let sa = vec2<f32>(1.0 / (512.0 * aspect), 1.0 / 512.0);
+            let st = q * sa + vec2<f32>(u01(pcg(h ^ 1u)), u01(pcg(h ^ 2u)));
             let rot = mat2x2<f32>(vec2<f32>(cos(a), sin(a)), vec2<f32>(-sin(a), cos(a)));
-            let gx = rot * duvx / (c * 512.0);
-            let gy = rot * duvy / (c * 512.0);
-            let g = (textureSampleGrad(paper_tex, paper_smp, st, gx, gy).x - 0.5) * 4.0;
+            let gx = (rot * duvx / c) * sa;
+            let gy = (rot * duvy / c) * sa;
+            let g = (textureSampleGrad(paper_tex, paper_smp, st, kind, gx, gy).x - 0.5) * 4.0;
             tooth += w * g;
             tw += w * w;
         }
     }
     let tn = tooth / sqrt(max(tw, 0.5));
-    var mn = 0.0;
-    if (S.paper2.z > 0.0) {
-        let mlo = max(0.15 * S.paper2.w, lo);
-        var mottle = 0.0;
-        var mw = 0.0;
-        for (var k = 0u; k < 12u; k++) {
-            let c = S.paper4.x * exp2(f32(k));
-            let px = c / max(foot, 1e-7);
-            let w = smoothstep(mlo, 2.0 * mlo, px) * (1.0 - smoothstep(0.5 * S.paper2.w, S.paper2.w, px));
-            if (w > 0.0) {
-                let a = f32(k) * 2.39996;
-                let q = vec2<f32>(cos(a) * uv.x - sin(a) * uv.y, sin(a) * uv.x + cos(a) * uv.y) / c;
-                mottle += w * 2.0 * (vnoise2(hash2(0x2545f491u ^ plane, k), q) - 0.5);
-                mw += w * w;
-            }
-        }
-        mn = mottle / sqrt(max(mw, 2.0));
-    }
-    return (S.paper2.x * tn * 0.35 + S.paper2.z * mn * 0.7) * aniso;
+    return S.paper2.x * tn * 0.35 * aniso;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1392,7 +1380,7 @@ fn fs_main(in: VsOut) -> FsOut {
     out.fill = vec4<f32>(0.0, band_of(light) / 3.0, ao, select(0.0, t.black, hatch_on));
     out.ink = vec4<f32>(select(0.0, t.cov, hatch_on), select(0.0, speck, hatch_on), 0.0, 0.0);
     var ph = 0.0;
-    if (S.paper3.w > 0.5 && (S.paper2.x > 0.0 || S.paper2.z > 0.0)) {
+    if (S.paper3.w > 0.5 && S.paper2.x > 0.0) {
         ph = paper_surface(vec2<f32>(u1, u2), dot(p, n), lod_u1, lod_v1, vec2<f32>(dpdx(u1), dpdx(u2)), vec2<f32>(dpdy(u1), dpdy(u2)));
     }
     out.tone = vec2<f32>(select(0.0, wash, hatch_on), 0.5 + 2.0 * ph);

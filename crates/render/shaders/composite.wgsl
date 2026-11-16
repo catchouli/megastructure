@@ -19,11 +19,11 @@ fn paper_noise(px: vec2<f32>) -> f32 {
     return saturate(0.45 * a + 0.3 * b + 0.25 * c);
 }
 
-// The sheet itself (E040): tooth (fibre-scale relief, x) and mottle (large, faint
-// unevenness, y), both -0.5..0.5 and screen-anchored, as a printed page is. Low to mid
-// frequencies only (tooth at S.paper2.y pixels at 720 lines and coarser), so a faint static
-// sheet rather than pixel noise. Fibres: value noise stretched 4:1 at two fixed angles.
-fn paper_sheet(px: vec2<f32>) -> vec2<f32> {
+// The screen-anchored sheet (E040, paper_anchor 0): tooth, about -0.5..0.5, low to mid
+// frequencies only (S.paper2.y pixels at 720 lines and coarser), so a faint static sheet
+// rather than pixel noise. Fibres: value noise stretched 4:1 at two fixed angles. (The
+// large-scale mottle was removed in E049.)
+fn paper_sheet(px: vec2<f32>) -> f32 {
     let sc = max(S.paper2.y * G.misc.x, 0.5);
     let q = px / sc;
     let r1 = vec2<f32>(0.94 * q.x + 0.34 * q.y, -0.34 * q.x + 0.94 * q.y);
@@ -35,9 +35,7 @@ fn paper_sheet(px: vec2<f32>) -> vec2<f32> {
     // Mostly irregular tooth and lumps; the fibres are a minor part, so the sheet does not
     // read as woven canvas.
     let tooth = 0.18 * (f1 - 0.5) + 0.12 * (f2 - 0.5) + 0.4 * (t - 0.5) + 0.45 * (lump - 0.5);
-    let ms = max(S.paper2.w * G.misc.x, 1.0);
-    let mottle = 0.65 * (vnoise2(0x3c6ef372u, px / ms) - 0.5) + 0.35 * (vnoise2(0xa54ff53au, px / (0.37 * ms)) - 0.5);
-    return vec2<f32>(tooth * 1.6, mottle * 1.6);
+    return tooth * 1.6;
 }
 
 fn to_srgb_if_needed(c: vec3<f32>) -> vec3<f32> {
@@ -66,8 +64,8 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let tone2 = textureLoad(tone_tex, p, 0).xy;
     var wash = select(tone2.x, 0.0, sky);
     var paper = S.paper.rgb;
-    if (S.paper2.x > 0.0 || S.paper2.z > 0.0) {
-        // The sheet: tooth and mottle lift and lower the paper itself, white included, and
+    if (S.paper2.x > 0.0) {
+        // The sheet: tooth lifts and lower the paper itself, white included, and
         // the wash settles in the tooth's hollows, most in mid greys, as wash on rough paper.
         // Screen-anchored (paper_anchor 0) or the relief the forward pass wrote on the
         // surface (1; flat for sky).
@@ -75,11 +73,11 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         var toothn = 0.0;
         if (S.paper3.w > 0.5) {
             rel = select((tone2.y - 0.5) * 0.5, 0.0, sky);
-            toothn = rel / max(S.paper2.x + S.paper2.z, 0.01);
+            toothn = rel / max(S.paper2.x, 0.01);
         } else {
             let sh = paper_sheet(pos.xy);
-            rel = S.paper2.x * sh.x + S.paper2.z * sh.y;
-            toothn = sh.x;
+            rel = S.paper2.x * sh;
+            toothn = sh;
         }
         paper = paper * (1.0 + rel);
         wash = saturate(wash - S.paper3.x * toothn * 4.0 * wash * (1.0 - wash));

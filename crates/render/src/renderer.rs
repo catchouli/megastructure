@@ -549,28 +549,33 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        // Paper relief tile (E044), with its mip chain, sampled repeating and trilinear.
-        let paper_mips = crate::paper::paper_mips();
+        // Paper relief tiles (E044, E049): one array layer per kind (the generated fibre tile
+        // and the scanned sheets), each with its mip chain, sampled repeating, trilinear and
+        // anisotropic.
+        let kinds = crate::paper::PAPER_KINDS.len();
+        let paper_layers: Vec<Vec<Vec<u8>>> = (0..kinds).map(crate::paper::kind_mips).collect();
         let paper_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("paper relief"),
-            size: wgpu::Extent3d { width: crate::paper::PAPER_TILE as u32, height: crate::paper::PAPER_TILE as u32, depth_or_array_layers: 1 },
-            mip_level_count: paper_mips.len() as u32,
+            size: wgpu::Extent3d { width: crate::paper::PAPER_TILE as u32, height: crate::paper::PAPER_TILE as u32, depth_or_array_layers: kinds as u32 },
+            mip_level_count: paper_layers[0].len() as u32,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::R8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        for (i, m) in paper_mips.iter().enumerate() {
-            let side = (crate::paper::PAPER_TILE >> i) as u32;
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo { texture: &paper_tex, mip_level: i as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                m,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(side), rows_per_image: Some(side) },
-                wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
-            );
+        for (layer, mips) in paper_layers.iter().enumerate() {
+            for (i, m) in mips.iter().enumerate() {
+                let side = (crate::paper::PAPER_TILE >> i) as u32;
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: &paper_tex, mip_level: i as u32, origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 }, aspect: wgpu::TextureAspect::All },
+                    m,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(side), rows_per_image: Some(side) },
+                    wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+                );
+            }
         }
-        let paper_view = paper_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let paper_view = paper_tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
         let paper_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("paper relief"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -600,7 +605,7 @@ impl Renderer {
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -1309,12 +1314,15 @@ mod tests {
             assert_eq!((p.bounce, p.bounce_sky, p.rule_fade_in, p.rule_dist_len), (0.0, 0.0, 0.0, 0.0));
             assert_eq!((p.screentone_aniso, p.screentone_soft), (0.0, 0.0));
         }
+        // Older presets keep the generated paper tile (paper_kind 0); nihei_ink uses a scan.
+        assert_eq!(StylePreset::nihei_wash().paper_kind, 0.0);
+        assert!((StylePreset::nihei_ink().paper_kind as usize) < crate::paper::PAPER_KINDS.len());
         let ink = StylePreset::nihei_ink();
         assert!(ink.bounce > 0.0 && ink.rule_fade_in > 0.0 && ink.wash > 0.0);
         // Since E040: smooth wash on surface-anchored paper with a halftone, soft shadows.
         assert!(ink.screentone == 0.0 && ink.paper_anchor == 1.0 && ink.halftone > 0.0 && ink.shadow_soft > 0.0);
         for p in [StylePreset::nihei(), StylePreset::nihei_vast(), StylePreset::nihei_wash(), StylePreset::nihei_hybrid()] {
-            assert_eq!((p.halftone, p.paper_tooth, p.paper_mottle, p.shadow_soft), (0.0, 0.0, 0.0, 0.0));
+            assert_eq!((p.halftone, p.paper_tooth, p.shadow_soft), (0.0, 0.0, 0.0));
         }
         assert_eq!(StylePreset::nihei_ink_wash().fall_white, 0.0);
         for p in [StylePreset::nihei_fall(), StylePreset::nihei_wash(), StylePreset::nihei_hybrid()] {
