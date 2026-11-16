@@ -75,14 +75,14 @@ fn graph_has_cycles_spurs_and_height() {
         let core = |l: &Link| matches!(l.role, Role::Core | Role::Loop);
         let cuts = g.cut_links(&core);
         assert!(cuts.is_empty(), "seed {seed}: core links that are bridges: {:?}", cuts.iter().map(|&k| (&g.spaces[g.links[k].a].sid, &g.spaces[g.links[k].b].sid)).collect::<Vec<_>>());
-        assert!(g.cycle_rank(&core) >= 3, "seed {seed}: cycle rank {}", g.cycle_rank(&core));
+        assert!(g.cycle_rank(&core) >= 6, "seed {seed}: cycle rank {}", g.cycle_rank(&core));
         assert!(g.spaces.iter().any(|s| s.role == Role::Spur), "seed {seed}: no spurs");
         let walkable = g.walkable().count();
         assert!(walkable >= 30, "seed {seed}: only {walkable} spaces");
         let mut kinds: Vec<SpaceKind> = g.spaces.iter().map(|s| s.kind).collect();
         kinds.sort();
         kinds.dedup();
-        assert!(kinds.len() >= 10, "seed {seed}: {kinds:?}");
+        assert!(kinds.len() >= 14, "seed {seed}: {kinds:?}");
         let mut lk: Vec<LinkKind> = g.links.iter().map(|l| l.kind).collect();
         lk.sort();
         lk.dedup();
@@ -104,6 +104,34 @@ fn every_space_is_reachable_on_foot() {
         let l = build_with(seed, false);
         let n = check_reach(&l).unwrap_or_else(|e| panic!("{e}"));
         assert!(n > 10_000, "seed {seed}: only {n} places");
+    }
+}
+
+/// The director's sight lines are open in collider space.
+#[test]
+fn sight_lines_are_open() {
+    for seed in [DEFAULT_SEED, 1, 2] {
+        let l = build_with(seed, false);
+        assert!(l.plan.views.len() >= 4, "seed {seed}: {} views", l.plan.views.len());
+        let world = walk::World::new(&l.colliders);
+        for v in &l.plan.views {
+            if let Err(p) = world.ray_clear(v.from, v.to) {
+                panic!("seed {seed}: view {} blocked at {p:?} ({:?} to {:?})", v.name, v.from, v.to);
+            }
+        }
+    }
+}
+
+/// Every landmark camera stands in open space, for a few seeds.
+#[test]
+fn landmarks_are_in_open_space() {
+    for seed in [DEFAULT_SEED, 1, 2] {
+        let l = build_with(seed, false);
+        let lm = l.plan.landmarks();
+        assert!(lm.len() >= 12, "seed {seed}: {} landmarks", lm.len());
+        for m in &lm {
+            assert!(!l.colliders.iter().any(|c| c.contains(m.eye.to_array())), "seed {seed}: landmark {} inside a solid at {:?}", m.name, m.eye);
+        }
     }
 }
 
@@ -152,22 +180,41 @@ fn labyrinth_report() {
         println!("  {i:3} {:16} {:10?} level {:2} {} {:?}", s.kind.name(), s.role, s.level, s.sid, s.anchors.first().map(|a| (a.x.round(), a.y.round(), a.z.round())));
     }
     for k in &l.plan.passages {
-        println!("  passage {} {}: {} cells, {} stairs, {:.0} m", k.space, k.kind.name(), k.path.len(), k.stairs(), k.length());
+        let f: Vec<_> = k.flats().collect();
+        let (c, n) = (f[f.len() / 2], f.get(f.len() / 2 + 1).copied().unwrap_or(f[f.len() / 2]));
+        println!("  passage {} {} {}: {} cells, {} stairs, {:.0} m, mid {:?} next {:?}", k.space, k.kind.name(), k.style.name(), k.path.len(), k.stairs(), k.length(), (c.x, c.y, c.z), (n.x, n.y, n.z));
+    }
+    let core = |li: &Link| matches!(li.role, Role::Core | Role::Loop);
+    println!("cycle rank {}", g.cycle_rank(&core));
+    for m in l.plan.landmarks() {
+        println!("  landmark {:20} {:.1},{:.2},{:.1},{:.3},{:.2}", m.name, m.eye.x, m.eye.y, m.eye.z, m.yaw, m.pitch);
     }
     // Rough length of the core loop: core passages, tower climbs (a storey is two sides of
-    // about 9 m), the hall's length and the bridges.
+    // about 9.5 m), a crossing of each core room (0.7 of its plan diagonal), the bridges.
     let mut core_m = 0.0;
     for k in l.plan.passages.iter().filter(|k| g.spaces[k.space].role == Role::Core) {
         core_m += k.length();
     }
-    for r in l.plan.rooms.iter().filter(|r| r.kind == SpaceKind::StairTower && g.spaces[r.space].role == Role::Core) {
-        let levels: Vec<i32> = l.plan.passages.iter().flat_map(|k| k.ends.iter()).filter(|e| e.target == r.space).map(|e| e.cell.y).collect();
-        if let (Some(a), Some(b)) = (levels.iter().min(), levels.iter().max()) {
-            core_m += (b - a) as f32 * 2.0 * 9.5;
+    for r in l.plan.rooms.iter().filter(|r| g.spaces[r.space].role == Role::Core) {
+        if r.kind == SpaceKind::StairTower {
+            let levels: Vec<i32> = l.plan.passages.iter().filter(|k| g.spaces[k.space].role == Role::Core).flat_map(|k| k.ends.iter()).filter(|e| e.target == r.space).map(|e| e.cell.y).collect();
+            if let (Some(a), Some(b)) = (levels.iter().min(), levels.iter().max()) {
+                core_m += (b - a) as f32 * 2.0 * 9.5;
+            }
+        } else {
+            let (lo, hi) = (r.inner_min(), r.inner_max());
+            core_m += 0.7 * (hi - lo).with_y(0.0).length();
         }
     }
-    core_m += l.plan.rooms.iter().filter(|r| r.kind == SpaceKind::GreatHall).map(|r| r.inner_max().z - r.inner_min().z).sum::<f32>();
-    core_m += 2.0 * 45.0;
+    for br in &l.plan.bridges {
+        if g.spaces[l.plan.ledges[br.a].space].role == Role::Core {
+            let ra = &l.plan.rooms[l.plan.ledges[br.a].room];
+            core_m += (ra.inner_max() - ra.inner_min()).with_y(0.0).length() * 0.6;
+        }
+    }
+    if let Some(sh) = l.plan.stair_hall {
+        core_m += (sh.landing_edge - sh.foot).abs();
+    }
     println!("core loop about {core_m:.0} m: {:.1} min walking at 2.5 m/s, {:.1} min running", core_m / 2.5 / 60.0, core_m / 6.0 / 60.0);
     let t = std::time::Instant::now();
     let n = check_reach(&l).unwrap();
@@ -194,6 +241,12 @@ fn labyrinth_seed_sweep() {
         }
         if let Err(e) = check_reach(&l) {
             fails.push(e);
+        }
+        let world = walk::World::new(&l.colliders);
+        for v in &l.plan.views {
+            if let Err(p) = world.ray_clear(v.from, v.to) {
+                fails.push(format!("seed {seed}: view {} blocked at {p:?}", v.name));
+            }
         }
     }
     let mean = attempts.iter().sum::<u32>() as f32 / n as f32;
@@ -301,3 +354,5 @@ fn labyrinth_diagram() {
     std::fs::write(&path, s).unwrap();
     println!("wrote {path}");
 }
+
+

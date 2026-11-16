@@ -32,6 +32,17 @@ pub enum SpaceKind {
     Chamber,
     /// A colonnaded room open to the outside of the structure.
     Loggia,
+    /// A cistern: a deep basin with a forest of columns, a walkway round its walls and a
+    /// stair down to the basin floor. Set piece.
+    Cistern,
+    /// A long hall climbed by one monumental stair to a landing across its far end. Set piece.
+    StairHall,
+    /// The landing at the top of the stair hall.
+    StairLanding,
+    /// A narrow light shaft from the sky down into a room below (no floor of its own).
+    Shaft,
+    /// A small room before the door of a great space.
+    Antechamber,
 }
 
 impl SpaceKind {
@@ -49,6 +60,11 @@ impl SpaceKind {
             SpaceKind::Junction => "junction",
             SpaceKind::Chamber => "chamber",
             SpaceKind::Loggia => "loggia",
+            SpaceKind::Cistern => "cistern",
+            SpaceKind::StairHall => "stair hall",
+            SpaceKind::StairLanding => "stair landing",
+            SpaceKind::Shaft => "light shaft",
+            SpaceKind::Antechamber => "antechamber",
         }
     }
 
@@ -58,7 +74,12 @@ impl SpaceKind {
 
     /// Containers hold other walkable spaces (ledges) but have no floor on the route.
     pub fn is_container(self) -> bool {
-        matches!(self, SpaceKind::Void | SpaceKind::LightWell)
+        matches!(self, SpaceKind::Void | SpaceKind::LightWell | SpaceKind::Shaft)
+    }
+
+    /// Great spaces get antechambers and heavy door frames.
+    pub fn is_great(self) -> bool {
+        matches!(self, SpaceKind::GreatHall | SpaceKind::Undercroft | SpaceKind::Cistern | SpaceKind::StairHall)
     }
 }
 

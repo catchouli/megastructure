@@ -30,8 +30,8 @@ pub const LEVEL: f32 = 6.0;
 /// Floor slab thickness between storeys.
 pub const SLAB: f32 = 0.6;
 /// Region size in cells (x, z) and storeys.
-pub const NX: i32 = 72;
-pub const NZ: i32 = 64;
+pub const NX: i32 = 96;
+pub const NZ: i32 = 88;
 pub const NY: i32 = 26;
 /// Thickness of the outer skin beyond the region's edge cells.
 pub const SKIN: f32 = 2.0;

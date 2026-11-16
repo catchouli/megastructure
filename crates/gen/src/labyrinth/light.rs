@@ -30,13 +30,30 @@ fn idx(c: Cell) -> usize {
 fn keep(kind: SpaceKind) -> (f32, f32) {
     match kind {
         SpaceKind::Void | SpaceKind::LightWell => (0.985, 0.962),
+        SpaceKind::Shaft => (0.97, 0.985),
+        SpaceKind::StairHall => (0.95, 0.94),
+        SpaceKind::Cistern => (0.85, 0.85),
+        SpaceKind::Antechamber => (0.85, 0.85),
         SpaceKind::GreatHall => (0.955, 0.94),
         SpaceKind::Loggia => (0.9, 0.9),
         SpaceKind::StairTower => (0.9, 0.93),
-        SpaceKind::Undercroft => (0.84, 0.84),
-        SpaceKind::Corridor => (0.86, 0.86),
-        SpaceKind::ServicePassage => (0.78, 0.78),
+        SpaceKind::Undercroft => (0.7, 0.75),
+        SpaceKind::Corridor => (0.9, 0.9),
+        SpaceKind::ServicePassage => (0.8, 0.8),
         _ => (0.82, 0.82),
+    }
+}
+
+/// The darkest openness a kind of space falls to.
+fn darkest(kind: SpaceKind) -> f32 {
+    // The shading closes to black below a light of about 0.26 (`black_point` plus
+    // `black_range` in `nihei_ink`, E066), so the passages are kept above it and only the
+    // deepest places may fall below.
+    match kind {
+        SpaceKind::Corridor | SpaceKind::Junction | SpaceKind::Antechamber | SpaceKind::StairLanding | SpaceKind::Loggia => 0.46,
+        SpaceKind::StairTower | SpaceKind::ServicePassage | SpaceKind::StairHall | SpaceKind::GreatHall => 0.36,
+        SpaceKind::Undercroft | SpaceKind::Chamber | SpaceKind::Cistern => OPEN_FLOOR,
+        _ => 0.2,
     }
 }
 
@@ -101,6 +118,17 @@ impl LightField {
                     let cb = cell_at(Vec3::new(a.x + dx, y + dy, p.rooms[a.void].face(Dir::ZN) + 1.0));
                     if ca.in_bounds() && cb.in_bounds() {
                         links.push((ca, cb, 0.97));
+                    }
+                }
+            }
+        }
+        // Light shafts pour into the room below them.
+        for r in p.rooms.iter().filter(|r| r.kind == SpaceKind::Shaft) {
+            for z in r.b.z0..r.b.z1 {
+                for x in r.b.x0..r.b.x1 {
+                    let (a, c) = (Cell::new(x, r.b.y0, z), Cell::new(x, r.b.y0 - 1, z));
+                    if c.in_bounds() {
+                        links.push((a, c, 0.92));
                     }
                 }
             }
@@ -182,8 +210,11 @@ impl LightField {
                 }
             }
         }
-        for v in value.iter_mut() {
-            *v = v.max(OPEN_FLOOR);
+        // Each kind of space has its own darkest value: passages and small rooms stay in grey
+        // (pencil in shade), the undercroft, the chamber and the cistern's basin go to black.
+        for (i, v) in value.iter_mut().enumerate() {
+            let floor = if owner[i] == u32::MAX { OPEN_FLOOR } else { darkest(kind(owner[i])) };
+            *v = v.max(floor);
         }
         Self { value, owner }
     }

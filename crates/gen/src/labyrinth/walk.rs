@@ -164,6 +164,26 @@ impl World {
     }
 }
 
+impl World {
+    /// Whether nothing solid lies on the segment (railings and other parts thinner than
+    /// 10 cm do not block a view). Sampled every 0.2 m.
+    pub fn ray_clear(&self, a: Vec3, c: Vec3) -> Result<(), Vec3> {
+        let n = ((c - a).length() / 0.2).ceil().max(1.0) as usize;
+        let mut cand = Vec::new();
+        for i in 0..=n {
+            let p = a + (c - a) * (i as f32 / n as f32);
+            self.near(p, p, &mut cand);
+            for &k in &cand {
+                let s = &self.solids[k as usize];
+                if s.h.min_element() >= 0.05 && s.inside(p) {
+                    return Err(p);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// What the flood fill found.
 pub struct Reach {
     /// Standing places, keyed by plan grid index, with their heights.

@@ -35,6 +35,9 @@ pub struct Room {
     /// Distance from the cell boundary to the inner wall face.
     pub inset: f32,
     pub open_top: bool,
+    /// Variant of the room's treatment (junctions: 0 pier, 1 crossing with chamfered corners,
+    /// 2 plain; stair hall: 0 climbs towards +x, 1 towards -x).
+    pub style: u8,
 }
 
 impl Room {
@@ -94,21 +97,78 @@ pub struct PortEnd {
     pub link: LinkKind,
 }
 
+/// Sections of passage. Each passage has one, chosen by the grammar, so the route through
+/// the labyrinth changes character from one passage to the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PassStyle {
+    /// Tall corridor, frames every other cell.
+    Plain,
+    /// Barrel vault on its straight runs, ribs at each cell.
+    Vaulted,
+    /// Wider, with heavy piers and beams at every cell.
+    Colonnade,
+    /// Narrow and tall: a slot.
+    Slot,
+    /// Low and wide-feeling, beams close overhead.
+    Low,
+    /// Large openings onto neighbouring voids and halls.
+    Gallery,
+    /// Low service duct with pipes and cross beams overhead.
+    Duct,
+    /// Plain low service passage.
+    Service,
+}
+
+impl PassStyle {
+    pub fn inset(self) -> f32 {
+        match self {
+            PassStyle::Colonnade => 0.25,
+            PassStyle::Slot => 0.75,
+            PassStyle::Duct | PassStyle::Service => 1.0,
+            _ => 0.4,
+        }
+    }
+
+    pub fn height(self) -> f32 {
+        match self {
+            PassStyle::Low => 3.4,
+            PassStyle::Vaulted => 5.2,
+            PassStyle::Duct => 3.0,
+            PassStyle::Service => 2.8,
+            _ => LEVEL - SLAB,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PassStyle::Plain => "plain",
+            PassStyle::Vaulted => "vaulted",
+            PassStyle::Colonnade => "colonnade",
+            PassStyle::Slot => "slot",
+            PassStyle::Low => "low",
+            PassStyle::Gallery => "gallery",
+            PassStyle::Duct => "duct",
+            PassStyle::Service => "service",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Passage {
     pub space: usize,
     pub kind: SpaceKind,
+    pub style: PassStyle,
     pub path: Vec<Step>,
     pub ends: [PortEnd; 2],
 }
 
 impl Passage {
     pub fn inset(&self) -> f32 {
-        passage_inset(self.kind)
+        self.style.inset()
     }
 
     pub fn height(&self) -> f32 {
-        passage_height(self.kind)
+        self.style.height()
     }
 
     /// Flat cells in order.
@@ -126,21 +186,6 @@ impl Passage {
     }
 }
 
-pub fn passage_inset(kind: SpaceKind) -> f32 {
-    if kind == SpaceKind::ServicePassage {
-        1.0
-    } else {
-        0.4
-    }
-}
-
-pub fn passage_height(kind: SpaceKind) -> f32 {
-    if kind == SpaceKind::ServicePassage {
-        2.8
-    } else {
-        LEVEL - SLAB
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rail {
@@ -223,6 +268,38 @@ pub struct GallerySpec {
     pub stair_foot: f32,
 }
 
+/// A walkable level inside a room above its floor (the hall's gallery, the stair hall's
+/// landing): which room, which storey, and the stretches of wall where doors may open.
+#[derive(Clone, Debug)]
+pub struct Upper {
+    pub space: usize,
+    pub room: usize,
+    pub level: i32,
+    /// (side, u0, u1) in world u.
+    pub sides: Vec<(Dir, f32, f32)>,
+}
+
+/// The stair hall: its grand stair climbs along x from `foot` to the landing.
+#[derive(Clone, Copy, Debug)]
+pub struct StairHallSpec {
+    pub room: usize,
+    pub landing: usize,
+    /// +1 climbs towards +x, -1 towards -x.
+    pub dir: f32,
+    /// World x of the stair's foot and of the landing's front edge.
+    pub foot: f32,
+    pub landing_edge: f32,
+    pub levels: i32,
+}
+
+/// A sight line the director wants kept open.
+#[derive(Clone, Copy, Debug)]
+pub struct View {
+    pub name: &'static str,
+    pub from: Vec3,
+    pub to: Vec3,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortalKind {
     /// A walkable door or passage mouth.
@@ -249,6 +326,8 @@ pub struct Portal {
     pub between: [Option<usize>; 2],
     /// Whether a walker passes through (a floor is needed in the reveal).
     pub walk: bool,
+    /// Weight of the door frame: 0 none, 1 light, 2 medium, 3 heavy.
+    pub frame: u8,
 }
 
 /// Everything about the layout, before triangles.
@@ -266,6 +345,9 @@ pub struct Plan {
     pub wall_stairs: Vec<WallStairSpec>,
     pub arch: ArchSpec,
     pub gallery: GallerySpec,
+    pub uppers: Vec<Upper>,
+    pub stair_hall: Option<StairHallSpec>,
+    pub views: Vec<View>,
     pub portals: Vec<Portal>,
     /// Eye position and yaw at the start.
     pub spawn: (Vec3, f32),
@@ -279,12 +361,19 @@ struct Director {
     hall: CBox,
     under: CBox,
     well: CBox,
+    cistern: CBox,
+    stair_hall: CBox,
+    cleft: CBox,
+    /// Light shafts from the sky into the undercroft and the cistern.
+    shafts: Vec<CBox>,
     /// Hall floor storey.
     fh: i32,
     /// Spawn ledge storey.
     ks: i32,
     /// Light well bridge storey.
     kw: i32,
+    /// The cleft's two bridge storeys.
+    kc: [i32; 2],
     /// Arch and bridge axis: cell column x.
     arch_cx: i32,
     /// Void wall carrying the wall stair, and its lower storey.
@@ -294,44 +383,76 @@ struct Director {
     look_side: Dir,
     ko: i32,
     gallery_side: Dir,
+    /// The stair hall climbs towards +x (0) or -x (1).
+    sh_style: u8,
 }
 
 impl Director {
     fn new(seed: u64) -> Self {
         let mut r = Rng::for_id(seed, "director", layer::DIRECTOR);
+        let east = r.chance(0.5);
+        // Mirror a box's x extent to the west when the flanks are swapped.
+        let mx = |x0: i32, w: i32| if east { x0 } else { NX - x0 - w };
         let vw = r.int(10, 12);
         let vd = r.int(11, 12);
-        let vx0 = r.int(27, 32);
-        let vz0 = r.int(22, 26);
+        let vx0 = r.int(40, 45);
+        let vz0 = r.int(26, 30);
         let void = CBox::new(vx0, vx0 + vw, 0, NY, vz0, vz0 + vd);
         let fh = r.int(7, 9);
         let hh = r.int(6, 7);
         let hw = r.int(13, 15);
-        let hx0 = (vx0 + vw / 2 - hw / 2 + r.int(-1, 1)).max(2);
+        let hx0 = vx0 + vw / 2 - hw / 2 + r.int(-1, 1);
         let hall = CBox::new(hx0, hx0 + hw, fh, fh + hh, 0, vz0 - 1);
-        // The arch on a cell column inside both the hall and the void, near their middle.
         let lo = hx0.max(vx0) + 3;
         let hi = (hx0 + hw).min(vx0 + vw) - 4;
-        let arch_cx = ((lo + hi) / 2 + r.int(-1, 1)).clamp(lo, hi.max(lo));
-        let east = r.chance(0.5);
-        let uw = r.int(12, 15);
-        let ud = r.int(10, 13);
-        let ux0 = if east { r.int(vx0 + vw + 4, NX - 2 - uw) } else { r.int(2, vx0 - 4 - uw) };
-        let uz0 = r.int(vz0, NZ - 3 - ud);
-        let under = CBox::new(ux0, ux0 + uw, 0, 2, uz0, uz0 + ud);
+        // Near the hall's centre line, so the nave of columns is centred on it.
+        let arch_cx = (hx0 + hw / 2 + r.int(-1, 0)).clamp(lo, hi.max(lo));
+        // East flank (mirrored when !east): the undercroft beside the void, the cistern
+        // beyond it to the north.
+        let (uw, ud) = (r.int(12, 15), r.int(10, 13));
+        let ux = if east { r.int(vx0 + vw + 5, vx0 + vw + 9) } else { r.int(vx0 - 9 - uw, vx0 - 5 - uw) };
+        let uz0 = r.int(vz0 + 1, vz0 + 5);
+        let under = CBox::new(ux, ux + uw, 0, 2, uz0, uz0 + ud);
+        let cs = r.int(9, 11);
+        let cx = if east { r.int(vx0 + vw + 3, vx0 + vw + 8) } else { r.int(vx0 - 8 - cs, vx0 - 3 - cs) };
+        let cz0 = uz0 + ud + r.int(5, 8);
+        let cy0 = r.int(1, 3);
+        let cistern = CBox::new(cx, cx + cs, cy0, cy0 + 4, cz0, cz0 + cs);
+        // North: the stair hall along x against the north face.
+        let sl = r.int(16, 18);
+        let sx0 = vx0 + vw / 2 - sl / 2 + r.int(-3, 3);
+        let sy0 = r.int(3, 5);
+        let stair_hall = CBox::new(sx0, sx0 + sl, sy0, sy0 + 6, NZ - 5, NZ);
+        // West flank: the cleft (long in z) to the north, the light well to the south.
+        let kl = r.int(16, 20);
+        let kx = mx(r.int(12, 18), 4);
+        let kz0 = r.int(36, 42);
+        let cleft = CBox::new(kx, kx + 4, 2, NY, kz0, kz0 + kl);
         let ws = r.int(6, 7);
         let kw0 = r.int(3, 5);
-        let wx0 = if east { r.int(3, (hx0 - ws - 3).max(3)) } else { r.int((hx0 + hw + 3).min(NX - 3 - ws), NX - 3 - ws) };
-        let wz0 = r.int(6, 16);
+        let wx0 = mx(r.int(8, 14), ws);
+        let wz0 = r.int(6, 14);
         let well = CBox::new(wx0, wx0 + ws, kw0, NY, wz0, wz0 + ws);
+        let mut shafts = Vec::new();
+        for k in 0..2 {
+            let sx = under.x0 + 2 + k * (uw - 7) + r.int(0, 1);
+            let sz = under.z0 + 2 + r.int(0, ud - 7);
+            shafts.push(CBox::new(sx, sx + 3, under.y1, NY, sz, sz + 3));
+        }
+        let ssx = cistern.x0 + cs / 2 - 1 + r.int(-1, 1);
+        let ssz = cistern.z0 + cs / 2 - 1 + r.int(-1, 1);
+        shafts.push(CBox::new(ssx, ssx + 2, cistern.y1, NY, ssz, ssz + 2));
         let ks = fh + r.int(4, 6);
         let kw = (kw0 + r.int(5, 8)).min(NY - 6);
+        let kc0 = r.int(4, 7);
+        let kc = [kc0, (kc0 + r.int(5, 7)).min(NY - 4)];
         let stair_side = if r.chance(0.5) { Dir::XN } else { Dir::XP };
         let k1 = r.int(2, 4);
         let look_side = stair_side.opposite();
         let ko = r.int(15, 20);
         let gallery_side = if east { Dir::XN } else { Dir::XP };
-        Self { void, hall, under, well, fh, ks, kw, arch_cx, stair_side, k1, look_side, ko, gallery_side }
+        let sh_style = r.int(0, 1) as u8;
+        Self { void, hall, under, well, cistern, stair_hall, cleft, shafts, fh, ks, kw, kc, arch_cx, stair_side, k1, look_side, ko, gallery_side, sh_style }
     }
 }
 
@@ -344,6 +465,7 @@ struct End {
 
 struct Job {
     space: usize,
+    style: PassStyle,
     a: End,
     b: End,
 }
@@ -359,6 +481,9 @@ struct Builder {
     jobs: Vec<Job>,
     passages: Vec<Passage>,
     gallery: Option<GallerySpec>,
+    uppers: Vec<Upper>,
+    /// Plan positions of stair towers placed so far (kept apart).
+    towers: Vec<(f32, f32)>,
 }
 
 impl Builder {
@@ -372,7 +497,7 @@ impl Builder {
     fn add_room(&mut self, space: usize, b: CBox, inset: f32, open_top: bool) -> usize {
         let kind = self.g.spaces[space].kind;
         self.grid.fill(&b, Occ::Space(space as u32));
-        self.rooms.push(Room { space, kind, b, inset, open_top });
+        self.rooms.push(Room { space, kind, b, inset, open_top, style: 0 });
         self.room_of[space] = Some(self.rooms.len() - 1);
         self.rooms.len() - 1
     }
@@ -398,20 +523,28 @@ impl Builder {
         if let Some(ri) = self.room_of[s] {
             return self.rooms[ri].b.centre_xz();
         }
-        if let Some(g) = self.gallery.filter(|g| g.space == s) {
-            let r = &self.rooms[g.hall];
-            let x = if g.side == Dir::XN { r.b.x0 as f32 } else { r.b.x1 as f32 };
-            return (x, (g.z0 + g.z1) * 0.5 / CELL);
+        if let Some(u) = self.uppers.iter().find(|u| u.space == s) {
+            let (d, u0, u1) = u.sides[0];
+            let r = &self.rooms[u.room];
+            let p = r.b.plane(d) / CELL;
+            let m = (u0 + u1) * 0.5 / CELL;
+            return if d.is_x() { (p, m) } else { (m, p) };
         }
         (NX as f32 * 0.5, NZ as f32 * 0.5)
     }
 
-    /// Find a free box of the given size near `(tx, tz)`, searching outwards.
+    /// Find a free box of the given size near `(tx, tz)`, searching outwards, at least
+    /// `apart` cells from every point in `avoid`.
     #[allow(clippy::too_many_arguments)]
     fn place_near(&self, tx: f32, tz: f32, w: i32, d: i32, y0: i32, y1: i32, touch_edge: bool) -> Option<CBox> {
+        self.place_apart(tx, tz, w, d, y0, y1, touch_edge, &[], 0.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn place_apart(&self, tx: f32, tz: f32, w: i32, d: i32, y0: i32, y1: i32, touch_edge: bool, avoid: &[(f32, f32)], apart: f32) -> Option<CBox> {
         let cx = (tx - w as f32 * 0.5).round() as i32;
         let cz = (tz - d as f32 * 0.5).round() as i32;
-        for r in 0i32..28 {
+        for r in 0i32..32 {
             let mut cands: Vec<(i32, i32)> = Vec::new();
             for dz in -r..=r {
                 for dx in -r..=r {
@@ -423,6 +556,10 @@ impl Builder {
             cands.sort_by_key(|&(dx, dz)| (dx * dx + dz * dz, dz, dx));
             for (dx, dz) in cands {
                 let b = CBox::new(cx + dx, cx + dx + w, y0, y1, cz + dz, cz + dz + d);
+                let (bx, bz) = b.centre_xz();
+                if avoid.iter().any(|&(ax, az)| (ax - bx).hypot(az - bz) < apart) {
+                    continue;
+                }
                 if self.grid.box_free(&b, 1, touch_edge) {
                     return Some(b);
                 }
@@ -438,35 +575,87 @@ impl Builder {
         let (bx, bz) = self.pos(b.space);
         let dist = ((bx - ax).powi(2) + (bz - az).powi(2)).sqrt();
         let dk = (b.level - a.level).abs();
-        let t = r.range(0.35, 0.65);
-        let (mx, mz) = (ax + (bx - ax) * t + r.range(-5.0, 5.0), az + (bz - az) * t + r.range(-5.0, 5.0));
-        if dk >= 4 && depth < 2 && r.chance(0.85) {
+        let t = r.range(0.3, 0.7);
+        // Off the straight line, so chains wander and cross each other.
+        let (px, pz) = (-(bz - az) / dist.max(1.0), (bx - ax) / dist.max(1.0));
+        let off = r.range(-0.45, 0.45) * dist;
+        let (mx, mz) = (ax + (bx - ax) * t + px * off, az + (bz - az) * t + pz * off);
+        let max_depth = if role == Role::Core { 4 } else { 2 };
+        if dk >= 4 && depth < max_depth && r.chance(0.85) {
             let lo = a.level.min(b.level);
             let hi = a.level.max(b.level);
             let y0 = (lo - r.int(0, 1)).max(0);
             let y1 = (hi + 1 + r.int(0, 1)).min(NY);
             let edge = r.chance(0.5);
-            if let Some(bx) = self.place_near(mx, mz, 3, 3, y0, y1, edge) {
+            let avoid = self.towers.clone();
+            if let Some(bx) = self.place_apart(mx, mz, 3, 3, y0, y1, edge, &avoid, 12.0) {
                 let s = self.space(&format!("{sid}/tower"), SpaceKind::StairTower, role, y0);
                 self.add_room(s, bx, 0.5, false);
+                self.towers.push(bx.centre_xz());
                 let mut out = vec![s];
                 out.extend(self.arc(a, End { space: s, level: a.level }, role, &format!("{sid}/0"), depth + 1));
                 out.extend(self.arc(End { space: s, level: b.level }, b, role, &format!("{sid}/1"), depth + 1));
                 return out;
             }
         }
-        if dist > 16.0 && depth < 2 && r.chance(0.75) {
+        if dist > if role == Role::Core { 10.0 } else { 14.0 } && depth < max_depth && r.chance(0.85) {
             let level = ((a.level + b.level) as f32 * 0.5).round() as i32 + r.int(-1, 1);
             let level = level.clamp(0, NY - 3);
-            let (w, d) = (r.int(2, 4), r.int(2, 4));
-            let h = if r.chance(0.4) { 2 } else { 1 };
-            if let Some(bx) = self.place_near(mx, mz, w, d, level, level + h, false) {
+            let style = r.int(0, 2) as u8;
+            let (w, d) = if style == 1 { (3, 3) } else { (r.int(2, 4), r.int(2, 4)) };
+            let h = if style == 1 || r.chance(0.4) { 2 } else { 1 };
+            if let Some(mut bx) = self.place_near(mx, mz, w, d, level, level + h, false) {
+                // A crossing with a lantern: open to the sky if the cells above are free.
+                let mut lantern = false;
+                if style == 1 {
+                    let up = CBox::new(bx.x0, bx.x1, bx.y1, NY, bx.z0, bx.z1);
+                    if up.y0 < NY && self.grid.box_free(&up, 1, false) {
+                        bx.y1 = NY;
+                        lantern = true;
+                    }
+                }
                 let s = self.space(&format!("{sid}/junction"), SpaceKind::Junction, role, level);
-                self.add_room(s, bx, 0.4, false);
+                let ri = self.add_room(s, bx, 0.4, lantern);
+                self.rooms[ri].style = style;
                 let mut out = vec![s];
                 out.extend(self.arc(a, End { space: s, level }, role, &format!("{sid}/0"), depth + 1));
                 out.extend(self.arc(End { space: s, level }, b, role, &format!("{sid}/1"), depth + 1));
                 return out;
+            }
+        }
+        // An antechamber before the door of a great space.
+        for (great, other, first) in [(a, b, true), (b, a, false)] {
+            let gk = self.g.spaces[great.space].kind;
+            if !gk.is_great() || !r.chance(0.6) {
+                continue;
+            }
+            let Some(ri) = self.room_of[great.space] else { continue };
+            let gb = self.rooms[ri].b;
+            let (gx, gz) = gb.centre_xz();
+            let (ox, oz) = self.pos(other.space);
+            let len = (ox - gx).hypot(oz - gz).max(1.0);
+            let (dx, dz) = ((ox - gx) / len, (oz - gz) / len);
+            let mut tt = 0.0;
+            while gb.contains(Cell::new((gx + dx * tt) as i32, great.level, (gz + dz * tt) as i32)) {
+                tt += 1.0;
+            }
+            let (tx, tz) = (gx + dx * (tt + 3.0), gz + dz * (tt + 3.0));
+            let (w, d) = if dx.abs() > dz.abs() { (2, 3) } else { (3, 2) };
+            let h = if r.chance(0.5) { 2 } else { 1 };
+            if let Some(bx) = self.place_near(tx, tz, w, d, great.level, (great.level + h).min(NY), false) {
+                let s = self.space(&format!("{sid}/ante"), SpaceKind::Antechamber, role, great.level);
+                self.add_room(s, bx, 0.4, false);
+                let ae = End { space: s, level: great.level };
+                self.passage(great, ae, SpaceKind::Corridor, role, &format!("{sid}/ante"));
+                if first {
+                    let mut out = vec![s];
+                    out.extend(self.arc(ae, other, role, &format!("{sid}/a"), max_depth));
+                    return out;
+                } else {
+                    let mut out = vec![s];
+                    out.extend(self.arc(other, ae, role, &format!("{sid}/a"), max_depth));
+                    return out;
+                }
             }
         }
         let kind = if r.chance(0.6) { SpaceKind::Corridor } else { SpaceKind::ServicePassage };
@@ -476,7 +665,13 @@ impl Builder {
 
     fn passage(&mut self, a: End, b: End, kind: SpaceKind, role: Role, sid: &str) -> usize {
         let s = self.space(&format!("{sid}/passage"), kind, role, a.level.min(b.level));
-        self.jobs.push(Job { space: s, a, b });
+        let mut r = Rng::for_id(self.seed, &format!("{sid}/style"), layer::GRAPH);
+        let style = if kind == SpaceKind::Corridor {
+            *r.pick(&[PassStyle::Plain, PassStyle::Vaulted, PassStyle::Vaulted, PassStyle::Colonnade, PassStyle::Colonnade, PassStyle::Slot, PassStyle::Low, PassStyle::Gallery, PassStyle::Gallery])
+        } else {
+            *r.pick(&[PassStyle::Duct, PassStyle::Duct, PassStyle::Service])
+        };
+        self.jobs.push(Job { space: s, style, a, b });
         s
     }
 
@@ -500,13 +695,15 @@ impl Builder {
                 }
                 out.push((r.b.outside(l.side, l.level, u), l.side.opposite()));
             }
-        } else if let Some(g) = self.gallery.filter(|g| g.space == e.space) {
-            let r = &self.rooms[g.hall];
-            let (u0, u1) = r.b.side_cells(g.side);
-            for u in u0..u1 {
-                let (c0, c1) = (u as f32 * CELL, (u + 1) as f32 * CELL);
-                if c0 >= g.z0 + 1.0 && c1 <= g.z1 - 1.0 {
-                    out.push((r.b.outside(g.side, g.level, u), g.side.opposite()));
+        } else if let Some(up) = self.uppers.iter().find(|u| u.space == e.space) {
+            let r = &self.rooms[up.room];
+            for &(d, a0, a1) in &up.sides {
+                let (u0, u1) = r.b.side_cells(d);
+                for u in u0..u1 {
+                    let (c0, c1) = (u as f32 * CELL, (u + 1) as f32 * CELL);
+                    if c0 >= a0 + 0.5 && c1 <= a1 - 0.5 {
+                        out.push((r.b.outside(d, up.level, u), d.opposite()));
+                    }
                 }
             }
         } else if let Some(ri) = self.room_of[e.space] {
@@ -535,8 +732,16 @@ impl Builder {
                     if sp.kind == SpaceKind::GreatHall && (d == Dir::ZP || d == Dir::ZN || Some(d) == self.gallery.map(|g| g.side)) {
                         continue;
                     }
+                    // Not on the ends of the stair hall's long axis below its landing.
+                    if sp.kind == SpaceKind::StairHall && d.is_x() && ((d == Dir::XP) == (r.style == 0)) {
+                        continue;
+                    }
                     let (u0, u1) = r.b.side_cells(d);
-                    let (a, b) = if u1 - u0 >= 3 { (u0 + 1, u1 - 1) } else { (u0, u1) };
+                    let (a, mut b) = if u1 - u0 >= 3 { (u0 + 1, u1 - 1) } else { (u0, u1) };
+                    // Into the great hall only at its far end, so the route walks its length.
+                    if sp.kind == SpaceKind::GreatHall {
+                        b = b.min(u0 + (u1 - u0) / 3);
+                    }
                     for u in a..b {
                         out.push((r.b.outside(d, e.level, u), d.opposite()));
                     }
@@ -561,16 +766,16 @@ impl Builder {
 
     fn link_kind(&self, passage: SpaceKind, target: usize) -> LinkKind {
         match self.g.spaces[target].kind {
-            SpaceKind::GreatHall | SpaceKind::HallGallery | SpaceKind::StairTower => LinkKind::Doorway,
+            SpaceKind::GreatHall | SpaceKind::HallGallery | SpaceKind::StairTower | SpaceKind::StairHall | SpaceKind::StairLanding | SpaceKind::Cistern => LinkKind::Doorway,
             _ if passage == SpaceKind::ServicePassage => LinkKind::Doorway,
             _ => LinkKind::Opening,
         }
     }
 
     fn route_job(&mut self, k: usize) -> Result<(), String> {
-        let (space, a, b) = {
+        let (space, style, a, b) = {
             let j = &self.jobs[k];
-            (j.space, j.a, j.b)
+            (j.space, j.style, j.a, j.b)
         };
         let kind = self.g.spaces[space].kind;
         let starts = self.candidates(a);
@@ -631,7 +836,7 @@ impl Builder {
         ];
         self.g.link(space, a.space, ends[0].link, self.g.spaces[space].role);
         self.g.link(space, b.space, ends[1].link, self.g.spaces[space].role);
-        self.passages.push(Passage { space, kind, path, ends });
+        self.passages.push(Passage { space, kind, style, path, ends });
         Ok(())
     }
 }
@@ -776,7 +981,7 @@ pub fn plan(seed: u64) -> Plan {
 
 fn try_plan(seed: u64) -> Result<Plan, String> {
     let d = Director::new(seed);
-    let mut b = Builder { seed, g: SpaceGraph::default(), grid: Grid::new(), rooms: Vec::new(), room_of: Vec::new(), ledges: Vec::new(), ledge_of: Vec::new(), jobs: Vec::new(), passages: Vec::new(), gallery: None };
+    let mut b = Builder { seed, g: SpaceGraph::default(), grid: Grid::new(), rooms: Vec::new(), room_of: Vec::new(), ledges: Vec::new(), ledge_of: Vec::new(), jobs: Vec::new(), passages: Vec::new(), gallery: None, uppers: Vec::new(), towers: Vec::new() };
 
     // --- Set pieces. -------------------------------------------------------------------------
     let void = b.space("void", SpaceKind::Void, Role::Container, 0);
@@ -790,6 +995,24 @@ fn try_plan(seed: u64) -> Result<Plan, String> {
     b.add_room(under, d.under, 0.5, false);
     let well = b.space("well", SpaceKind::LightWell, Role::Container, d.well.y0);
     b.add_room(well, d.well, 0.5, true);
+    let cistern = b.space("cistern", SpaceKind::Cistern, Role::Core, d.cistern.y0);
+    b.g.spaces[cistern].set_piece = Some("the cistern");
+    let cistern_room = b.add_room(cistern, d.cistern, 0.6, false);
+    let walkway = d.cistern.y0 + 2;
+    let sh = b.space("stair-hall", SpaceKind::StairHall, Role::Core, d.stair_hall.y0);
+    b.g.spaces[sh].set_piece = Some("the stair hall");
+    let sh_room = b.add_room(sh, d.stair_hall, 1.0, false);
+    b.rooms[sh_room].style = d.sh_style;
+    let cleft = b.space("cleft", SpaceKind::LightWell, Role::Container, d.cleft.y0);
+    b.g.spaces[cleft].set_piece = Some("the cleft");
+    b.add_room(cleft, d.cleft, 0.5, true);
+    for (i, sb) in d.shafts.iter().enumerate() {
+        if b.grid.box_free(sb, 0, false) {
+            let s = b.space(&format!("shaft/{i}"), SpaceKind::Shaft, Role::Container, sb.y0);
+            b.add_room(s, *sb, 0.5, true);
+        }
+    }
+    let _ = cistern_room;
     // The thickness of the arch: the row of cells between the hall and the void.
     b.grid.fill(&CBox::new(d.hall.x0, d.hall.x1, d.hall.y0, d.hall.y1, d.void.z0 - 1, d.void.z0), Occ::Reserved);
 
@@ -859,18 +1082,70 @@ fn try_plan(seed: u64) -> Result<Plan, String> {
         let z0 = z1 - (hr.face(Dir::ZP) - hr.face(Dir::ZN)) * 0.42;
         let stair_len = hall_stair_run();
         b.gallery = Some(GallerySpec { space: gal, hall: hall_room, side: d.gallery_side, level: d.fh + 3, z0, z1, depth: 5.0, stair_foot: z0 - stair_len });
+        b.uppers.push(Upper { space: gal, room: hall_room, level: d.fh + 3, sides: vec![(d.gallery_side, z0, z1)] });
     }
 
-    // --- The core cycle, rewritten arc by arc. --------------------------------------------
+    // The stair hall's landing across its far end, three storeys up.
+    let shr = b.rooms[sh_room];
+    let landing = b.space("stair-hall/landing", SpaceKind::StairLanding, Role::Core, d.stair_hall.y0 + 3);
+    b.g.spaces[landing].parent = Some(sh);
+    b.g.link(sh, landing, LinkKind::HallStair, Role::Core);
+    let stair_hall_spec = {
+        let dir = if d.sh_style == 0 { 1.0 } else { -1.0 };
+        let (x0, x1) = (shr.face(Dir::XN), shr.face(Dir::XP));
+        let end = if dir > 0.0 { x1 } else { x0 };
+        let landing_edge = end - dir * 8.0;
+        let run = 3.0 * RISERS_PER_LEVEL as f32 * crate::kit::STAIR_RUN + 3.0 * 2.5;
+        let foot = landing_edge - dir * run;
+        let (z0, z1) = (shr.face(Dir::ZN), shr.face(Dir::ZP));
+        let (ua, ub) = if dir > 0.0 { (landing_edge, x1) } else { (x0, landing_edge) };
+        let end_side = if dir > 0.0 { Dir::XP } else { Dir::XN };
+        b.uppers.push(Upper { space: landing, room: sh_room, level: d.stair_hall.y0 + 3, sides: vec![(end_side, z0, z1), (Dir::ZN, ua, ub)] });
+        StairHallSpec { room: sh_room, landing, dir, foot, landing_edge, levels: 3 }
+    };
+
+    // The cleft: two pairs of ledges facing across it, each with a bridge.
+    let clr = b.rooms[b.room_of[cleft].unwrap()];
+    let (cz0, cz1) = clr.side_span(Dir::XN);
+    let mut cleft_ledges = Vec::new();
+    for (k, &lv) in d.kc.iter().enumerate() {
+        let role = if k == 0 { Role::Core } else { Role::Loop };
+        let la_ = b.add_ledge(&format!("cleft/ledge/{k}a"), role, cleft, Dir::XN, lv, 3.0);
+        let lb_ = b.add_ledge(&format!("cleft/ledge/{k}b"), role, cleft, Dir::XP, lv, 3.0);
+        b.g.link(la_, lb_, LinkKind::Bridge, role);
+        let u = cz0 + (cz1 - cz0) * if k == 0 { 0.35 } else { 0.65 };
+        let u = ((u / CELL).floor() + 0.5) * CELL;
+        bridges.push(BridgeSpec { a: b.ledge_of[la_].unwrap(), b: b.ledge_of[lb_].unwrap(), u, width: if k == 0 { 3.6 } else { 2.8 }, railings: k == 0, girder: k == 0 });
+        if k == 1 {
+            for l in [la_, lb_] {
+                let li = b.ledge_of[l].unwrap();
+                b.ledges[li].rail = Rail::Broken;
+            }
+        }
+        cleft_ledges.push((la_, lb_, lv));
+    }
+
+    // --- The core cycle through every set piece, rewritten arc by arc. --------------------
     let e = |s: usize, l: i32| End { space: s, level: l };
-    let a1 = b.arc(e(ls, d.ks), e(hall, d.fh), Role::Core, "core/a1", 0);
-    let a2 = b.arc(e(lf, d.fh), e(under, 0), Role::Core, "core/a2", 0);
-    let a3 = b.arc(e(under, 0), e(wa, d.kw), Role::Core, "core/a3", 0);
-    let a4 = b.arc(e(wb, d.kw), e(ls, d.ks), Role::Core, "core/a4", 0);
+    let shy = d.stair_hall.y0;
+    let (ca, cb, ckv) = cleft_ledges[0];
+    let arcs: Vec<Vec<usize>> = vec![
+        b.arc(e(ls, d.ks), e(hall, d.fh), Role::Core, "core/a1", 0),
+        b.arc(e(lf, d.fh), e(under, 0), Role::Core, "core/a2", 0),
+        b.arc(e(under, 0), e(cistern, walkway), Role::Core, "core/a3", 0),
+        b.arc(e(cistern, walkway), e(sh, shy), Role::Core, "core/a4", 0),
+        b.arc(e(landing, shy + 3), e(cb, ckv), Role::Core, "core/a5", 0),
+        b.arc(e(ca, ckv), e(wb, d.kw), Role::Core, "core/a6", 0),
+        b.arc(e(wa, d.kw), e(ls, d.ks), Role::Core, "core/a7", 0),
+    ];
 
     // --- Loops. ----------------------------------------------------------------------------
     let mut r = Rng::for_id(seed, "loops", layer::GRAPH);
     let pick_end = |b: &Builder, r: &mut Rng, list: &[usize], fallback: End, level_near: i32| -> End {
+        // Prefer rooms with few passages already, so their doors do not run out.
+        let uses = |s: usize| b.jobs.iter().filter(|j| j.a.space == s || j.b.space == s).count();
+        let free: Vec<usize> = list.iter().copied().filter(|&s| uses(s) < if b.g.spaces[s].kind == SpaceKind::StairTower { 4 } else { 3 }).collect();
+        let list = if free.is_empty() { list } else { &free[..] };
         if list.is_empty() {
             return fallback;
         }
@@ -884,18 +1159,36 @@ fn try_plan(seed: u64) -> Result<Plan, String> {
         };
         End { space: s, level }
     };
-    // Loop 1: from the descent towards the undercroft, up the void wall stair, back to the
-    // climb from the light well.
-    let x = pick_end(&b, &mut r, &[a2.as_slice(), a3.as_slice()].concat(), e(under, 0), d.k1);
+    let rooms_of = |ix: &[usize]| -> Vec<usize> { ix.iter().flat_map(|&i| arcs[i].iter().copied()).collect() };
+    // The void's wall stair, between the descent and the climb.
+    let x = pick_end(&b, &mut r, &rooms_of(&[1, 2]), e(under, 0), d.k1);
     b.arc(x, e(l1, d.k1), Role::Loop, "loop/stair-low", 1);
-    let y = pick_end(&b, &mut r, &[a4.as_slice(), a1.as_slice()].concat(), e(ls, d.ks), d.k1 + 2);
+    let y = pick_end(&b, &mut r, &rooms_of(&[0, 6]), e(ls, d.ks), d.k1 + 2);
     b.arc(e(l2, d.k1 + 2), y, Role::Loop, "loop/stair-high", 1);
-    // Loop 2: the hall's gallery out to the climb or the descent.
-    let z = pick_end(&b, &mut r, &[a4.as_slice(), a1.as_slice(), a3.as_slice()].concat(), e(ls, d.ks), d.fh + 3);
+    // The hall's gallery.
+    let z = pick_end(&b, &mut r, &rooms_of(&[6, 5, 1]), e(ls, d.ks), d.fh + 3);
     b.arc(e(gal, d.fh + 3), z, Role::Loop, "loop/gallery", 1);
+    // The cleft's upper bridge.
+    let (ua, ub, ukv) = cleft_ledges[1];
+    let p1 = pick_end(&b, &mut r, &rooms_of(&[5, 4]), e(landing, shy + 3), ukv);
+    b.arc(p1, e(ub, ukv), Role::Loop, "loop/cleft-high-b", 1);
+    let p2 = pick_end(&b, &mut r, &rooms_of(&[6, 5]), e(wa, d.kw), ukv);
+    b.arc(e(ua, ukv), p2, Role::Loop, "loop/cleft-high-a", 1);
+    // Chords across the middle, between arcs on opposite sides of the cycle.
+    for (k, (i, j)) in [(0usize, 3usize), (1, 5), (2, 6), (4, 0)].into_iter().enumerate() {
+        let (li, lj) = (rooms_of(&[i]), rooms_of(&[j]));
+        if li.is_empty() || lj.is_empty() {
+            continue;
+        }
+        let a = pick_end(&b, &mut r, &li, e(hall, d.fh), d.fh);
+        let c = pick_end(&b, &mut r, &lj, e(hall, d.fh), a.level);
+        b.arc(a, c, Role::Loop, &format!("loop/chord{k}"), 1);
+    }
 
     // --- Spurs. ----------------------------------------------------------------------------
-    let all_rooms: Vec<usize> = [a1.as_slice(), a2.as_slice(), a3.as_slice(), a4.as_slice()].concat();
+    let all_rooms: Vec<usize> = arcs.concat();
+    let a1 = arcs[0].clone();
+    let _ = a1;
     // The overlook: a small ledge high on the void, railing broken.
     let lo = b.add_ledge("void/ledge/overlook", Role::Spur, void, d.look_side, d.ko, 3.0);
     {
@@ -1039,6 +1332,7 @@ fn try_plan(seed: u64) -> Result<Plan, String> {
     let gallery = b.gallery.unwrap();
     let spawn_li = b.ledge_of[ls].unwrap();
     let portals = make_portals(&b, &arch);
+    let uppers = std::mem::take(&mut b.uppers);
     let mut plan = Plan {
         seed,
         attempts: 1,
@@ -1052,10 +1346,14 @@ fn try_plan(seed: u64) -> Result<Plan, String> {
         wall_stairs,
         arch,
         gallery,
+        uppers: Vec::new(),
+        stair_hall: Some(stair_hall_spec),
+        views: Vec::new(),
         portals,
         spawn: (Vec3::ZERO, 0.0),
         spawn_space: ls,
     };
+    plan.uppers = uppers;
     set_anchors(&mut plan);
     // Spawn: on the spawn ledge in front of its door, looking across the void (-z).
     let l = &plan.ledges[spawn_li];
@@ -1064,8 +1362,149 @@ fn try_plan(seed: u64) -> Result<Plan, String> {
     let face = r.face(l.side);
     let eye = Vec3::new((door.x as f32 + 0.5) * CELL, l.level as f32 * LEVEL + 1.65, face - 1.6);
     plan.spawn = (eye, std::f32::consts::PI);
+    plan.views = director_views(&plan, ls, lf, la);
     Ok(plan)
 }
+
+/// A named camera at a landmark of the plan, for capture paths: eye, yaw (0 along +z,
+/// positive towards +x) and pitch, radians.
+#[derive(Clone, Copy, Debug)]
+pub struct Landmark {
+    pub name: &'static str,
+    pub eye: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+impl Plan {
+    /// Cameras at the set pieces, computed from the plan so they follow the generator when it
+    /// changes. Camera paths in the render crate can be built on these instead of fixed
+    /// coordinates.
+    pub fn landmarks(&self) -> Vec<Landmark> {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        let mut out = Vec::new();
+        let a = &self.arch;
+        let hall = &self.rooms[a.hall];
+        let void = &self.rooms[a.void];
+        let fy = hall.floor_y() + 1.65;
+        out.push(Landmark { name: "spawn", eye: self.spawn.0, yaw: self.spawn.1, pitch: -0.15 });
+        out.push(Landmark { name: "far_ledge_axis", eye: Vec3::new(a.x, fy, void.face(Dir::ZP) - 1.5), yaw: PI, pitch: 0.1 });
+        out.push(Landmark { name: "hall_from_arch", eye: Vec3::new(a.x, fy, hall.face(Dir::ZP) - 5.0), yaw: PI, pitch: 0.15 });
+        out.push(Landmark { name: "hall_exterior_end", eye: Vec3::new(a.x + 4.0, fy, hall.face(Dir::ZN) + 7.0), yaw: 0.0, pitch: 0.2 });
+        let vc = (void.inner_min() + void.inner_max()) * 0.5;
+        out.push(Landmark { name: "void_bottom_up", eye: Vec3::new(vc.x, void.floor_y() + 1.65, vc.z), yaw: 0.3, pitch: 1.1 });
+        if let Some(sh) = self.stair_hall {
+            let r = &self.rooms[sh.room];
+            let zc = (r.face(Dir::ZN) + r.face(Dir::ZP)) * 0.5 + 6.0;
+            let start = if sh.dir > 0.0 { r.face(Dir::XN) + 3.0 } else { r.face(Dir::XP) - 3.0 };
+            let up = if sh.dir > 0.0 { FRAC_PI_2 } else { -FRAC_PI_2 };
+            out.push(Landmark { name: "stair_hall_foot", eye: Vec3::new(start, r.floor_y() + 1.65, zc), yaw: up, pitch: 0.25 });
+            let yl = (r.b.y0 + sh.levels) as f32 * LEVEL + 1.65;
+            out.push(Landmark { name: "stair_hall_landing", eye: Vec3::new(sh.landing_edge + sh.dir * 2.0, yl, zc), yaw: -up, pitch: -0.25 });
+        }
+        if let Some(c) = self.rooms.iter().find(|r| r.kind == SpaceKind::Cistern) {
+            let (foot, _) = cistern_stair(c);
+            out.push(Landmark { name: "cistern_basin", eye: foot + Vec3::new(0.0, 1.65, -2.5), yaw: 0.6, pitch: 0.35 });
+            out.push(Landmark { name: "cistern_walkway", eye: c.inner_min() + Vec3::new(2.5, (2 * LEVEL as i32) as f32 + 1.65, 2.5), yaw: 0.785, pitch: -0.3 });
+        }
+        if let Some(u) = self.rooms.iter().find(|r| r.kind == SpaceKind::Undercroft) {
+            if let Some(sh) = self.rooms.iter().find(|s| s.kind == SpaceKind::Shaft && s.b.y0 == u.b.y1) {
+                let c = (sh.inner_min() + sh.inner_max()) * 0.5;
+                let eye = Vec3::new(c.x - 7.0, u.floor_y() + 1.65, c.z - 10.0);
+                out.push(Landmark { name: "undercroft_shaft", eye, yaw: 0.61, pitch: -0.2 });
+                out.push(Landmark { name: "shaft_up", eye: Vec3::new(c.x, u.floor_y() + 1.65, c.z), yaw: 0.0, pitch: 1.4 });
+            }
+        }
+        for l in self.ledges.iter().filter(|l| self.graph.spaces[l.space].sid.starts_with("cleft/ledge/0a")) {
+            let r = &self.rooms[l.room];
+            out.push(Landmark { name: "cleft", eye: Vec3::new(r.face(l.side) + 1.5, l.level as f32 * LEVEL + 1.65, l.span.0 + 2.0), yaw: 0.0, pitch: 0.2 });
+        }
+        for l in self.ledges.iter().filter(|l| self.graph.spaces[l.space].sid == "well/ledge/a") {
+            let r = &self.rooms[l.room];
+            let z = self.bridges.iter().find(|b| self.ledges[b.a].space == l.space).map(|b| b.u).unwrap_or((l.span.0 + l.span.1) * 0.5);
+            out.push(Landmark { name: "well_bridge", eye: Vec3::new(r.face(l.side) + 2.0, l.level as f32 * LEVEL + 1.65, z), yaw: FRAC_PI_2, pitch: -0.1 });
+        }
+        if let Some(j) = self.rooms.iter().find(|r| r.kind == SpaceKind::Junction && r.open_top) {
+            out.push(Landmark { name: "lantern_crossing", eye: j.inner_min() + Vec3::new(1.6, 1.65, 1.6), yaw: 0.78, pitch: 0.9 });
+        }
+        // One passage of each section, from its middle along its course.
+        let mut seen = Vec::new();
+        for pass in &self.passages {
+            if seen.contains(&pass.style) {
+                continue;
+            }
+            let f: Vec<Cell> = pass.flats().collect();
+            let k = f.len() / 2;
+            let (Some(&c), Some(&n)) = (f.get(k), f.get(k + 1)) else { continue };
+            if n.y != c.y || (n.x - c.x).abs() + (n.z - c.z).abs() != 1 {
+                continue;
+            }
+            seen.push(pass.style);
+            let eye = c.floor_centre() + Vec3::Y * 1.65;
+            let yaw = ((n.x - c.x) as f32).atan2((n.z - c.z) as f32);
+            let name = match pass.style {
+                PassStyle::Plain => "corridor_plain",
+                PassStyle::Vaulted => "corridor_vaulted",
+                PassStyle::Colonnade => "corridor_colonnade",
+                PassStyle::Slot => "corridor_slot",
+                PassStyle::Low => "corridor_low",
+                PassStyle::Gallery => "corridor_gallery",
+                PassStyle::Duct => "duct",
+                PassStyle::Service => "service",
+            };
+            out.push(Landmark { name, eye, yaw, pitch: 0.05 });
+        }
+        out
+    }
+}
+
+/// Sight lines the director keeps open (beams avoid them; a test raycasts them): along the
+/// arch axis from the far ledge's door into the hall, from the spawn down to the arch ledge,
+/// up the stair hall to its landing, and across the cleft from one bridge to the other.
+fn director_views(p: &Plan, spawn: usize, far: usize, arch_ledge: usize) -> Vec<View> {
+    let mut out = Vec::new();
+    let a = &p.arch;
+    let hall = &p.rooms[a.hall];
+    let void = &p.rooms[a.void];
+    let fy = hall.floor_y();
+    let lf = p.ledges.iter().find(|l| l.space == far).unwrap();
+    out.push(View { name: "far ledge through the arch to the hall's end", from: Vec3::new(a.x, fy + 1.65, void.face(lf.side) - 1.5), to: Vec3::new(a.x, fy + 6.0, hall.face(Dir::ZN) + 2.0) });
+    let la = p.ledges.iter().find(|l| l.space == arch_ledge).unwrap();
+    let ls = p.ledges.iter().find(|l| l.space == spawn).unwrap();
+    let edge = void.face(ls.side) - ls.side.sign() * (ls.depth - 0.4);
+    let from = Vec3::new(p.spawn.0.x, p.spawn.0.y, edge);
+    out.push(View { name: "from the spawn ledge's rail down to the arch ledge", from, to: Vec3::new(a.x, la.level as f32 * LEVEL + 1.0, void.face(Dir::ZN) + 3.0) });
+    if let Some(sh) = p.stair_hall {
+        let r = &p.rooms[sh.room];
+        let z = (r.face(Dir::ZN) + r.face(Dir::ZP)) * 0.5;
+        let yl = (r.b.y0 + sh.levels) as f32 * LEVEL;
+        out.push(View { name: "up the stair hall to its landing", from: Vec3::new(sh.foot - sh.dir * 3.0, r.floor_y() + 1.65, z), to: Vec3::new(sh.landing_edge + sh.dir * 3.0, yl + 1.65, z) });
+    }
+    // Across the cleft, bridge to bridge.
+    let cleft_bridges: Vec<&BridgeSpec> = p.bridges.iter().filter(|b| p.graph.spaces[p.ledges[b.a].space].sid.starts_with("cleft")).collect();
+    if cleft_bridges.len() == 2 {
+        let mid = |b: &BridgeSpec| {
+            let l = &p.ledges[b.a];
+            let r = &p.rooms[l.room];
+            let x = (r.face(Dir::XN) + r.face(Dir::XP)) * 0.5;
+            Vec3::new(x, l.level as f32 * LEVEL + 1.65, b.u)
+        };
+        // To the underside of the upper bridge's deck.
+        out.push(View { name: "across the cleft, up to the other bridge", from: mid(cleft_bridges[0]), to: mid(cleft_bridges[1]) - Vec3::Y * 2.9 });
+    }
+    out
+}
+
+/// The cistern's stair from the basin floor up to the walkway: (foot, direction), free
+/// standing just inside the west walkway's edge, climbing two storeys towards +z.
+pub fn cistern_stair(r: &Room) -> (Vec3, Vec3) {
+    let x = r.face(Dir::XN) + CISTERN_WALK + 0.9;
+    let z = r.face(Dir::ZP) - CISTERN_WALK - wall_stair_run(2);
+    (Vec3::new(x, r.floor_y(), z), Vec3::Z)
+}
+
+/// Depth of the cistern's walkway from its walls.
+pub const CISTERN_WALK: f32 = 4.5;
 
 /// Horizontal run of a wall stair climbing `levels` storeys: flights of 24 risers with 1.2 m
 /// landings.
@@ -1082,12 +1521,28 @@ pub fn hall_stair_run() -> f32 {
     risers as f32 * crate::kit::STAIR_RUN + (flights - 1) as f32 * 2.0
 }
 
-fn portal_size(link: LinkKind, kind: SpaceKind, target: SpaceKind) -> (f32, f32) {
+fn portal_size(link: LinkKind, kind: SpaceKind, style: PassStyle, target: SpaceKind) -> (f32, f32) {
+    let h = style.height() - 0.4;
     match (link, kind) {
-        (LinkKind::Opening, _) => (CELL - 2.0 * passage_inset(kind), 4.4),
+        (LinkKind::Opening, _) => (CELL - 2.0 * style.inset(), 4.4f32.min(h)),
         (_, SpaceKind::ServicePassage) => (crate::kit::DOOR_WIDTH, crate::kit::DOOR_HEIGHT),
-        _ if target == SpaceKind::StairTower => (1.6, 2.8),
-        _ => (1.8, 3.2),
+        _ if target == SpaceKind::StairTower => (1.6, 2.8f32.min(h)),
+        _ if target.is_great() => (2.2, 3.6f32.min(h)),
+        _ => (1.8, 3.2f32.min(h)),
+    }
+}
+
+/// How heavy a door's frame is, by what it leads into.
+fn frame_weight(link: LinkKind, kind: SpaceKind, target: SpaceKind) -> u8 {
+    if link == LinkKind::Opening {
+        return 0;
+    }
+    if target.is_great() || matches!(target, SpaceKind::HallGallery | SpaceKind::StairLanding) {
+        3
+    } else if kind == SpaceKind::ServicePassage {
+        1
+    } else {
+        2
     }
 }
 
@@ -1102,15 +1557,17 @@ fn make_portals(b: &Builder, _arch: &ArchSpec) -> Vec<Portal> {
             let l = &b.ledges[li];
             return b.rooms[l.room].face(l.side);
         }
-        if let Some(g) = b.gallery.filter(|g| g.space == target) {
-            return b.rooms[g.hall].face(g.side);
+        if let Some(u) = b.uppers.iter().find(|u| u.space == target) {
+            let d = u.sides.iter().map(|s| s.0).find(|&d| d == side).unwrap_or(u.sides[0].0);
+            return b.rooms[u.room].face(d);
         }
         b.rooms[b.room_of[target].unwrap()].face(side)
     };
     for p in &b.passages {
         let t = p.inset();
         for pe in &p.ends {
-            let (w, h) = portal_size(pe.link, p.kind, b.g.spaces[pe.target].kind);
+            let (w, h) = portal_size(pe.link, p.kind, p.style, b.g.spaces[pe.target].kind);
+            let frame = frame_weight(pe.link, p.kind, b.g.spaces[pe.target].kind);
             let c = pe.cell;
             let own = if pe.dir.sign() > 0.0 { if pe.dir.is_x() { (c.x + 1) as f32 * CELL - t } else { (c.z + 1) as f32 * CELL - t } } else if pe.dir.is_x() { c.x as f32 * CELL + t } else { c.z as f32 * CELL + t };
             let other = face_of(pe.target, pe.dir);
@@ -1127,6 +1584,7 @@ fn make_portals(b: &Builder, _arch: &ArchSpec) -> Vec<Portal> {
                 y1: y0 + h,
                 between: if pe.dir.sign() > 0.0 { [Some(p.space), Some(pe.target)] } else { [Some(pe.target), Some(p.space)] },
                 walk: true,
+                frame,
             });
         }
         // Windows on unconnected sides of flat cells.
@@ -1151,7 +1609,7 @@ fn make_portals(b: &Builder, _arch: &ArchSpec) -> Vec<Portal> {
                 if !n.in_bounds() && n.y >= 0 && n.y < NY {
                     if roll < 0.5 {
                         let skin = if d.sign() > 0.0 { b_plane(c, d) + SKIN } else { b_plane(c, d) - SKIN };
-                        out.push(Portal { kind: PortalKind::Exterior, x_plane: d.is_x(), p0: own.min(skin), p1: own.max(skin), u0: um - 0.7, u1: um + 0.7, y0, y1: (y0 + 3.0).min(top), between: if d.sign() > 0.0 { [Some(p.space), None] } else { [None, Some(p.space)] }, walk: false });
+                        out.push(Portal { kind: PortalKind::Exterior, x_plane: d.is_x(), p0: own.min(skin), p1: own.max(skin), u0: um - 0.7, u1: um + 0.7, y0, y1: (y0 + 3.0).min(top), between: if d.sign() > 0.0 { [Some(p.space), None] } else { [None, Some(p.space)] }, walk: false, frame: 0 });
                     }
                     continue;
                 }
@@ -1160,14 +1618,16 @@ fn make_portals(b: &Builder, _arch: &ArchSpec) -> Vec<Portal> {
                     let kind = b.g.spaces[s].kind;
                     let Some(ri) = b.room_of[s] else { continue };
                     let room = &b.rooms[ri];
+                    let gal = p.style == PassStyle::Gallery;
                     let ok = match kind {
-                        SpaceKind::Void | SpaceKind::LightWell => roll < 0.75 && !wall_stair_zone(b, ri, d.opposite(), um, c.y),
-                        SpaceKind::GreatHall => roll < 0.6 && c.y > room.b.y0 && (c.y as f32 * LEVEL + 3.5) < room.ceiling_y(),
+                        SpaceKind::Void | SpaceKind::LightWell => (gal || roll < 0.75) && !wall_stair_zone(b, ri, d.opposite(), um, c.y),
+                        SpaceKind::GreatHall | SpaceKind::StairHall | SpaceKind::Cistern => (gal || roll < 0.6) && c.y > room.b.y0 && (c.y as f32 * LEVEL + 4.5) < room.ceiling_y(),
                         _ => false,
                     };
                     if ok {
                         let other = room.face(d.opposite());
-                        out.push(Portal { kind: PortalKind::Window, x_plane: d.is_x(), p0: own.min(other), p1: own.max(other), u0: um - 0.5, u1: um + 0.5, y0, y1: (y0 + 2.4).min(top), between: if d.sign() > 0.0 { [Some(p.space), Some(s)] } else { [Some(s), Some(p.space)] }, walk: false });
+                        let (hw, wy0, wy1) = if p.style == PassStyle::Gallery { (1.5, c.y as f32 * LEVEL + 1.0, (c.y as f32 * LEVEL + 4.4).min(top)) } else { (0.5, y0, (y0 + 2.4).min(top)) };
+                        out.push(Portal { kind: PortalKind::Window, x_plane: d.is_x(), p0: own.min(other), p1: own.max(other), u0: um - hw, u1: um + hw, y0: wy0, y1: wy1, between: if d.sign() > 0.0 { [Some(p.space), Some(s)] } else { [Some(s), Some(p.space)] }, walk: false, frame: 0 });
                     }
                 }
             }
@@ -1190,7 +1650,7 @@ fn make_portals(b: &Builder, _arch: &ArchSpec) -> Vec<Portal> {
             let between = |s: usize| if d.sign() > 0.0 { [Some(s), None] } else { [None, Some(s)] };
             let (u0, u1) = r.side_span(d);
             match r.kind {
-                SpaceKind::GreatHall => {
+                SpaceKind::GreatHall | SpaceKind::StairHall => {
                     // Tall slots in the exterior end, the sun's way in.
                     let n = ((u1 - u0) / 9.0).floor().max(3.0) as usize;
                     let pitch = (u1 - u0) / n as f32;
@@ -1199,7 +1659,7 @@ fn make_portals(b: &Builder, _arch: &ArchSpec) -> Vec<Portal> {
                         let w = if k == n / 2 { 4.0 } else { 2.4 };
                         let y0 = r.floor_y() + rng.range(5.0, 7.0);
                         let y1 = r.ceiling_y() - rng.range(3.0, 6.0);
-                        out.push(Portal { kind: PortalKind::Exterior, x_plane: d.is_x(), p0: face.min(skin), p1: face.max(skin), u0: um - w * 0.5, u1: um + w * 0.5, y0, y1, between: between(r.space), walk: false });
+                        out.push(Portal { kind: PortalKind::Exterior, x_plane: d.is_x(), p0: face.min(skin), p1: face.max(skin), u0: um - w * 0.5, u1: um + w * 0.5, y0, y1, between: between(r.space), walk: false, frame: 0 });
                     }
                 }
                 SpaceKind::Loggia => {
@@ -1209,14 +1669,14 @@ fn make_portals(b: &Builder, _arch: &ArchSpec) -> Vec<Portal> {
                         let a = (u0 - r.inset) + k as f32 * CELL + 0.6;
                         let c = (u0 - r.inset) + (k + 1) as f32 * CELL - 0.6;
                         let (a, c) = (a.max(u0 + 0.2), c.min(u1 - 0.2));
-                        out.push(Portal { kind: PortalKind::Exterior, x_plane: d.is_x(), p0: face.min(skin), p1: face.max(skin), u0: a, u1: c, y0: r.floor_y(), y1: r.ceiling_y() - 1.8, between: between(r.space), walk: true });
+                        out.push(Portal { kind: PortalKind::Exterior, x_plane: d.is_x(), p0: face.min(skin), p1: face.max(skin), u0: a, u1: c, y0: r.floor_y(), y1: r.ceiling_y() - 1.8, between: between(r.space), walk: true, frame: 0 });
                     }
                 }
                 SpaceKind::StairTower | SpaceKind::Junction | SpaceKind::Chamber | SpaceKind::Undercroft => {
                     let um = (u0 + u1) * 0.5;
                     for y in r.b.y0..r.b.y1 {
                         let y0 = y as f32 * LEVEL + 1.6;
-                        out.push(Portal { kind: PortalKind::Exterior, x_plane: d.is_x(), p0: face.min(skin), p1: face.max(skin), u0: um - 0.6, u1: um + 0.6, y0, y1: y0 + 3.2, between: between(r.space), walk: false });
+                        out.push(Portal { kind: PortalKind::Exterior, x_plane: d.is_x(), p0: face.min(skin), p1: face.max(skin), u0: um - 0.6, u1: um + 0.6, y0, y1: y0 + 3.2, between: between(r.space), walk: false, frame: 0 });
                     }
                 }
                 _ => {}
@@ -1311,6 +1771,16 @@ fn set_anchors(p: &mut Plan) {
                         let c = (r.inner_min() + r.inner_max()) * 0.5;
                         anchors.push(Vec3::new(c.x, r.floor_y(), c.z));
                     }
+                    if r.kind == SpaceKind::StairHall {
+                        if let Some(sh) = p.stair_hall {
+                            let z = (r.face(Dir::ZN) + r.face(Dir::ZP)) * 0.5;
+                            anchors.push(Vec3::new(sh.foot - sh.dir * 3.0, r.floor_y(), z));
+                        }
+                    }
+                    if r.kind == SpaceKind::Cistern {
+                        // The basin floor, at the foot of its stair.
+                        anchors.push(cistern_stair(r).0 - Vec3::Z * 1.5);
+                    }
                 }
             }
         }
@@ -1331,6 +1801,12 @@ fn set_anchors(p: &mut Plan) {
             let x = face - g.side.sign() * g.depth * 0.5;
             let y = g.level as f32 * LEVEL;
             anchors.push(Vec3::new(x, y, (g.z0 + g.z1) * 0.5));
+        }
+        if let Some(sh) = p.stair_hall.filter(|sh| sh.landing == i) {
+            let r = &p.rooms[sh.room];
+            let x = sh.landing_edge + sh.dir * 4.0;
+            let y = (r.b.y0 + sh.levels) as f32 * LEVEL;
+            anchors.push(Vec3::new(x, y, (r.face(Dir::ZN) + r.face(Dir::ZP)) * 0.5 + 6.0));
         }
         if let Some(pass) = p.passages.iter().find(|q| q.space == i) {
             let flats: Vec<Cell> = pass.flats().collect();

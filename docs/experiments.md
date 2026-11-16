@@ -679,6 +679,46 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Also: the soft dark smudges around blocks on the void walls come from the baked per-vertex AO (generator side).
 - Verdict: darker as default. Question on the sheet: do the blacks accentuate the dark places the way manga does, without swallowing the drawing?
 
+## E205: The labyrinth, round 2
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md`
+- Question: the owner asked again for more geometry and more of a labyrinth, and found the surface detail of round 1 does real work. With a bigger region, three more set pieces, passage sections, a longer and more tangled core, sight lines and planned darkness, does the labyrinth hold up?
+- Setup: region 96 by 88 cells (384 by 352 m); cistern, stair hall, cleft, light shafts, lantern crossings, antechambers, eight passage sections, door frames, wall bands and paving (E206 to E209). Sheet `compare/E205-labyrinth-tour.png`: 18 views at 2560x1440 with the scene's own preset and sun, and the plan and section (full frames in `compare/E205-labyrinth-tour/`). Regenerate a view with `cargo run --release --bin mega_capture -- --scene labyrinth --camera <x,y,z,yaw,pitch,fov> --width 2560 --height 1440 --out <dir>`. Cameras: spawn `206,79.65,161.8,3.1416,-0.15,1.4`; far ledge `194,43.65,158,3.1416,0.1,1.4`; hall from the arch `194,43.65,106,3.1416,0.15,1.4`; hall's sunlit end `198,43.65,8,0,0.2,1.4`; void bottom `194,1.65,140,0.3,1.1,1.5`; undercroft pools `95,1.65,140,0.61,-0.2,1.4`; cistern basin `110,13.65,196,0.6,0.35,1.4`; cistern walkway `104,25.65,188,0.785,-0.3,1.4`; stair hall foot `228,19.65,342,-1.5708,0.25,1.4`; stair hall landing `171,37.65,342,1.5708,-0.25,1.4`; cleft `306,31.65,170,0,0.2,1.4`; lantern crossing `174,43.65,170,0.78,0.9,1.4`; vaulted `94,25.65,182,1.5708,0.05,1.3`; duct `158,25.65,294,0,0.05,1.3`; slot `178,25.65,234,-1.5708,0.1,1.3`; low `242,31.65,278,3.1416,0,1.3`; colonnade `286,31.65,270,-1.5708,0.05,1.3`; light well bridge `310.5,79.65,56,1.5708,-0.1,1.4`. `Plan::landmarks()` gives the same places from the plan.
+- Result: 108 spaces (102 walkable), cycle rank 7, core loop about 2.26 km (15 min at a walk). 412,826 triangles and 46,618 strokes (1.8 times the shaft's triangles); build 190 ms, bounce bake 1.95 s, 16.1 ms a frame at 1440p from the spawn with nothing culled. 100 seeds pass reachability and sight lines.
+- Verdict: kept. Question on the sheet: which spaces now feel like places, and which passages still feel like boxes?
+
+## E206: Passage sections
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("Passage sections")
+- Question: round 1's corridors were tall plain boxes, all alike. Can a handful of sections, one per passage, make a route change character so a walker knows which passage they are in?
+- Setup: `PassStyle` (plain, vaulted, colonnade, slot, low, gallery, duct, service) with its own width, height and members; vaults as smooth barrel surfaces with spandrel faces where they meet taller pieces; ducts with smooth pipes; closed doors along walls; door frames by weight; antechambers before great spaces. Tour views 13 to 17 of E205.
+- Result: vault, slot, low beams, colonnade piers and duct pipes read distinctly even in dark grey; the vault's spandrels close cleanly against stair halls. Gallery openings appear only where the passage runs beside a big space. Service passages come out as ducts most of the time.
+- Verdict: kept.
+
+## E207: A longer, more tangled core
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("The grammar")
+- Question: round 1's core loop was about 9.5 minutes with 3 independent cycles and towers clustered at the void. What gets it to 15 minutes and 6 or more cycles?
+- Setup: seven core arcs through every set piece; rewriting to depth 4 on the core; junctions placed up to 0.45 of the arc off its line; towers at least 12 cells apart; hall doors only at its far end (the route walks the hall's length); four chords between opposite arcs plus the cleft's upper bridge. `cargo test --release -p mega_gen -- --ignored --nocapture labyrinth_report` prints the estimate and the cycle rank.
+- Result: with depth 3 and the old offsets the loop was 11.5 min; depth 4 put junctions out of door cells (they had up to five passages), so chord ends now prefer rooms with few passages; then 15.1 min, cycle rank 7, mean 1.26 embedding attempts over 100 seeds.
+- Verdict: kept. The time is an estimate from the plan, not a measured walk.
+
+## E208: Sight lines in the director
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("Sight lines")
+- Question: can the director guarantee a few long views and views across voids, checked in collider space?
+- Setup: `Plan::views`, rays checked by `walk::World::ray_clear` (solids only, railings ignored) in a test and in the seed sweep; beams in voids rejected when they cross a view.
+- Result: three failures on the way, all fixed: the spawn-to-arch view started at the eye and dipped into the spawn ledge (now starts at its rail); the cleft view ended inside the upper bridge's deck (now ends at its underside); and on 4 of 100 seeds the axial view hit a hall column, because the arch could sit near a column row when the hall was off-centre on the void. The hall's column rows are now centred on the arch axis and the arch is placed near the hall's centre line. 100 seeds clear.
+- Verdict: kept.
+
+## E209: Light in the dark places
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("Light")
+- Question: the undercroft read uniformly dark; the coordinator asked for shafts of light giving it depth, and for planning where sunlit, grey and black occur against the new dark end of the shading (E066).
+- Setup: light shafts from the roof into the undercroft (two, 12 m square) and the cistern (one); a light link from each shaft's bottom into the room below; less spread inside the undercroft (0.7 a cell); a darkest openness per kind of space. Views: `95,1.65,140,0.61,-0.2,1.4` (undercroft pools), `94,25.65,182,1.5708,0.05,1.3` (a corridor).
+- Result: with the shafts and the old spread (0.84) the whole undercroft rose to 0.2 to 0.56 and still printed one even dark grey. At 0.7 the floor under a shaft is 0.52 and 0.07 elsewhere: grey pools in black with white rules. Corridors at 0.05 to 0.22 printed solid black under E066 (black below 0.06, closing in up to about 0.26), so they now keep 0.46 at the least (towers and service passages 0.36), and print dark grey with pencil. The undercroft, chamber and cistern basin keep their black.
+- Verdict: kept. The darkest values are tied to `black_point` and `black_range` in `nihei_ink`; if those change, these should be revisited.
+
 ## Queued
 
 
