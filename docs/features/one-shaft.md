@@ -59,7 +59,7 @@ Times local occlusion from the colliders at 70% strength (`kit-of-parts.md`, E00
 
 ### Look
 
-`StylePreset::nihei_vast` (`ink-renderer.md`) and `Sun::for_scene("shaft")`: a remote sun 74 degrees up at azimuth -110 (west-south-west), with cast shadows. The east wall is lit from the rim down to about 220 m deep, just below the spawn level, so the stair crosses a white field; below that the west rim's shadow cuts across it, and bridges throw black bars on the walls below them. Cast shadow is dense single hatching with a crisp edge; solid black is left for recesses, with white ink inside it (E011 to E025). Until E011 the sun was 54 degrees up at (-0.55, 0.8, -0.2) and scaled by ao; with real shadows that sun lit only the top 87 m of the east wall and the spawn view went black. `mega_capture` and the game pick preset and sun from the scene name.
+`StylePreset::nihei_ink` since E038 (`nihei_vast` before; `ink-renderer.md`), with bounced light (`bounced-light.md`), and `Sun::for_scene("shaft")`: a remote sun 74 degrees up at azimuth -110 (west-south-west), with cast shadows. The east wall is lit from the rim down to about 220 m deep, just below the spawn level, so the stair crosses a white field; below that the west rim's shadow cuts across it, and bridges throw black bars on the walls below them. In `nihei_vast` cast shadow is dense single hatching with a crisp edge and solid black is left for recesses, with white ink inside it (E011 to E025); in `nihei_ink` shadow is grey wash lifted by bounced light, and ruling appears only far away and far below the eye (E035 to E038). Until E011 the sun was 54 degrees up at (-0.55, 0.8, -0.2) and scaled by ao; with real shadows that sun lit only the top 87 m of the east wall and the spawn view went black. `mega_capture` and the game pick preset and sun from the scene name.
 
 ### Camera paths
 
@@ -124,7 +124,7 @@ Same range as the test scene (0.012 to 0.022). The hall has the most pops (0.75%
 - `crates/gen/src/shaft.rs`: layout, openness, route, tests.
 - `crates/gen/src/scenes.rs`: registry entry.
 - `crates/render/src/paths.rs`: `shaft_*` paths.
-- `crates/render/src/style.rs`, `renderer.rs`: `nihei_vast`, `Sun::for_scene`.
+- `crates/render/src/style.rs`, `renderer.rs`: `nihei_ink`, `nihei_vast`, `Sun::for_scene`.
 
 ## Open questions
 

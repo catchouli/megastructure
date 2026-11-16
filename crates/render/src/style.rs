@@ -327,6 +327,41 @@ pub struct StylePreset {
     pub shadow_edge_line: f32,
     /// 1: hatching inside a cast shadow is kept only within `indication_radius` of its edge.
     pub shadow_hatch_near: f32,
+
+    // Ruling as a distance effect (E035 onwards). The ruling's coverage is multiplied by a
+    // gate that rises from 0 to 1 with the effective distance `de = r + rule_down_gain *
+    // max(eye_y - y, 0)` (r the distance from the eye), and the light the ruling reads is
+    // darkened by `exp(-max(de - rule_near, 0) / rule_dist_len)`. Functions of the eye
+    // position only, so rigid under rotation. The wash does not see either.
+    /// Effective distance in metres below which there is no ruling (with `rule_fade_in` > 0).
+    pub rule_near: f32,
+    /// Length in metres over which ruling fades in past `rule_near` (smoothstep); 0 disables
+    /// the gate (ruling everywhere, as before E035).
+    pub rule_fade_in: f32,
+    /// Weight of depth below the eye in the effective distance: looking down a shaft, walls
+    /// gather ruling sooner than walls at the same distance across it.
+    pub rule_down_gain: f32,
+    /// Darkening of the ruled tone with effective distance past `rule_near`, metres (0 off).
+    pub rule_dist_len: f32,
+
+    // Bounced light (E037 onwards; see docs/features/bounced-light.md).
+    /// Strength (albedo) of one bounce of sunlight, added to the light value as
+    /// `bounce * sun_strength * intensity * sun_bounce` from the per-vertex bake. 0 off (and
+    /// the bake is skipped while both strengths are 0).
+    pub bounce: f32,
+    /// Strength of one bounce of sky light: `bounce_sky * ambient * sky_bounce`.
+    pub bounce_sky: f32,
+    /// Surface grain with one octave per surface axis (1), so it stays grain-sized on
+    /// grazing surfaces instead of stretching into streaks, and with octave-correlated seeds
+    /// so octave changes are seamless; 0 the E032 grain.
+    pub screentone_aniso: f32,
+    /// Width of the screentone threshold's ramp in threshold units: 0 a one-pixel ramp (hard,
+    /// two-level grain, as before E036); around 1 the grain is a soft continuous modulation
+    /// of the grey with no hard edges.
+    pub screentone_soft: f32,
+    /// With `screentone_aniso`: weight of the fine, sub-pixel grain lattice (the E032 grain)
+    /// against a lattice twice as coarse; 1 is all fine, 0 all coarse.
+    pub screentone_detail: f32,
 }
 
 impl StylePreset {
@@ -461,6 +496,15 @@ impl StylePreset {
             wash_speckle: 0.0,
             shadow_edge_line: 0.0,
             shadow_hatch_near: 0.0,
+            rule_near: 0.0,
+            rule_fade_in: 0.0,
+            rule_down_gain: 0.0,
+            rule_dist_len: 0.0,
+            bounce: 0.0,
+            bounce_sky: 0.0,
+            screentone_aniso: 0.0,
+            screentone_soft: 0.0,
+            screentone_detail: 1.0,
         }
     }
 
@@ -502,6 +546,9 @@ impl StylePreset {
             wash: [self.wash, self.wash_white, self.wash_black, self.wash_gamma],
             wash2: [self.wash_max, self.screentone, self.screentone_kind, self.screentone_anchor],
             wash3: [self.screentone_px, self.paper_texture, self.paper_texture_px, self.dark_down_len],
+            far: [self.rule_near, self.rule_fade_in, self.rule_down_gain, self.rule_dist_len],
+            bounce: [self.bounce, self.bounce_sky, self.screentone_aniso, 0.0],
+            grain: [self.screentone_soft, self.screentone_detail, 0.0, 0.0],
         }
     }
 }
@@ -634,8 +681,80 @@ impl StylePreset {
         }
     }
 
+    /// The default look since E035 to E038: the wash as the base, with a soft, seam-free
+    /// grain fixed to the surface; ruling only as a distance effect, sparse, coming in with
+    /// distance from the eye and depth below it and merging into black only far away; and
+    /// one bounce of sun and sky light, so enclosed shade next to lit surfaces lifts to mid
+    /// grey. See "Tone models" in docs/features/ink-renderer.md and
+    /// docs/features/bounced-light.md.
+    pub fn nihei_ink() -> Self {
+        Self {
+            // Wash: the E032 grain made soft (no two-level edges), resolved and seam-free.
+            screentone_aniso: 1.0,
+            screentone_detail: 0.3,
+            screentone_soft: 2.0,
+            screentone: 0.2,
+            paper_texture: 0.04,
+            // Ruling: nothing near, sparse at middle distance, merging into black far down.
+            fall_white: 0.28,
+            fall_black: 0.05,
+            fall_gamma: 1.5,
+            rule_near: 40.0,
+            rule_fade_in: 150.0,
+            rule_down_gain: 1.0,
+            rule_dist_len: 300.0,
+            rule_target_px: 9.0,
+            rule_density: 3.0,
+            // Calmer strokes: a gentler weight profile (fewer wedge-shaped strokes) and longer
+            // runs (fewer stroke ends).
+            rule_profile: 0.4,
+            hatch_break_len: 4.0,
+            // Ruling inside cast shadow too (far away only, by the gate): with the wash's
+            // near-edge-only shadow strokes the far pit never closed into black (E035).
+            shadow_hatch_near: 0.0,
+            // Bounced light.
+            bounce: 0.6,
+            bounce_sky: 0.3,
+            ..Self::nihei_wash()
+        }
+    }
+
+    /// `nihei_ink` without any ruling: the wash, grain and bounced light alone.
+    pub fn nihei_ink_wash() -> Self {
+        Self { fall_white: 0.0, fall_black: -0.01, ..Self::nihei_ink() }
+    }
+
+    /// `nihei_ink` for the small, closed test scene: its atmosphere, light and line fades
+    /// come from `nihei`, the sun casts no shadow (the scene is closed), and the ruling comes
+    /// in over tens of metres rather than hundreds.
+    pub fn nihei_ink_small() -> Self {
+        let n = Self::nihei();
+        Self {
+            fog_start: n.fog_start,
+            fog_density: n.fog_density,
+            fog_max: n.fog_max,
+            fog_ao: n.fog_ao,
+            ambient: n.ambient,
+            sun_strength: n.sun_strength,
+            sun_shadow: 0.0,
+            rank_fade_start: n.rank_fade_start,
+            rank_fade_end: n.rank_fade_end,
+            rank_min_len_px: n.rank_min_len_px,
+            contour_fade_start: n.contour_fade_start,
+            contour_fade_end: n.contour_fade_end,
+            sky_tone: n.sky_tone,
+            rule_near: 15.0,
+            rule_fade_in: 40.0,
+            fall_white: 0.28,
+            rule_down_gain: 0.0,
+            rule_dist_len: 60.0,
+            ..Self::nihei_ink()
+        }
+    }
+
     /// Preset names accepted by [`StylePreset::by_name`].
-    pub const NAMES: &'static [&'static str] = &["nihei", "nihei_vast", "nihei_fall", "nihei_wash", "nihei_hybrid"];
+    pub const NAMES: &'static [&'static str] =
+        &["nihei", "nihei_vast", "nihei_fall", "nihei_wash", "nihei_hybrid", "nihei_ink", "nihei_ink_wash", "nihei_ink_small"];
 
     pub fn by_name(name: &str) -> Option<Self> {
         match name {
@@ -644,6 +763,9 @@ impl StylePreset {
             "nihei_fall" => Some(Self::nihei_fall()),
             "nihei_wash" => Some(Self::nihei_wash()),
             "nihei_hybrid" => Some(Self::nihei_hybrid()),
+            "nihei_ink" => Some(Self::nihei_ink()),
+            "nihei_ink_wash" => Some(Self::nihei_ink_wash()),
+            "nihei_ink_small" => Some(Self::nihei_ink_small()),
             _ => None,
         }
     }
@@ -653,7 +775,7 @@ impl StylePreset {
     /// `MEGA_PRESET=nihei_wash cargo run --release --bin megastructure -- --scene shaft`.
     pub const ENV_OVERRIDE: &'static str = "MEGA_PRESET";
 
-    /// The preset a named scene is tuned for (`nihei` for anything unknown), unless the
+    /// The preset a named scene is tuned for (`nihei_ink_small` for anything unknown), unless the
     /// `MEGA_PRESET` environment variable names a preset, which then applies to every scene.
     /// An unknown name in `MEGA_PRESET` is reported on stderr and ignored.
     pub fn for_scene(scene: &str) -> Self {
@@ -672,8 +794,8 @@ impl StylePreset {
     /// The preset a named scene is tuned for, ignoring `MEGA_PRESET`.
     pub fn scene_default(scene: &str) -> Self {
         match scene {
-            "shaft" => Self::nihei_vast(),
-            _ => Self::nihei(),
+            "shaft" => Self::nihei_ink(),
+            _ => Self::nihei_ink_small(),
         }
     }
 }
@@ -814,6 +936,15 @@ impl StylePreset {
         "wash_speckle",
         "shadow_edge_line",
         "shadow_hatch_near",
+        "rule_near",
+        "rule_fade_in",
+        "rule_down_gain",
+        "rule_dist_len",
+        "bounce",
+        "bounce_sky",
+        "screentone_aniso",
+        "screentone_soft",
+        "screentone_detail",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -935,6 +1066,15 @@ impl StylePreset {
             "wash_speckle" => self.wash_speckle = num(value)?,
             "shadow_edge_line" => self.shadow_edge_line = num(value)?,
             "shadow_hatch_near" => self.shadow_hatch_near = num(value)?,
+            "rule_near" => self.rule_near = num(value)?,
+            "rule_fade_in" => self.rule_fade_in = num(value)?,
+            "rule_down_gain" => self.rule_down_gain = num(value)?,
+            "rule_dist_len" => self.rule_dist_len = num(value)?,
+            "bounce" => self.bounce = num(value)?,
+            "bounce_sky" => self.bounce_sky = num(value)?,
+            "screentone_aniso" => self.screentone_aniso = num(value)?,
+            "screentone_soft" => self.screentone_soft = num(value)?,
+            "screentone_detail" => self.screentone_detail = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
@@ -993,4 +1133,7 @@ pub(crate) struct StyleGpu {
     wash: [f32; 4],
     wash2: [f32; 4],
     wash3: [f32; 4],
+    far: [f32; 4],
+    bounce: [f32; 4],
+    grain: [f32; 4],
 }

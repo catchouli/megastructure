@@ -27,7 +27,8 @@ Constants that other systems depend on (for example, movement limits the generat
 | Capture tool | `features/capture-tool.md` | Working |
 | Headless mode | `features/headless-mode.md` | Working |
 | Screenshots and replay | `features/screenshots.md` | Working (headless verified; windowed key untested) |
-| Ink renderer | `features/ink-renderer.md` | In progress (M0 frame, shadows and tone composition working) |
+| Ink renderer | `features/ink-renderer.md` | In progress (M0 frame, shadows and tone composition working; wash with distance ruling is the default since E038) |
+| Bounced light | `features/bounced-light.md` | Working (one bounce, per-vertex CPU bake; headless verified) |
 | Kit of parts | `features/kit-of-parts.md` | In progress (M1 kit) |
 | One Shaft | `features/one-shaft.md` | Working (M1 scene) |
 

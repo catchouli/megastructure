@@ -2,6 +2,7 @@
 //! that the renderer uploads as-is.
 
 pub mod ao;
+pub mod bounce;
 pub mod builder;
 pub mod kit;
 pub mod mesh;

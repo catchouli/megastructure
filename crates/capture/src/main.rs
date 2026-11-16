@@ -18,9 +18,14 @@ USAGE:
     mega_capture --path <name> --out <dir> [--frames N] [--width W] [--height H] [--t T]
                  [--t0 A --t1 B] [--view V] [--metrics] [--no-png]
     mega_capture --path <name> --bench N [--width W] [--height H] [--t T] [--view V]
+    mega_capture --camera x,y,z,yaw,pitch[,fov_y] --scene <name> --out <dir> [...]
 
 OPTIONS:
-    --path <name>    camera path (see --list-paths)                    [required]
+    --path <name>    camera path (see --list-paths)       [required unless --camera]
+    --camera <c>     a fixed camera instead of a path: x,y,z,yaw,pitch[,fov_y], metres and
+                     radians as in a screenshot sidecar (yaw 0 looks along +Z, positive
+                     towards +X; pitch positive up; fov_y default 70 degrees). Use with
+                     --scene; the path name printed is 'camera'
     --scene <name>   scene to render (see --list-scenes). Default: the scene the path
                      is tuned to, or mega_gen::scenes::DEFAULT for a path without one.
                      The scene also selects its style preset and sun.
@@ -70,11 +75,12 @@ OPTIONS:
 With --frames N, frame i uses t = t0 + (t1 - t0) * i / (N - 1).
 Files are written as frame_0000.png, frame_0001.png, ...
 A line 'scene <name>: ...' with vertex, triangle, stroke and collider counts and the scene
-build time is printed first.
+build time is printed first; 'bounce bake N ms' whenever the bounced light is (re)baked.
 Set RUST_LOG=info for adapter details.";
 
 struct Args {
     path: String,
+    camera: Option<mega_render::Camera>,
     scene: String,
     preset: Option<StylePreset>,
     out: Option<PathBuf>,
@@ -137,6 +143,7 @@ fn parse_args() -> Result<Option<Args>> {
     let mut sun = SunArgs::default();
     let mut shadow_filter = ShadowFilter::Smooth;
     let mut centre_ink = false;
+    let mut camera: Option<mega_render::Camera> = None;
     fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
         it.next().ok_or_else(|| anyhow!("{flag} needs a value"))
     }
@@ -186,6 +193,18 @@ fn parse_args() -> Result<Option<Args>> {
                 preset = Some(StylePreset::by_name(&v).ok_or_else(|| anyhow!("unknown preset '{v}'; available: {}", StylePreset::NAMES.join(", ")))?);
             }
             "--path" => path = Some(value(&mut it, &a)?),
+            "--camera" => {
+                let v = value(&mut it, &a)?;
+                let n: Vec<f32> = v.split(',').map(|x| number(x.trim(), &a)).collect::<Result<_>>()?;
+                if n.len() != 5 && n.len() != 6 {
+                    bail!("--camera takes x,y,z,yaw,pitch[,fov_y], got '{v}'");
+                }
+                let mut c = mega_render::Camera::new(glam::Vec3::new(n[0], n[1], n[2]), n[3], n[4]);
+                if n.len() == 6 {
+                    c.fov_y = n[5];
+                }
+                camera = Some(c);
+            }
             "--out" => out = Some(PathBuf::from(value(&mut it, &a)?)),
             "--frames" => frames = number(&value(&mut it, &a)?, &a)?,
             "--t" => t = Some(number(&value(&mut it, &a)?, &a)?),
@@ -221,7 +240,11 @@ fn parse_args() -> Result<Option<Args>> {
             other => bail!("unknown argument '{other}'\n\n{USAGE}"),
         }
     }
-    let path = path.ok_or_else(|| anyhow!("--path is required (one of: {})", paths::NAMES.join(", ")))?;
+    let path = match (path, camera.is_some()) {
+        (Some(p), _) => p,
+        (None, true) => "camera".to_string(),
+        (None, false) => bail!("--path is required (one of: {}), or --camera", paths::NAMES.join(", ")),
+    };
     if out.is_none() && png && bench.is_none() {
         bail!("--out is required (or use --no-png / --bench)");
     }
@@ -231,7 +254,7 @@ fn parse_args() -> Result<Option<Args>> {
     if !(0.0..=1.0).contains(&t0) || !(0.0..=1.0).contains(&t1) {
         bail!("--t0 and --t1 must be within 0..1");
     }
-    if paths::by_name(&path).is_none() {
+    if camera.is_none() && paths::by_name(&path).is_none() {
         bail!("unknown path '{path}'; available: {}", paths::NAMES.join(", "));
     }
     let scene = scene.unwrap_or_else(|| paths::scene_of(&path).unwrap_or(mega_gen::scenes::DEFAULT).to_string());
@@ -262,7 +285,7 @@ fn parse_args() -> Result<Option<Args>> {
             bail!("--sun-dist must be positive");
         }
     }
-    Ok(Some(Args { path, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol, sets, sun, shadow_filter, centre_ink }))
+    Ok(Some(Args { path, camera, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol, sets, sun, shadow_filter, centre_ink }))
 }
 
 fn main() {
@@ -275,7 +298,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let Some(args) = parse_args()? else { return Ok(()) };
-    let cam_fn = paths::by_name(&args.path).expect("validated in parse_args");
+    let fixed = args.camera;
+    let path_fn = paths::by_name(&args.path);
+    let cam_fn = move |t: f32| fixed.unwrap_or_else(|| path_fn.expect("validated in parse_args")(t));
 
     if let Some(out) = &args.out {
         std::fs::create_dir_all(out).with_context(|| format!("cannot create output directory {}", out.display()))?;
@@ -392,6 +417,10 @@ fn run() -> Result<()> {
             device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("GPU wait failed: {e}"))?;
             Ok(start.elapsed().as_secs_f64() * 1000.0 / count as f64)
         };
+        run(1, &mut renderer)?;
+        if let Some(ms) = renderer.bounce_bake_ms() {
+            println!("bounce bake {ms:.0} ms");
+        }
         run(10.min(n), &mut renderer)?; // warm-up
         let ms = run(n, &mut renderer)?;
         if gpu_failed.load(Ordering::SeqCst) {
@@ -425,7 +454,11 @@ fn run() -> Result<()> {
         renderer.set_sun(args.sun.at(base_sun, centre, frac));
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
+        let baked = renderer.bounce_bake_ms();
         renderer.render(&mut encoder, &target_view, &camera);
+        if let Some(ms) = renderer.bounce_bake_ms().filter(|_| renderer.bounce_bake_ms() != baked || i == 0) {
+            println!("bounce bake {ms:.0} ms");
+        }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo { texture: &target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyBufferInfo {

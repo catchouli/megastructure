@@ -34,6 +34,7 @@ pub const NAMES: &[&str] = &[
     "shaft_spawn_pitch",
     "shaft_hall_wall",
     "shaft_wall_approach",
+    "shaft_hall_walk",
 ];
 
 pub fn by_name(name: &str) -> Option<fn(f32) -> Camera> {
@@ -60,6 +61,7 @@ pub fn by_name(name: &str) -> Option<fn(f32) -> Camera> {
         "shaft_spawn_pitch" => shaft_spawn_pitch,
         "shaft_hall_wall" => shaft_hall_wall,
         "shaft_wall_approach" => shaft_wall_approach,
+        "shaft_hall_walk" => shaft_hall_walk,
         _ => return None,
     })
 }
@@ -151,6 +153,15 @@ pub fn shaft_hall_wall(t: f32) -> Camera {
 pub fn shaft_wall_approach(t: f32) -> Camera {
     let d = 2.0 * 80f32.powf(1.0 - t.clamp(0.0, 1.0));
     Camera::new(Vec3::new(-0.02, 432.24, -138.0 + d), PI, 0.0)
+}
+
+/// Walking 60 m down the hall at eye height, along its floor and past its columns, eyes
+/// slightly down, so the floor recedes at grazing angles through many octaves of the surface
+/// screentone. `--frames 61 --t1 0.02333` is 1.4 m/s at 60 fps (2.3 cm per frame); the whole
+/// path is 60 m (E036).
+pub fn shaft_hall_walk(t: f32) -> Camera {
+    let y = shaft::hall_floor() + EYE_HEIGHT;
+    Camera::new(Vec3::new(-7.0, y, lerp(-42.0, -102.0, t)), PI, -0.12)
 }
 
 // --- One Shaft -----------------------------------------------------------------------------

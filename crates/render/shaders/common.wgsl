@@ -58,6 +58,9 @@ struct Style {
     wash: vec4<f32>,            // wash, wash white, wash black, wash gamma
     wash2: vec4<f32>,           // wash max, screentone, screentone kind, screentone anchor
     wash3: vec4<f32>,           // screentone px, paper texture, paper texture px, dark down length (m)
+    far: vec4<f32>,             // rule near (m), rule fade-in (m), rule down gain, rule distance darkening (m)
+    bounce: vec4<f32>,          // sun bounce strength, sky bounce strength, anisotropic grain
+    grain: vec4<f32>,           // screentone softness, fine detail weight
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;

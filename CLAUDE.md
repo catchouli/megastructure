@@ -78,7 +78,7 @@ cargo run --release --bin megastructure -- --scene shaft        # owner only
 Kept short on purpose; the docs and `git log` are authoritative. As of 2026-11-15:
 
 - Done: M0 (ink renderer on a test scene) and most of M1 (kit of parts, the One Shaft scene, walking controller, sun shadows).
-- In progress: the look. The current thread is hatching quality: removing swim under camera rotation, hatched shadows with rare black, crosshatch clean-up, feathered boundaries. After that, a line-imperfection pass on strokes and contours (overshoot, wobble, weight).
+- In progress: the look. As of 2026-11-16 the default presets are `nihei_ink` (shaft) and `nihei_ink_small` (test): a grey wash with surface-anchored grain as the base, ruling only at distance and depth merging into black far away, and one bounce of sun and sky light baked per vertex (`mega_gen::bounce`). The owner chose the wash as the base and finds hatching ugly unless sparse and distant, and hard two-level grain harsh. Open: grain character and softness, a non-blocking bounce re-bake for a moving sun, then a line-imperfection pass on strokes and contours. `MEGA_PRESET=<name>` and `MEGA_SET="field=value,..."` let the owner try looks in the windowed game. `python3 compare/make_index.py` rebuilds the sheet index after adding sheets.
 - Next milestones, in order: M2 generator core (graph grammar, 3D embedding, reachability, director and set pieces), M3 micro decay, M4 machinery (gears, cables, towers, turbines first), M5 whole structure with exterior and sky, M6 macro decay.
 - Requested and not yet built is tracked in the feature docs' open questions and in `docs/PLAN.md` section 7a.
 

@@ -8,6 +8,8 @@ struct VsIn {
     @location(3) id_fine: u32,
     @location(4) id_coarse: u32,
     @location(5) ao: f32,
+    // Baked one-bounce light: x sun, y sky (vertex buffer slot 1).
+    @location(6) bounce: vec2<f32>,
 };
 
 struct VsOut {
@@ -17,6 +19,7 @@ struct VsOut {
     @location(2) @interpolate(flat) axis: vec3<f32>,
     @location(3) @interpolate(flat) ids: vec2<u32>,
     @location(4) ao: f32,
+    @location(5) bounce: vec2<f32>,
 };
 
 @vertex
@@ -28,6 +31,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.axis = in.hatch_axis;
     out.ids = vec2<u32>(in.id_fine, in.id_coarse);
     out.ao = in.ao;
+    out.bounce = in.bounce;
     return out;
 }
 
@@ -503,9 +507,65 @@ fn screen_kind(dots: f32, grain: f32) -> f32 {
     return 0.5 * (dots + grain);
 }
 
+// 2D value noise in 0..1, one independent field per key.
+fn vnoise2(key: u32, x: vec2<f32>) -> f32 {
+    let i = vec2<i32>(floor(x));
+    let f = x - floor(x);
+    let w = f * f * (3.0 - 2.0 * f);
+    let k0 = hash2(key, bitcast<u32>(i.y));
+    let k1 = hash2(key, bitcast<u32>(i.y + 1));
+    let a = mix(u01(hash2(k0, bitcast<u32>(i.x))), u01(hash2(k0, bitcast<u32>(i.x + 1))), w.x);
+    let b = mix(u01(hash2(k1, bitcast<u32>(i.x))), u01(hash2(k1, bitcast<u32>(i.x + 1))), w.x);
+    return mix(a, b, w.y);
+}
+
+// Surface screentone with one octave per surface axis (screentone_aniso, E036). The cell
+// size along each surface axis is chosen from that axis's own rotation-invariant footprint,
+// so on a grazing floor the cells are short along the grazed direction and the grain stays
+// grain-sized on screen instead of stretching into streaks. Each octave pair (ku, kv) has
+// its own seed, a function of the octave numbers only, so the field drawn at the end of one
+// octave's crossfade is exactly the one drawn at the start of the next: no seam where the
+// octave changes (the E032 grain used one seed for "this octave" and another for "the next",
+// so the pattern swapped at every integer octave, along lines of equal footprint). The four
+// fields are blended bilinearly and the blend is renormalised by its standard deviation, so
+// the grain's contrast does not dip halfway through a crossfade.
+fn screentone_aniso(uv: vec2<f32>, gg: vec2<f32>, pn: f32, px: f32, base: f32) -> f32 {
+    let ku = max(log2(max(px * gg.x / base, 1e-6)), 0.0);
+    let kv = max(log2(max(px * gg.y / base, 1e-6)), 0.0);
+    let ku0 = floor(ku);
+    let kv0 = floor(kv);
+    let fu = ku - ku0;
+    let fv = kv - kv0;
+    // The plane's offset decorrelates parallel faces.
+    let plane = pcg(bitcast<u32>(i32(floor(pn * 4.0))));
+    var sumg = 0.0;
+    var sumd = 0.0;
+    var ww = 0.0;
+    for (var j = 0; j < 2; j++) {
+        for (var i = 0; i < 2; i++) {
+            let w = select(1.0 - fu, fu, i == 1) * select(1.0 - fv, fv, j == 1);
+            let cu = base * exp2(ku0 + f32(i));
+            let cv = base * exp2(kv0 + f32(j));
+            let q = vec2<f32>(uv.x / cu, uv.y / cv);
+            let key = hash2(hash2(0x3243f6a8u ^ plane, u32(ku0) + u32(i)), u32(kv0) + u32(j));
+            // Two lattices per field: a main one at 0.8 of the cell (resolved, about 1.6 to 3
+            // pixels) and a fine one at 0.4 (sub-pixel, the E032 grain), weighted by
+            // screentone_detail. The sum clumps a little, like paper fibre, and the
+            // coarse lattice is what keeps the grain still under sub-pixel motion.
+            let det = S.grain.y;
+            let g2 = (1.0 - det) * (vnoise2(key ^ 0x6a09e667u, q / 0.8) - 0.5) + det * (vnoise2(key, q / 0.4) - 0.5);
+            sumg += w * g2 * inverseSqrt(max((1.0 - det) * (1.0 - det) + det * det, 0.25));
+            sumd += w * (dot_screen(q) - 0.5);
+            ww += w * w;
+        }
+    }
+    let norm = inverseSqrt(max(ww, 0.25));
+    return screen_kind(saturate(0.5 + sumd * norm), grain_screen(0.5 + sumg * norm));
+}
+
 // Threshold at this fragment for the chosen anchor. frag: pixel position; dv: unit view ray;
 // uv, gg: surface coordinates and their rotation-invariant footprints.
-fn screentone_t(frag: vec2<f32>, dv: vec3<f32>, p: vec3<f32>, uv: vec2<f32>, gg: vec2<f32>) -> f32 {
+fn screentone_t(frag: vec2<f32>, dv: vec3<f32>, p: vec3<f32>, uv: vec2<f32>, gg: vec2<f32>, pn: f32) -> f32 {
     let px = max(S.wash3.x * G.misc.x, 1.0);
     let a = S.wash2.w;
     if (a < 0.5) {
@@ -542,6 +602,9 @@ fn screentone_t(frag: vec2<f32>, dv: vec3<f32>, p: vec3<f32>, uv: vec2<f32>, gg:
     // footprint and crossfaded; the octave-(k+1) screen's dots are every other dot of
     // octave k, so the crossfade grows those and shrinks the rest.
     let base = 0.004;
+    if (S.bounce.z > 0.5) {
+        return screentone_aniso(uv, gg, pn, px, base);
+    }
     let kf = max(log2(max(px * max(gg.x, gg.y) / base, 1e-6)), 0.0);
     let k0 = floor(kf);
     let fr = kf - k0;
@@ -910,8 +973,12 @@ fn fs_main(in: VsOut) -> FsOut {
     // Per-panel tone: each panel (id_fine) gets its own light offset.
     noise += (u01(pcg(in.ids.x ^ 0x6a09e667u)) - 0.5) * 2.0 * S.white.z;
     let ambient = S.light.y * ao;
-    var lit = (S.light.x * G.sun_params.y * max(ndl, 0.0) * sun_vis + ambient + noise) * shade;
-    let dark = clamp((ambient * S.shadow.x + noise) * shade, S.shadow.y, S.shadow.z);
+    // One bounce of sun and sky light (baked per vertex, docs/features/bounced-light.md). It
+    // reaches shaded and cast-shadowed surfaces alike, so it is added after the shadow
+    // clamp; 0 with both strengths 0, which leaves the light exactly as before.
+    let bounced = S.bounce.x * S.light.x * G.sun_params.y * in.bounce.x + S.bounce.y * S.light.y * in.bounce.y;
+    var lit = (S.light.x * G.sun_params.y * max(ndl, 0.0) * sun_vis + ambient + noise) * shade + bounced;
+    let dark = clamp((ambient * S.shadow.x + noise) * shade, S.shadow.y, S.shadow.z) + bounced;
     // Smooth part of the light only: the shadow edge has its own anti-aliasing below.
     let edge = max(fwidth(lit), 0.004);
 
@@ -1005,8 +1072,24 @@ fn fs_main(in: VsOut) -> FsOut {
     }
     let lit_t = lit * darkf;
     let dark_t = dark_l * darkf;
-    let c_lit = fall_curve(lit_t);
-    let c_dark = fall_curve(dark_t);
+    // Ruling as a distance effect (S.far, E035): the ruling reads the light darkened further
+    // with effective distance, and its coverage is gated off near the eye, so near surfaces,
+    // even in deep shade or cast shadow, are carried by the wash alone. Effective distance
+    // counts depth below the eye extra, so looking down a shaft gathers ruling sooner than
+    // looking across it. Functions of the eye position only: rigid under rotation.
+    var rgate = 1.0;
+    var rdark = 1.0;
+    if (S.far.y > 0.0 || S.far.w > 0.0) {
+        let de = rr + S.far.z * max(G.camera_pos.y - p.y, 0.0);
+        if (S.far.y > 0.0) {
+            rgate = smoothstep(S.far.x, S.far.x + S.far.y, de);
+        }
+        if (S.far.w > 0.0) {
+            rdark = exp(-max(de - S.far.x, 0.0) / S.far.w);
+        }
+    }
+    let c_lit = fall_curve(lit_t * rdark) * rgate;
+    let c_dark = fall_curve(dark_t * rdark) * rgate;
     let cg_lit = grad_along_signed(dpdx(u1), dpdy(u1), dpdx(u2), dpdy(u2), dpdx(c_lit), dpdy(c_lit));
     let cg_dark = grad_along_signed(dpdx(su1), dpdy(su1), dpdx(su2), dpdy(su2), dpdx(c_dark), dpdy(c_dark));
 
@@ -1062,8 +1145,11 @@ fn fs_main(in: VsOut) -> FsOut {
     var wash = 0.0;
     if (S.wash.x > 0.0) {
         let w0 = mix(wash_curve(lit_t), wash_curve(dark_t), amount);
-        let tt = screentone_t(in.clip.xy, dv, p, vec2<f32>(u1, u2), vec2<f32>(lod1, lod_v1));
-        let ht = saturate((w0 - tt) / max(fwidth(tt), 0.05) + 0.5);
+        let tt = screentone_t(in.clip.xy, dv, p, vec2<f32>(u1, u2), vec2<f32>(lod1, lod_v1), dot(p, n));
+        // The threshold's ramp: one pixel of the threshold map (hard, two-level grain), or
+        // with screentone_soft a ramp that wide in threshold units, so the grain becomes a
+        // continuous modulation of the grey with no hard edges (E036).
+        let ht = saturate((w0 - tt) / max(max(fwidth(tt), 0.05), S.grain.x) + 0.5);
         wash = mix(w0, ht, S.wash2.y);
     }
 

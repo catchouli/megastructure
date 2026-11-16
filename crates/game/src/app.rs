@@ -19,7 +19,16 @@ impl App {
     /// Upload `scene` to `renderer` and place the player at its spawn point, walking if the
     /// scene has colliders (unless `mode` says otherwise).
     pub fn new(mut renderer: Renderer, scene: &Scene, mode: Option<MoveMode>) -> Self {
-        let preset = StylePreset::for_scene(scene.name);
+        let mut preset = StylePreset::for_scene(scene.name);
+        // `MEGA_SET="field=value,field=value"` overrides preset fields, for trying a look live.
+        if let Ok(sets) = std::env::var("MEGA_SET") {
+            for kv in sets.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                let applied = kv.split_once('=').ok_or_else(|| "needs the form field=value".to_string()).and_then(|(k, v)| preset.set(k.trim(), v.trim()));
+                if let Err(e) = applied {
+                    eprintln!("MEGA_SET: '{kv}' ignored: {e}");
+                }
+            }
+        }
         let preset_name = StylePreset::NAMES.iter().copied().find(|n| StylePreset::by_name(n).as_ref() == Some(&preset)).unwrap_or("custom");
         renderer.set_preset(preset);
         renderer.set_sun(Sun::for_scene(scene.name));

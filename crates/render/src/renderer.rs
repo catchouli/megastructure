@@ -7,6 +7,7 @@ use crate::style::{StyleGpu, StylePreset};
 use crate::Camera;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
+use mega_gen::bounce::{BounceBaker, BounceSettings, BounceSun};
 use mega_gen::{MeshData, Stroke, Vertex};
 use wgpu::util::DeviceExt;
 
@@ -279,6 +280,14 @@ const VERTEX_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     5 => Float32,   // ao
 ];
 
+/// The bounce stream, vertex buffer slot 1: `[sun, sky]` per vertex (8 bytes), from
+/// `mega_gen::bounce`. Kept apart from `Vertex` so a new sun direction re-uploads only this.
+const BOUNCE_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![6 => Float32x2];
+
+/// A new bake is made when the sun direction moves by more than this (radians), or a near
+/// sun by more than this fraction of its distance.
+const BOUNCE_REBAKE_ANGLE: f32 = 0.25 * std::f32::consts::PI / 180.0;
+
 struct Targets {
     depth_tex: wgpu::Texture,
     depth: wgpu::TextureView,
@@ -414,6 +423,15 @@ pub struct Renderer {
     vertex_buf: Option<wgpu::Buffer>,
     index_buf: Option<wgpu::Buffer>,
     index_count: u32,
+    /// Per-vertex bounce `[sun, sky]` (zeros until baked).
+    bounce_buf: Option<wgpu::Buffer>,
+    /// The scene's triangles, kept to build the bounce baker the first time a preset asks
+    /// for bounced light.
+    bounce_mesh: Option<MeshData>,
+    bounce_baker: Option<BounceBaker>,
+    /// The sun the bounce buffer was baked for.
+    bounce_sun: Option<BounceSun>,
+    bounce_ms: Option<f64>,
     strokes: Vec<Stroke>,
     stroke_buf: wgpu::Buffer,
     visible_buf: wgpu::Buffer,
@@ -626,11 +644,14 @@ impl Renderer {
                 module: &forward_src,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &VERTEX_ATTRS,
-                })],
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &VERTEX_ATTRS,
+                    }),
+                    Some(wgpu::VertexBufferLayout { array_stride: 8, step_mode: wgpu::VertexStepMode::Vertex, attributes: &BOUNCE_ATTRS }),
+                ],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -751,6 +772,11 @@ impl Renderer {
             vertex_buf: None,
             index_buf: None,
             index_count: 0,
+            bounce_buf: None,
+            bounce_mesh: None,
+            bounce_baker: None,
+            bounce_sun: None,
+            bounce_ms: None,
             strokes: Vec::new(),
             stroke_buf,
             visible_buf,
@@ -935,7 +961,15 @@ impl Renderer {
                 usage: wgpu::BufferUsages::INDEX,
             }));
             self.index_count = mesh.indices.len() as u32;
+            self.bounce_buf = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("bounce"),
+                contents: bytemuck::cast_slice(&vec![[0.0f32; 2]; mesh.vertices.len()]),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            }));
         }
+        self.bounce_mesh = (!mesh.indices.is_empty()).then(|| MeshData { vertices: mesh.vertices.clone(), indices: mesh.indices.clone(), strokes: Vec::new() });
+        self.bounce_baker = None;
+        self.bounce_sun = None;
         self.bounds = mesh.bounds().map(|(lo, hi)| (Vec3::from(lo), Vec3::from(hi)));
         self.strokes = mesh.strokes.clone();
         self.stroke_buf = storage_buffer(&self.device, "strokes", &mesh.strokes);
@@ -943,6 +977,40 @@ impl Renderer {
         self.visible_buf = storage_buffer(&self.device, "visible strokes", &zeros);
         self.visible.clear();
         self.rebuild_groups();
+    }
+
+    /// Wall-clock time of the last bounce bake in milliseconds (BVH build included when it
+    /// was built then), or None if nothing has been baked for this scene.
+    pub fn bounce_bake_ms(&self) -> Option<f64> {
+        self.bounce_ms
+    }
+
+    /// The per-vertex bounce for the current sun, baking it now if the preset uses bounced
+    /// light and the sun has moved since the last bake. Called by `render`; callers may call
+    /// it ahead of time (after `set_sun`) to take the bake's cost at a moment of their choice.
+    pub fn update_bounce(&mut self) {
+        if self.preset.bounce <= 0.0 && self.preset.bounce_sky <= 0.0 {
+            return;
+        }
+        let (Some(mesh), Some(buf)) = (&self.bounce_mesh, &self.bounce_buf) else { return };
+        // The sun as the shader sees it from the middle of the scene.
+        let centre = self.bounds.map(|(lo, hi)| (lo + hi) * 0.5).unwrap_or(Vec3::ZERO);
+        let to_sun = self.sun.position - centre;
+        let sun = if to_sun.length() > Sun::DIRECTIONAL_DISTANCE { BounceSun::Direction(to_sun.normalize()) } else { BounceSun::Point(self.sun.position) };
+        let fresh = match (self.bounce_sun, sun) {
+            (Some(BounceSun::Direction(a)), BounceSun::Direction(b)) => a.dot(b) < BOUNCE_REBAKE_ANGLE.cos(),
+            (Some(BounceSun::Point(a)), BounceSun::Point(b)) => (a - b).length() > BOUNCE_REBAKE_ANGLE * (b - centre).length(),
+            _ => true,
+        };
+        if !fresh {
+            return;
+        }
+        let start = std::time::Instant::now();
+        let baker = self.bounce_baker.get_or_insert_with(|| BounceBaker::new(mesh));
+        let data = baker.bake(sun, BounceSettings::default());
+        self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&data));
+        self.bounce_sun = Some(sun);
+        self.bounce_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
     }
 
     /// CPU stroke cull: frustum (both endpoints outside one side plane or behind the near
@@ -1002,6 +1070,7 @@ impl Renderer {
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         self.queue.write_buffer(&self.style_buf, 0, bytemuck::bytes_of(&self.preset.to_gpu()));
         self.cull_strokes(view_proj, camera.position);
+        self.update_bounce();
 
         // 0. Sun shadow maps, refitted every frame so the sun may move.
         self.shadow_maps_on = self.sun.is_up(camera.position) && self.vertex_buf.is_some() && self.preset.sun_shadow > 0.0;
@@ -1066,6 +1135,7 @@ impl Renderer {
                 pass.set_bind_group(0, &self.frame_group, &[]);
                 pass.set_bind_group(1, &self.shadow_group, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_vertex_buffer(1, self.bounce_buf.as_ref().expect("created with the vertex buffer").slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.index_count, 0, 0..1);
             }
@@ -1156,10 +1226,10 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_wgsl() {
-        // struct Globals: two mat4x4 and seven vec4. struct Style: thirty-five vec4.
+        // struct Globals: two mat4x4 and seven vec4. struct Style: thirty-eight vec4.
         // struct ShadowU: four mat4x4 and two vec4.
         assert_eq!(std::mem::size_of::<Globals>(), 2 * 64 + 7 * 16);
-        assert_eq!(std::mem::size_of::<StyleGpu>(), 35 * 16);
+        assert_eq!(std::mem::size_of::<StyleGpu>(), 38 * 16);
         assert_eq!(std::mem::size_of::<ShadowGpu>(), 4 * 64 + 2 * 16);
     }
 
@@ -1183,8 +1253,18 @@ mod tests {
             assert_eq!(p.shadow_edge_line, 0.0);
             assert_eq!((p.dark_dist_len, p.dark_down_len), (0.0, 0.0));
         }
-        assert_eq!(StylePreset::scene_default("shaft"), StylePreset::nihei_vast());
-        assert_eq!(StylePreset::scene_default("test"), StylePreset::nihei());
+        // Since E035 to E038 both scenes default to the wash with distance ruling and bounce.
+        assert_eq!(StylePreset::scene_default("shaft"), StylePreset::nihei_ink());
+        assert_eq!(StylePreset::scene_default("test"), StylePreset::nihei_ink_small());
+        // The old presets keep bounce, the distance gate and the new grain off, so they draw
+        // exactly as before.
+        for p in [StylePreset::nihei(), StylePreset::nihei_vast(), StylePreset::nihei_fall(), StylePreset::nihei_wash(), StylePreset::nihei_hybrid()] {
+            assert_eq!((p.bounce, p.bounce_sky, p.rule_fade_in, p.rule_dist_len), (0.0, 0.0, 0.0, 0.0));
+            assert_eq!((p.screentone_aniso, p.screentone_soft), (0.0, 0.0));
+        }
+        let ink = StylePreset::nihei_ink();
+        assert!(ink.bounce > 0.0 && ink.rule_fade_in > 0.0 && ink.wash > 0.0 && ink.screentone_aniso > 0.0);
+        assert_eq!(StylePreset::nihei_ink_wash().fall_white, 0.0);
         for p in [StylePreset::nihei_fall(), StylePreset::nihei_wash(), StylePreset::nihei_hybrid()] {
             assert_eq!(p.tone_model, 1.0);
             assert!(p.fall_white > p.fall_black && p.rule_pitch > 0.0 && p.rule_target_px > 0.0);

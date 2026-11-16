@@ -123,7 +123,7 @@ M0 and M1 exist to retire the two biggest risks early: lines at distance, and co
 
 ## 7a. Ideas parked
 
-- **Bounced light** (raised 2026-11-15). Large fully dark regions would be rarer if light bounced. Deferred while the shading itself is being worked out. Since tone is quantised into a few bands, only low-frequency indirect light is needed, which suggests propagating sun and sky light through the coarse occupancy grid the generator already plans to keep (light propagation volumes or a flood from lit cells), re-run when the sun moves, and sampled as one extra term in the light value. No per-pixel tracing and no change to the frame.
+- **Bounced light**: no longer parked. A first version (one bounce of sun and sky light, baked per vertex on the CPU against the scene's triangles) was built in E037 and is on in the default preset; see `features/bounced-light.md`. Still open from the original idea: propagating light through the coarse occupancy grid for the far field of a kilometre-scale structure, and re-baking without a hitch as the sun moves.
 
 ## 8. Gaps in the research
 

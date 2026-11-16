@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress, 2026-11-15. Milestone M0 frame working on the test scene: forward MRT pass with ruled hatching and tone bands, stroke pass, contour pass with its own anti-aliasing resolve, composite with atmosphere, ten debug views. Sun shadow pass (cascaded, orthographic or perspective, refitted every frame) feeding the light before band quantisation, and tone composition working on the One Shaft (E011 to E025): cast shadows drawn as dense hatching with a crisp or feathered edge, solid black only in recesses with white ink inside it, rotation-invariant hatching (E020), nested patch hatching with tapered, ragged ends, feathered tone boundaries, no crosshatch by default. Black-and-white presets `nihei` (test scene; shadows off) and `nihei_vast` (the One Shaft, M1; see `one-shaft.md`). Since E027 (2026-11-16) three more presets try two continuous tone models side by side, for the owner to choose between: `nihei_fall` (model A, ruling that comes in only as surfaces fall into darkness and merges continuously into black), `nihei_wash` (model B, graded grey wash printed as fine screentone, sparse ruling) and `nihei_hybrid` (wash for mid tones, model A's ruling at depth). They use a new ruled stroke (weight profile along the stroke, width a fraction of the pitch, tone conserved across distance). Scenes still default to `nihei` and `nihei_vast`; `MEGA_PRESET` selects another without code changes (see "Tone models"). Not yet built: the sky pass, light shafts, screentone, the far-field shadow ray march, the compute cull prepass, world-keyed contour wobble, colour presets.
+In progress, 2026-11-15. Milestone M0 frame working on the test scene: forward MRT pass with ruled hatching and tone bands, stroke pass, contour pass with its own anti-aliasing resolve, composite with atmosphere, ten debug views. Sun shadow pass (cascaded, orthographic or perspective, refitted every frame) feeding the light before band quantisation, and tone composition working on the One Shaft (E011 to E025): cast shadows drawn as dense hatching with a crisp or feathered edge, solid black only in recesses with white ink inside it, rotation-invariant hatching (E020), nested patch hatching with tapered, ragged ends, feathered tone boundaries, no crosshatch by default. Black-and-white presets `nihei` (test scene; shadows off) and `nihei_vast` (the One Shaft, M1; see `one-shaft.md`). Since E027 (2026-11-16) three more presets try two continuous tone models side by side, for the owner to choose between: `nihei_fall` (model A, ruling that comes in only as surfaces fall into darkness and merges continuously into black), `nihei_wash` (model B, graded grey wash printed as fine screentone, sparse ruling) and `nihei_hybrid` (wash for mid tones, model A's ruling at depth). They use a new ruled stroke (weight profile along the stroke, width a fraction of the pitch, tone conserved across distance). Since E035 to E039 (2026-11-16) the default for both scenes is `nihei_ink` (the shaft) and `nihei_ink_small` (the test scene): the wash as the base, with a soft, seam-free grain fixed to the surface (E036); ruling only as a distance effect, sparse, coming in with distance and depth below the eye and closing into black far down the shaft (E035); and one bounce of sun and sky light (E037, `bounced-light.md`). `nihei_ink_wash` is the same without ruling. Every older preset is still selectable by name and draws byte-identically to before; `MEGA_PRESET` selects any of them without code changes (see "Tone models"). Not yet built: the sky pass, light shafts, screentone, the far-field shadow ray march, the compute cull prepass, world-keyed contour wobble, colour presets.
 
 ## What it is
 
@@ -27,7 +27,7 @@ The frame that turns the generator's triangles and ink strokes into a page that 
 | 0 | CPU stroke cull | CPU | strokes, camera, preset | `visible` index list (storage buffer) |
 | 0a | Cascade fit | CPU | camera, sun, scene bounds | four light matrices (`shadow::fit`) |
 | 0b | Sun shadow | depth-only raster, four passes, no culling | vertex positions | shadow map array (four layers) |
-| 1 | Forward | raster, MRT, depth test | vertices, shadow maps | depth, id, normal, fill, ink |
+| 1 | Forward | raster, MRT, depth test | vertices (slot 0, `Vertex`, 48 bytes), bounce (slot 1, 8 bytes, `bounced-light.md`), shadow maps | depth, id, normal, fill, ink, tone |
 | 2 | Contours | fullscreen fragment | id, depth, normal | contour mask |
 | 3 | Ink lines | two draws in one pass, max blend | `visible`, strokes, depth; contour mask | ink |
 | 3a | Strokes | instanced quads, 6 vertices per stroke, vertex pulling | | ink B and A (G for white strokes) |
@@ -58,8 +58,9 @@ Two light values are computed per fragment, the light with the sun unobstructed 
 ```
 n       = 1 - underside_black * max(-N.y, 0)          (times smoothstep(pool_ao -+ pool_width, ao) if pool_ao > 0)
 noise   = tone_noise * (2 vnoise3(P / tone_noise_len) - 1) + panel_tone * (2 hash(id_fine) - 1)
-lit     = (sun_strength * intensity * max(N.S, 0) * mix(1, ao, sun_occlusion) + ambient * ao + noise) * n
-dark    = clamp((ambient * ao * shadow_ambient + noise) * n, shadow_light_min, shadow_light_max)
+bounced = bounce * sun_strength * intensity * sun_b + bounce_sky * ambient * sky_b     (baked per vertex, bounced-light.md; 0 unless the preset asks)
+lit     = (sun_strength * intensity * max(N.S, 0) * mix(1, ao, sun_occlusion) + ambient * ao + noise) * n + bounced
+dark    = clamp((ambient * ao * shadow_ambient + noise) * n, shadow_light_min, shadow_light_max) + bounced
 facing  = 1 if N.S > 0.05 (per face; 1 for every face when there is no sun)
 lit     = mix(lit, dark, shadow_attached * (1 - facing))        faces turned away: a light blend
 amount  = (1 - vis) * sun_shadow * facing                       cast shadow, anti-aliased (below)
@@ -375,7 +376,27 @@ Each factor is off at 0. `dark_down_len` (depth below the eye) is what makes loo
 - 1 view sphere: an equi-angular cube map of the view direction, the dot lattice aligned to the cube edges (the pitch rounded so a quarter turn holds a whole number of cells) so it mirrors seamlessly across them; grain is 3D noise on the direction. Fixed under rotation, slides under translation.
 - 2 surface: in the surface frame (dots) or world position (grain), octaves chosen from the rotation-invariant footprint and crossfaded; the octave-(k+1) dot screen's dots are every other dot of octave k. Rigid; dots change size with distance. Grain is stretched into streaks on grazing surfaces (3D noise seen edge-on).
 
+**Surface grain, E036** (`screentone_aniso` 1, used by the `nihei_ink` presets). The E032 surface grain had three faults, now fixed behind fields so the old grain stays reachable:
+
+- *Seams.* It blended octave k (one seed) with octave k + 1 (another), and at the next integer octave the pair became k + 1 and k + 2 with the seeds the other way round, so the drawn field swapped at every integer octave, along lines of equal footprint: the straight lines the owner saw changing detail as he walked. Now each octave pair has its own seed, a function of the octave numbers only, so the field at the end of a crossfade is the field at the start of the next; the blend is renormalised by its standard deviation so contrast does not dip halfway.
+- *Streaks.* One octave from the larger footprint made cells many pixels long across a grazing floor. Now each surface axis has its own octave from its own rotation-invariant footprint (2D noise in the surface frame, four fields blended bilinearly, the plane's offset hashed into the seed).
+- *Swimming.* The noise lattice was 0.4 of a cell, sub-pixel, so the threshold aliased and re-formed under any sub-pixel motion; rotation hid it because it keeps the footprint. `screentone_detail` weights that fine lattice against one at 0.8 of the cell (1.6 to 3 px); the default is 0.3 fine.
+- *Hardness.* The threshold's ramp was one pixel, so each grain was a two-level blob. `screentone_soft` widens it, in threshold units: at 2 the grain is a continuous modulation of the grey.
+
+`nihei_ink` uses aniso 1, detail 0.3, soft 2 and `screentone` 0.2, and `paper_texture` 0.04 (0.06 before; it is screen-anchored and so slides over the wash when walking). Walking error on the wash falls from 1.8 to about 0.6 levels (E036).
+
 Screen-anchored `paper_texture` (scale `paper_texture_px`) is the only screen-anchored element besides `paper_grain`. `wash_speckle` puts the white specks in dark wash too. The composite multiplies the wash into the paper before the fog and the lines; ink stays ink and paper stays paper, greys come only from the wash.
+
+**Distance ruling, E035** (`rule_fade_in` > 0, the `nihei_ink` presets). On top of the wash, ruling comes in only with distance. With the eye at height `eye_y` and distance `r`:
+
+```
+de    = r + rule_down_gain * max(eye_y - y, 0)                         effective distance
+gate  = smoothstep(rule_near, rule_near + rule_fade_in, de)              (1 if rule_fade_in is 0)
+rdark = exp(-max(de - rule_near, 0) / rule_dist_len)                      (1 if rule_dist_len is 0)
+c     = fall_curve(L * darkf * rdark) * gate                             for both the lit and the shadow side
+```
+
+The wash does not see `gate` or `rdark`. Near surfaces, including deep shade and cast shadow, are carried by the wash alone; the solid black of the merge (`smoothstep(0.85, 0.985, c)`) follows `c`, so black too appears only far away. Depth below the eye counts extra, so looking down the shaft gathers ruling sooner than looking across it. Both factors depend on the eye position only, so the ruling is as rigid under rotation as before (E038: `shaft_spawn_yaw` pops 0.015% against the wash's 0.014%). Sparseness comes from a wide octave target (`rule_target_px` 9 px) that closes up as the tone darkens (`rule_density` 3: pitch divided by 1 + 3c), a light tone curve (`fall_white` 0.28), a gentler weight profile (`rule_profile` 0.4, fewer wedge-shaped strokes) and long runs (`hatch_break_len` 4 m, fewer stroke ends). `shadow_hatch_near` is off: with it, ruling and black inside cast shadow survived only near the edge and the far pit never closed (E035).
 
 **Choosing a preset.** `mega_capture --preset <name>`; in the game, `StylePreset::for_scene` returns the preset named by the `MEGA_PRESET` environment variable when it is set (any scene; an unknown name is reported on stderr and ignored), otherwise the scene's own (`StylePreset::scene_default`). The screenshot sidecar records the preset in use, so a replay reproduces it.
 
@@ -383,7 +404,9 @@ Screen-anchored `paper_texture` (scale `paper_texture_px`) is the only screen-an
 MEGA_PRESET=nihei_fall   cargo run --release --bin megastructure -- --scene shaft
 MEGA_PRESET=nihei_wash   cargo run --release --bin megastructure -- --scene shaft
 MEGA_PRESET=nihei_hybrid cargo run --release --bin megastructure -- --scene shaft
-cargo run --release --bin megastructure -- --scene shaft          # nihei_vast, as before
+MEGA_PRESET=nihei_ink_wash cargo run --release --bin megastructure -- --scene shaft   # the new wash, no ruling
+MEGA_PRESET=nihei_vast   cargo run --release --bin megastructure -- --scene shaft   # the band model
+cargo run --release --bin megastructure -- --scene shaft          # nihei_ink, the default since E038
 ```
 
 #### Fields (defaults in `nihei`; they have no effect while `tone_model` is 0)
@@ -413,6 +436,14 @@ cargo run --release --bin megastructure -- --scene shaft          # nihei_vast, 
 | `wash_speckle` | 0 | White specks in dark wash |
 | `shadow_edge_line` | 0 px | Ink line along cast shadow edges |
 | `shadow_hatch_near` | 0 | 1: shadow strokes only within `indication_radius` of the edge |
+| `rule_near` | 0 m | Effective distance below which there is no ruling (with `rule_fade_in` > 0) (E035) |
+| `rule_fade_in` | 0 m | Length over which ruling fades in past `rule_near`; 0 no gate (ruling at every distance, as before E035) |
+| `rule_down_gain` | 0 | Weight of depth below the eye in the effective distance |
+| `rule_dist_len` | 0 m | Ruled light darkened by `exp(-(de - rule_near) / len)`; 0 off |
+| `screentone_aniso` | 0 | 1: per-axis, seam-free surface grain (E036); 0 the E032 grain |
+| `screentone_detail` | 1 | With `screentone_aniso`: weight of the fine (sub-pixel) grain lattice against one twice as coarse |
+| `screentone_soft` | 0 | Width of the screentone threshold's ramp in threshold units; 0 one pixel (hard grain), 2 a soft modulation |
+| `bounce`, `bounce_sky` | 0, 0 | Strengths of bounced sun and sky light (`bounced-light.md`); 0 off and no bake |
 
 Old sidecars have none of these; on replay they take the named preset's defaults (with the usual warning), and with `tone_model` 0 they change nothing.
 
@@ -435,6 +466,23 @@ All three are `nihei_vast` with these changes.
 | `white_hatch` | 0 | 0 | 0 |
 | `fog_density`, `fog_max` | 0.0015, 0.3 (darkness is not faded) | as `nihei_vast` | as `nihei_vast` |
 
+#### The default, `nihei_ink` (E035 to E038)
+
+`nihei_ink` is `nihei_wash` with these changes; `nihei_ink_wash` is `nihei_ink` with `fall_white` 0 and `fall_black` -0.01 (no ruling at all); `nihei_ink_small` is `nihei_ink` with `nihei`'s fog, ambient, sun strength, line fades and sky, no shadow pass (the test scene is closed) and the ruling gated over 15 + 40 m with `fall_white` 0.28 and no down gain.
+
+| Field | `nihei_ink` | Why |
+|---|---|---|
+| `screentone_aniso`, `screentone_detail`, `screentone_soft`, `screentone` | 1, 0.3, 2, 0.2 | Seam-free, still under walking, soft (E036) |
+| `paper_texture` | 0.04 | Screen-anchored; lower so it slides less over the wash (E036) |
+| `fall_white`, `fall_black`, `fall_gamma` | 0.28, 0.05, 1.5 | Ruling only in dark tone |
+| `rule_near`, `rule_fade_in`, `rule_down_gain`, `rule_dist_len` | 40 m, 150 m, 1, 300 m | Nothing near; gathers looking down; black only far down (E035) |
+| `rule_target_px`, `rule_density` | 9 px, 3 | Sparse at light tone, closing up as it darkens |
+| `rule_profile`, `hatch_break_len` | 0.4, 4 m | Fewer wedges and stroke ends |
+| `shadow_hatch_near` | 0 | Far cast shadow is ruled and closes into black |
+| `bounce`, `bounce_sky` | 0.6, 0.3 | Shade next to lit surfaces lifts to mid grey (E037) |
+
+`StylePreset::scene_default` returns `nihei_ink` for `shaft` and `nihei_ink_small` for anything else.
+
 Rule fields not listed take the defaults above. Longer runs (`hatch_break_len` 2) matter beyond looks: with short runs the ragged ends cost more coverage at mid distance than the compensation assumes (E029).
 
 ### Debug views
@@ -455,6 +503,8 @@ Selected with `Renderer::set_view(DebugView)` or `mega_capture --view <name>`.
 | `shadow` | Cast-shadow amount in black over a cascade tint (0 white, 1 blue, 2 green, 3 red) |
 
 ### Measured (Apple M3 Max, Metal)
+
+Default since E038, `--bench 200` at 1280x720 and `--bench 100` at 2560x1440, lowest of three runs, over `shaft_spawn`, `shaft_rim_down`, `shaft_hall_enter`, `shaft_gallery_down`: `nihei_ink` 1.52 to 2.63 ms and 4.44 to 5.60 ms; `nihei_wash` on the same views 1.54 to 2.16 ms and 4.30 to 6.36 ms (the new grain evaluates four 2D fields of two lattices each, the old one two 3D fields; distance ruling skips the ruled layer near the eye, which is why the hall is faster). `still_hall` with `nihei_ink_small`: 1.05 and 3.54 ms. The bounce bake (0.5 s for the shaft, 20 ms for the test scene) happens on the first frame and when the sun moves, and is not in these figures (`bounced-light.md`).
 
 Tone models (E027 to E034), `--bench 200` at 1280x720 and `--bench 100` at 2560x1440 over `shaft_spawn`, `shaft_rim_down`, `shaft_hall_enter`, `still_hall`: `nihei_vast` 1.19 to 1.80 and 3.74 to 4.96 ms; `nihei_fall` 1.66 to 2.32 and 4.54 to 7.44 ms; `nihei_wash` 1.15 to 2.03 and 3.74 to 6.15 ms; `nihei_hybrid` 1.39 to 2.70 and 4.31 to 8.89 ms. The ruled layer evaluates five lines per fragment where the band model evaluated two. Stability for the new presets is in E027 in `experiments.md`.
 
@@ -478,8 +528,8 @@ The shaft figures per unit of ink rose from E018 because the large blacks, which
 
 ### Files
 
-- `crates/render/src/style.rs`: `StylePreset`, `nihei()`, `nihei_vast()`, `nihei_fall()`, `nihei_wash()`, `nihei_hybrid()`, `for_scene` (with `MEGA_PRESET`), `scene_default`, `by_name`, GPU packing.
-- `crates/render/src/renderer.rs`: targets, pipelines, CPU stroke cull, shadow resources and passes, `DebugView`, `Sun`, `HatchLod`, `StrokeVisibility`, `ShadowFilter`.
+- `crates/render/src/style.rs`: `StylePreset`, `nihei()`, `nihei_vast()`, `nihei_fall()`, `nihei_wash()`, `nihei_hybrid()`, `nihei_ink()`, `nihei_ink_wash()`, `nihei_ink_small()`, `for_scene` (with `MEGA_PRESET`), `scene_default`, `by_name`, GPU packing.
+- `crates/render/src/renderer.rs`: targets, pipelines, the bounce vertex stream and its lazy re-bake (`update_bounce`, `bounce_bake_ms`), CPU stroke cull, shadow resources and passes, `DebugView`, `Sun`, `HatchLod`, `StrokeVisibility`, `ShadowFilter`.
 - `crates/render/src/shadow.rs`: cascade fitting (`fit`, `Cascades`, `SHADOW_SIZE`, `SHADOW_CASCADES`, `CAMERA_SPLITS`), with tests.
 - `crates/render/shaders/shadow.wgsl`: the depth-only shadow pass.
 - `crates/render/shaders/common.wgsl`: uniforms, hashes, noise, filtered coverage, octahedral encoding, fullscreen triangle. Prepended to every pass.
@@ -498,7 +548,7 @@ The shaft figures per unit of ink rose from E018 because the large blacks, which
 - Hatching on large lit-from-nowhere interiors reads as graph paper when the floor is lit and panelled; this is a scene and shadow question more than a renderer one, to revisit with shadows.
 - Contour depth edges at silhouettes are one pixel and binary before the resolve; in orbiting views they are the least stable contribution (0.75% of compared pixels off by more than 64 levels). A sub-pixel silhouette estimate from the depth planes would help.
 - World-keyed contour wobble (planned) is not implemented.
-- Tone models (E027 to E034): which model the shaft uses is the owner's choice; nothing switches scenes over yet. Open within them: surface grain streaks on grazing surfaces (an anisotropic footprint for the grain would fix it); the wash has no chipped white along edges (needs edge distance, as for strokes stopping short of creases); the heavy end of shadow strokes is set from the sun's projected direction, checked only with a high sun; tone is conserved across distance only to about +-8% (E029), worst where patch runs are short in pixels; the hybrid costs up to 8.9 ms at 2560x1440.
+- Tone models (E027 to E034): the owner chose the wash (2026-11-16) and `nihei_ink` is the default since E038. Open: whether the distance ruling's amount is right (E035 sheet); which grain softness reads as print (E036 sheet), and whether value noise is too synthetic a grain (blue noise or a fibre texture untried); the rotation-invariant footprint is that of the image centre, so near the image corners on a close floor the per-axis grain is slightly anisotropic on screen (radial elongation); `paper_texture` is still screen-anchored; the old grain's surface streaks are fixed only with `screentone_aniso`; the wash has no chipped white along edges (needs edge distance, as for strokes stopping short of creases); the heavy end of shadow strokes is set from the sun's projected direction, checked only with a high sun; tone is conserved across distance only to about +-8% (E029), worst where patch runs are short in pixels; the hybrid costs up to 8.9 ms at 2560x1440.
 - The compute cull prepass should write the `visible` list and indirect arguments; nothing in the stroke shader needs to change.
 
 ### Review notes, 2026-11-15 (Cat, from the windowed test scene)
@@ -534,6 +584,21 @@ The shaft figures per unit of ink rose from E018 because the large blacks, which
 - "Is the thickness in screen space? As I move backwards from the wall it seems to stay about the same thickness which feels wrong. And then when you get further away they get much closer together as a result and start to blend together into thicker lines that feel jagged and daggery at the ends."
 - Diagnosis confirmed: width was held in rotation-invariant pixels with a cap while pitch shrank with distance, so across an octave width/pitch doubled, tone darkened as one backed away and neighbours fused into blades. Addressed in the continuous tone models (E028, E029): width a fraction of the pitch, coverage conserved across octaves, a weight profile over the whole stroke ending in a hairline, variation between strokes, finer ruling at high resolution. `nihei` and `nihei_vast` keep the old strokes so the sheets can show "current"; the new strokes are in every new preset.
 
+### Review notes, 2026-11-16, fourth set (Cat, on the E027 to E034 sheets)
+
+- "Hmm ok the wash is definitely the nicest. I do like the hybrid a bit but the hatching is still kind of ugly. I guess I'd like it more if it were more sparse still, and mainly appeared as you looked into the distance down the shaft. The hatching under the stairs is still a bit over the top, but perhaps light transfer would help, because I don't think it'd realistically be that dark."
+- Done: the wash is the base of the new default `nihei_ink`; ruling is a sparse distance effect (E035); bounced light lifts the shade under the stair (E037, `bounced-light.md`).
+
+### Review notes, 2026-11-16, fifth set (Cat, `nihei_wash` in the window)
+
+- "The wash is a really nice effect and a great base layer btw! The only issue also is that it swims as you walk around, and seems to suddenly change at certain distances for some reason, meaning that there are straight lines where you can see it changing detail - it looks a bit like tearing but I think it's just the wash becoming more coarse or something. I like the effect at rest."
+- Causes and fixes in E036: the grain's octave pairs swapped seeds at every integer octave (the straight lines), and its noise lattice was sub-pixel, so it aliased under walking (the swim); rotation probes could not show either.
+
+### Review notes, 2026-11-16, sixth set (Cat, on the wash grain)
+
+- "I like the wash on the whole but it does feel a bit harsh and noisy still compared to a real comic. I think that's because it's just on/off (bands of one greyscale color and white with a hard edge between them). The noise itself feels a little unnatural too, but maybe it's just the hard edges I'm noticing."
+- Done in E036: the grain is a soft, low-amplitude modulation of a continuous grey (`screentone_soft`, `screentone`), with a coarser, slightly clumped lattice; a ladder from the old hard grain to pure gradient is on the E036 sheet. Not tried: a different noise character (blue noise, fibre).
+
 ## Related experiments
 
-E001 (temporal metric), E002 (hatch octave selection), E003 (stroke depth tolerance), E004 (distance behaviour of lines), E005 (contour anti-aliasing), E006 (tent versus box coverage), E007 (tone and lighting for the test scene), E008 (distance on the 600 m shaft), E010 (tone and light for the shaft), E011 (shadow treatment), E012 (shadow edge and moving sun), E013 (hand-cut edge), E014 (uneven hatching), E015 (crosshatch angle), E016 (graphic blacks and white ink), E017 (abyss and sky), E018 (before and after), E019 (hatch stroke ends and patches), E020 (swimming under rotation), E021 (shadow as hatching, rare black), E022 (hatched shadow edge), E023 (crosshatch), E024 (feathered boundaries), E025 (nested patches), E026 (owner's frames), E027 to E034 (tone models, strokes, distance and level of detail, owner's frames in each model, merge into black, screentone, cast shadows, near views).
+E001 (temporal metric), E002 (hatch octave selection), E003 (stroke depth tolerance), E004 (distance behaviour of lines), E005 (contour anti-aliasing), E006 (tent versus box coverage), E007 (tone and lighting for the test scene), E008 (distance on the 600 m shaft), E010 (tone and light for the shaft), E011 (shadow treatment), E012 (shadow edge and moving sun), E013 (hand-cut edge), E014 (uneven hatching), E015 (crosshatch angle), E016 (graphic blacks and white ink), E017 (abyss and sky), E018 (before and after), E019 (hatch stroke ends and patches), E020 (swimming under rotation), E021 (shadow as hatching, rare black), E022 (hatched shadow edge), E023 (crosshatch), E024 (feathered boundaries), E025 (nested patches), E026 (owner's frames), E027 to E034 (tone models, strokes, distance and level of detail, owner's frames in each model, merge into black, screentone, cast shadows, near views), E035 (ruling as a distance effect), E036 (wash grain: seams, swimming, softness), E037 (bounced light), E038 (the new default), E039 (the owner's frames in it).

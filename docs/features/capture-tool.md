@@ -21,9 +21,10 @@ Run from the workspace root: `cargo run --release -p mega_capture -- <options>`.
 
 | Option | Meaning | Default |
 |---|---|---|
-| `--path <name>` | Camera path, required | |
+| `--path <name>` | Camera path, required unless `--camera` is given | |
+| `--camera <x,y,z,yaw,pitch[,fov_y]>` | A fixed camera instead of a path, in metres and radians exactly as in a screenshot sidecar's `camera` block (yaw 0 looks along +Z, positive towards +X; pitch positive up). Use with `--scene`; the path name printed is `camera` (E039) | 70 degree `fov_y` |
 | `--scene <name>` | Scene from `mega_gen::scenes::NAMES`. The scene also selects its style preset (`StylePreset::for_scene`) and sun (`Sun::for_scene`). A path tuned to another scene renders with a warning | the path's own scene (`paths::scene_of`), else `mega_gen::scenes::DEFAULT` |
-| `--preset <name>` | Style preset instead of the scene's: `nihei`, `nihei_vast`, `nihei_fall`, `nihei_wash`, `nihei_hybrid` (`StylePreset::NAMES`). Without it the scene's preset is used, or the one named by `MEGA_PRESET` if that is set | the scene's |
+| `--preset <name>` | Style preset instead of the scene's: `nihei`, `nihei_vast`, `nihei_fall`, `nihei_wash`, `nihei_hybrid`, `nihei_ink`, `nihei_ink_wash`, `nihei_ink_small` (`StylePreset::NAMES`). Without it the scene's preset is used, or the one named by `MEGA_PRESET` if that is set | the scene's |
 | `--out <dir>` | Output directory, created if missing, required | |
 | `--frames <N>` | Number of frames. Frame `i` uses `t = i / (N - 1)` | 1 |
 | `--t <T>` | `t` in 0..1; only valid with `--frames 1` | 0.5 |
@@ -48,7 +49,15 @@ Run from the workspace root: `cargo run --release -p mega_capture -- <options>`.
 | `--list-paths` | Print path names with their scenes and exit | |
 | `--list-scenes` | Print scene names and exit | |
 
-Before rendering, one line `scene <name>: V vertices, T triangles, S strokes, C colliders, built in N ms` is printed (the build time covers `scenes::by_name`). Files are named `frame_0000.png`, `frame_0001.png` and so on; each written path is printed to stdout. `RUST_LOG=info` prints the adapter.
+Before rendering, one line `scene <name>: V vertices, T triangles, S strokes, C colliders, built in N ms` is printed (the build time covers `scenes::by_name`). When the preset uses bounced light, `bounce bake N ms` is printed whenever it is baked (on the first frame, and again when the sun moves; see `bounced-light.md`); with `--bench` it is printed before timing starts, so the bake is not in the frame time.
+
+Reproducing a screenshot (the owner's frame 20261116-000558, from its sidecar's `camera` block):
+
+```
+cargo run --release --bin mega_capture -- --scene shaft --camera 11.894625,398.87717,1.8399285,1.7551144,0.053627737,1.2217306 --width 3024 --height 1832 --out <dir>
+```
+
+The preset is the current scene default unless `--preset` and `--set` say otherwise; the game's `--shot` replay (`screenshots.md`) also restores the sidecar's preset fields and sun. Files are named `frame_0000.png`, `frame_0001.png` and so on; each written path is printed to stdout. `RUST_LOG=info` prints the adapter.
 
 Example: `mega_capture --path corridor_walk --frames 60 --width 1280 --height 720 --out captures/walk`.
 
@@ -82,6 +91,8 @@ Defined in `crates/render/src/paths.rs` as `fn(t: f32) -> Camera`, `t` clamped t
 `shaft_wall_approach` faces the hall's back wall square on from 160 m to 2 m on a log scale, `d = 2 * 80^(1 - t)` (t 1, 0.7909, 0.6327, 0.3819, 0.1582, 0 for 2, 5, 10, 30, 80, 160 m; at 160 m the camera is in the shaft looking through the arch). With `--centre-ink` it gives tone against distance (E029): `mega_capture --path shaft_wall_approach --frames 21 --view hatching --centre-ink --no-png --preset nihei_fall --set paper_grain=0 --set tone_noise=0 --set dark_dist_len=0`.
 
 `shaft_hall_wall` approaches the owner's screenshot 20261116-000630 from 78 m to 2 m (t 0.85 is the screenshot's distance; E026). The shaft has the same rotation probes at the spawn: `shaft_spawn_yaw` and `shaft_spawn_pitch` (E020). Example: `mega_capture --path shaft_spawn_yaw --frames 61 --view hatching --metrics --no-png`.
+
+`shaft_hall_walk` walks 60 m down the hall at eye height, eyes slightly down, so the floor recedes at grazing angles through many octaves of the surface screentone (E036). `--frames 61 --t1 0.02333` is 1.4 m/s at 60 fps: `mega_capture --path shaft_hall_walk --frames 61 --t0 0 --t1 0.02333 --metrics --no-png`.
 
 To add a path, write the function, add it to `NAMES` and `by_name`, and make sure `scene_of` maps it to its scene.
 
