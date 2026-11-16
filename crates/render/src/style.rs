@@ -861,7 +861,7 @@ impl StylePreset {
             far_pencil: 0.0,
             // Pencil shading from the hand-shaded tile, in patches where it is dark (E059);
             // it replaces the near laid-line pencil (E052) and the far strokes (E057).
-            shade: 0.5,
+            shade: 0.35,
             shade_from: 0.45,
             far_white: 0.45,
             far_pencil_px: 1.0,

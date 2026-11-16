@@ -541,7 +541,7 @@ All three are `nihei_vast` with these changes.
 | `paper_near_dist`, `paper_near_amp` | 40 m, 0.5 | Calmer up close (E051) |
 | `pencil`, `pencil_kind`, `pencil_patches` | 0.15, 3 (Paper004), 1 | Pencil shading in shade, in patches (E052, E053) |
 | `far_mode`, `far_pencil`, `pencil` | 1, 0, 0 | Distance shading as wash, no ruling; the E057 strokes and E052 laid-line pencil off (E059) |
-| `shade`, `shade_from` | 0.5, 0.45 | Pencil shading from the hand-shaded tile where it is dark (E059) |
+| `shade`, `shade_from` | 0.35, 0.45 | Pencil shading from the hand-shaded tile where it is dark (E059; strength 0.35 chosen by the owner from E061, 2026-11-16) |
 | `fall_white`, `fall_black`, `fall_gamma`, `rule_dist_len`, `fog_ao` | 0.3, 0.04, 2.4, 380 m, 1.2 | A long, mostly grey fall into black (E059) |
 | `halftone`, `halftone_pitch`, `halftone_soft`, `halftone_angle`, `halftone_max_pitch` | 0.05, 1 cm, 0.8, 30 deg, 5 cm | Subtle round-dot halftone in mid to dark tone, near surfaces only (E040, E044) |
 | `shadow_soft`, `shadow_soft_max`, `shadow_soft_min` | 0.06, 1 m, 15 cm | Soft shadow edges widening with distance from the occluder, continuous across cascades (E041, E047) |
