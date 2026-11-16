@@ -581,6 +581,21 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Setup: sheet `compare/E061-shade-strength.png`: `shade` 0.35 / 0.5 / 0.7 on `shaft_hall_deep_side`, `shaft_hall_deep_back`, `shaft_gallery_down` and frame 000558's camera; regenerate with `mega_capture --path shaft_hall_deep_back --width 2560 --height 1440 --set shade=0.7 --out <dir>`.
 - Verdict: 0.5. Question on the sheet: how strong should the shading be?
 
+## E062: The light end
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("The light end")
+- Question: the owner: the light sections of the open shaft are too light; perhaps HDR tone mapping.
+- Setup: measured first, share of non-sky pixels by grey level (640x360; paper is about 234): paper or within 20 levels of it, `shaft_spawn` 28%, `shaft_arch_view` 74%, `shaft_rim_down` 87%, `shaft_b2_down` 52%. Cause: every light value above `wash_white` (0.72) printed as paper, and ambient times openness alone exceeds it near the top. Tried: (d) `wash_white` 0.95: darkened the deep hall (pixels under 100 from 56% to 68%), rejected; (a/b) a pale wash above `wash_white` thinning to paper at a white point with a shoulder: at white points 1.25 to 1.3 nothing was paper any more, at 1.0 the sunlit wall went pale too and the stair's shadow on it lost its contrast; adding `light_sun` (direct sun counted 4 times at the light end only) keeps sunlit faces paper; (c) a far tint (`light_far` 0.1): little visible change. Sheet `compare/E062-light-end.png`: current / (d) / pale end without sun boost / default with far tint / default, on `shaft_spawn`, `shaft_arch_view`, `shaft_rim_down`, `shaft_b2_down`, with `shaft_hall_deep_in` and frame 000558's camera as controls, 2560x1440; regenerate with `mega_capture --path shaft_arch_view --width 2560 --height 1440 --set light_wash=0 --out <dir>`.
+- Result (default): paper is 12% of `shaft_spawn`, 18% of `shaft_arch_view` (sunlit faces), 68% of `shaft_rim_down` (sunlit walls near the rim); sky-lit walls are pale greys. Deep hall and pit unchanged to the percent; `shaft_rim_down` luminance by distance 194, 162, 137, 95, 82, 73, 71, 40, 35 (to 150 ... 550 m).
+- Stability (61 frames, 720p; 5x5 error / pops / relative pops, off / on): `shaft_spawn_yaw` 0.265 / 0.271; `shaft_rim_pitch` 0.160 / 0.162; `shaft_hall_walk` 0.290 / 0.290; `shaft_bridge_walk` 0.303 / 0.308; `shaft_hall_deep_in` 0.200 / 0.200; pops unchanged. Frame time: within 0.06 ms at 1440p.
+- Verdict: kept (`light_wash` 0.18, `light_white` 1.0, `light_gamma` 1.3, `light_sun` 4). Exposure adaptation not added (tones would change with camera position). Question on the sheet: do the sunlit areas now have enough tone, with white kept for the brightest places?
+
+## E063: Exposure of the light end
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md`
+- Setup: sheet `compare/E063-light-exposure.png`: `light_white` 0.9 / 1.0 / 1.15 on `shaft_spawn`, `shaft_arch_view`, `shaft_rim_down`; regenerate with `mega_capture --path shaft_arch_view --width 2560 --height 1440 --set light_white=1.15 --out <dir>`.
+- Verdict: 1.0. Question on the sheet: how much tone should the light carry?
+
 ## Queued
 
 

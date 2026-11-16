@@ -468,6 +468,20 @@ fn fall_curve(l: f32) -> f32 {
     return pow(x, max(S.fall.z, 1e-3));
 }
 
+// Pale wash at the light end (E062): S.paper13.x at wash_white, thinning to 0 at light_white
+// (S.paper13.y) along (1 - t)^gamma (S.paper13.z: above 1 a quick fall then a long pale
+// shoulder); below wash_white it fades out over 0.25 of light, leaving the darker tones as
+// they were.
+fn light_end(l: f32) -> f32 {
+    let ww = S.wash.y;
+    let lw = max(S.paper13.y, ww + 0.01);
+    if (l >= ww) {
+        let t = saturate((l - ww) / (lw - ww));
+        return S.paper13.x * pow(1.0 - t, max(S.paper13.z, 0.1));
+    }
+    return S.paper13.x * smoothstep(ww - 0.25, ww, l);
+}
+
 // Wash curve, already scaled to ink coverage.
 fn wash_curve(l: f32) -> f32 {
     let x = saturate((S.wash.y - l) / max(S.wash.y - S.wash.z, 1e-3));
@@ -1495,6 +1509,20 @@ fn fs_main(in: VsOut) -> FsOut {
     var wash = 0.0;
     if (S.wash.x > 0.0) {
         var w0 = mix(wash_curve(lit_t), wash_curve(dark_t), amount);
+        // The light end (E062): above wash_white the light no longer clips to paper but
+        // prints a pale wash that thins along a shoulder to paper only at light_white (the
+        // sun square on a surface), so lit and sky-lit walls keep their modelling.
+        // light_wash is the wash at wash_white; it fades out below wash_white, so the dark
+        // end is untouched. light_far adds a faint pale tint with distance on top.
+        if (S.paper13.x > 0.0 || S.paper14.x > 0.0) {
+            // Direct sun counts S.paper13.w times more at the light end than in the mid
+            // tones (it is far brighter than the sky in reality), so sunlit faces still reach
+            // paper and the shadows on them keep their contrast; sky-lit faces go pale.
+            let sun_direct = S.light.x * G.sun_params.y * max(ndl, 0.0) * sun_vis;
+            let pale = mix(light_end(lit_t + S.paper13.w * sun_direct), light_end(dark_t), amount);
+            let far = S.paper14.x * smoothstep(S.paper14.y, S.paper14.z, rr);
+            w0 = 1.0 - (1.0 - w0) * (1.0 - pale) * (1.0 - far);
+        }
         // Far tone into the wash (E054): the light darkened with distance and depth below the
         // eye, gated near the eye (rule_near, rule_fade_in, rule_down_gain, rule_dist_len),
         // deepens the wash towards solid ink at the bottom of the shaft.

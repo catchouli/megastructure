@@ -73,6 +73,8 @@ struct Style {
     paper10: vec4<f32>,         // unused, far tone into the wash, far pencil onset light
     paper11: vec4<f32>,         // shade strength, shade px per texel, shade from, shade to
     paper12: vec4<f32>,         // shade ao weight, shade grain
+    paper13: vec4<f32>,         // light wash, light white, light gamma, light sun gain
+    paper14: vec4<f32>,         // light far tint, its start (m), its end (m)
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;

@@ -453,6 +453,23 @@ pub struct StylePreset {
     pub shade_ao: f32,
     /// How much the graphite catches the paper's tooth (0 none).
     pub shade_grain: f32,
+    /// The light end (E062): wash coverage at `wash_white`, thinning to paper at
+    /// `light_white`, so lit surfaces print pale greys instead of clipping to paper. 0 off.
+    pub light_wash: f32,
+    /// Light value at which surfaces reach paper white (the exposure of the light end: lower
+    /// is brighter).
+    pub light_white: f32,
+    /// Shape of the thinning: above 1, most lit surfaces keep a pale wash and only the
+    /// brightest reach paper (a shoulder).
+    pub light_gamma: f32,
+    /// Extra weight of direct sun at the light end only (sun far brighter than sky), so sunlit
+    /// faces stay paper and their shadows keep contrast. 0: the sun counts as in the mid tones.
+    pub light_sun: f32,
+    /// A faint pale tint growing with distance from `light_far_start` to `light_far_end`
+    /// metres, so the far side of a space separates from the near. 0 off.
+    pub light_far: f32,
+    pub light_far_start: f32,
+    pub light_far_end: f32,
 }
 
 impl StylePreset {
@@ -633,6 +650,13 @@ impl StylePreset {
             shade_to: 0.95,
             shade_ao: 0.3,
             shade_grain: 0.6,
+            light_wash: 0.0,
+            light_white: 1.25,
+            light_gamma: 1.5,
+            light_sun: 0.0,
+            light_far: 0.0,
+            light_far_start: 40.0,
+            light_far_end: 200.0,
         }
     }
 
@@ -689,6 +713,8 @@ impl StylePreset {
             paper10: [0.0, self.far_wash, self.far_white, 0.0],
             paper11: [self.shade, self.shade_px, self.shade_from, self.shade_to],
             paper12: [self.shade_ao, self.shade_grain, 0.0, 0.0],
+            paper13: [self.light_wash, self.light_white, self.light_gamma, self.light_sun],
+            paper14: [self.light_far, self.light_far_start, self.light_far_end, 0.0],
         }
     }
 }
@@ -862,6 +888,11 @@ impl StylePreset {
             // Pencil shading from the hand-shaded tile, in patches where it is dark (E059);
             // it replaces the near laid-line pencil (E052) and the far strokes (E057).
             shade: 0.35,
+            // The light end (E062): sky-lit faces print a pale wash, sunlit ones stay paper.
+            light_wash: 0.18,
+            light_white: 1.0,
+            light_gamma: 1.3,
+            light_sun: 4.0,
             shade_from: 0.45,
             far_white: 0.45,
             far_pencil_px: 1.0,
@@ -1171,6 +1202,13 @@ impl StylePreset {
         "shade_to",
         "shade_ao",
         "shade_grain",
+        "light_wash",
+        "light_white",
+        "light_gamma",
+        "light_sun",
+        "light_far",
+        "light_far_start",
+        "light_far_end",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1338,6 +1376,13 @@ impl StylePreset {
             "shade_to" => self.shade_to = num(value)?,
             "shade_ao" => self.shade_ao = num(value)?,
             "shade_grain" => self.shade_grain = num(value)?,
+            "light_wash" => self.light_wash = num(value)?,
+            "light_white" => self.light_white = num(value)?,
+            "light_gamma" => self.light_gamma = num(value)?,
+            "light_sun" => self.light_sun = num(value)?,
+            "light_far" => self.light_far = num(value)?,
+            "light_far_start" => self.light_far_start = num(value)?,
+            "light_far_end" => self.light_far_end = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
@@ -1411,4 +1456,6 @@ pub(crate) struct StyleGpu {
     paper10: [f32; 4],
     paper11: [f32; 4],
     paper12: [f32; 4],
+    paper13: [f32; 4],
+    paper14: [f32; 4],
 }
