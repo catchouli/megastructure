@@ -562,7 +562,7 @@ All three are `nihei_vast` with these changes.
 | `wash_max`, `wash_gamma`, `black_point`, `black_range`, `black_patch`, `wash_speckle`, `speckle` | 0.85, 1.0, 0.06, 0.2, 0.7, 0, 0.04 | A striking dark end: darker mid-darks, solid black where light is very low, specks only in black (E066) |
 | `white_line_tone`, `white_line_core`, `white_line_break`, `speck_tone`, `speck_soft`, `black_texture` | 0.55, 0.55, 0.4, 0.25, 0.7, 0.1 | Quiet white lines and texture in black (E067, E068), the lines and specks themselves off: `white_lines` 0, `speckle` 0 (owner, 2026-11-16) |
 | `wash_white`, `wash_black`, `wash_gamma`, `wash_max`, `black_point`, `black_range`, `light_wash` | 0.95, 0.25, 0.8, 0.95, 0.1, 0.3, 0.36 | The curve shifted to the dark end (E070; supersedes the E066 values in the row above) |
-| `player_light`, `player_radius`, `player_falloff` | 0.3, 8 m, 1.5 | The player's light (E070) |
+| `player_light`, `player_radius`, `player_falloff` | 0.6, 10 m, 1.5 | The player's light (E070) |
 | `fall_white`, `fall_black`, `fall_gamma`, `rule_dist_len`, `fog_ao` | 0.3, 0.04, 2.4, 380 m, 1.2 | A long, mostly grey fall into black (E059) |
 | `halftone`, `halftone_pitch`, `halftone_soft`, `halftone_angle`, `halftone_max_pitch` | 0.05, 1 cm, 0.8, 30 deg, 5 cm | Subtle round-dot halftone in mid to dark tone, near surfaces only (E040, E044) |
 | `shadow_soft`, `shadow_soft_max`, `shadow_soft_min` | 0.06, 1 m, 15 cm | Soft shadow edges widening with distance from the occluder, continuous across cascades (E041, E047) |

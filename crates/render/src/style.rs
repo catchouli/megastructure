@@ -949,8 +949,8 @@ impl StylePreset {
             black_point: 0.1,
             black_range: 0.3,
             // The player's light, so the immediate surroundings read in the dark (E070).
-            player_light: 0.3,
-            player_radius: 8.0,
+            player_light: 0.6,
+            player_radius: 10.0,
             player_falloff: 1.5,
             black_patch: 0.7,
             // White lines in black, restrained (E067): light grey, core only, broken.
