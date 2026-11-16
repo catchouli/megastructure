@@ -577,6 +577,31 @@ impl Renderer {
             }
         }
         let paper_view = paper_tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
+        // Pencil shading tiles (E059): a tonal art map, one array layer per level.
+        let shade_levels = crate::paper::shade_levels();
+        let shade_mips: Vec<Vec<Vec<u8>>> = shade_levels.iter().map(|l| crate::paper::shade_mips(l)).collect();
+        let shade_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pencil shading"),
+            size: wgpu::Extent3d { width: crate::paper::PAPER_TILE as u32, height: crate::paper::PAPER_TILE as u32, depth_or_array_layers: shade_mips.len() as u32 },
+            mip_level_count: shade_mips[0].len() as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (layer, mips) in shade_mips.iter().enumerate() {
+            for (i, m) in mips.iter().enumerate() {
+                let side = (crate::paper::PAPER_TILE >> i) as u32;
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: &shade_tex, mip_level: i as u32, origin: wgpu::Origin3d { x: 0, y: 0, z: layer as u32 }, aspect: wgpu::TextureAspect::All },
+                    m,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(side), rows_per_image: Some(side) },
+                    wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+                );
+            }
+        }
+        let shade_view = shade_tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
         let paper_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("paper relief"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -615,6 +640,12 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
+                    count: None,
+                },
             ],
         });
         let shadow_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -626,6 +657,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: shadow_uniform.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&paper_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&paper_sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&shade_view) },
             ],
         });
         let shadow_mat_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1279,10 +1311,10 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_wgsl() {
-        // struct Globals: two mat4x4 and seven vec4. struct Style: forty-eight vec4.
+        // struct Globals: two mat4x4 and seven vec4. struct Style: fifty vec4.
         // struct ShadowU: four mat4x4 and two vec4.
         assert_eq!(std::mem::size_of::<Globals>(), 2 * 64 + 7 * 16);
-        assert_eq!(std::mem::size_of::<StyleGpu>(), 48 * 16);
+        assert_eq!(std::mem::size_of::<StyleGpu>(), 50 * 16);
         assert_eq!(std::mem::size_of::<ShadowGpu>(), 4 * 64 + 2 * 16);
     }
 

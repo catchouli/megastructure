@@ -8,4 +8,4 @@ mega_gen.workspace = true
 wgpu.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
-image = { workspace = true, features = ["jpeg"] }
+image = { workspace = true, features = ["jpeg", "png"] }

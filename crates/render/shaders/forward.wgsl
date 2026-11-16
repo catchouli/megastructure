@@ -628,6 +628,7 @@ struct ShadowU {
 @group(1) @binding(2) var<uniform> SH: ShadowU;
 @group(1) @binding(3) var paper_tex: texture_2d_array<f32>;
 @group(1) @binding(4) var paper_smp: sampler;
+@group(1) @binding(5) var shade_tex: texture_2d_array<f32>;
 
 fn shadow_size() -> f32 {
     return f32(textureDimensions(shadow_tex).x);
@@ -907,6 +908,52 @@ fn far_strokes(uv: vec2<f32>, ang: f32, lod_u: f32, lod_v: f32, duvx: vec2<f32>,
     let c0 = far_stroke_level(a, b, p0, gb, tm, seed, u32(k0));
     let c1 = far_stroke_level(a, b, 2.0 * p0, gb, tm, seed, u32(k0) + 1u);
     return mix(c0, c1, fr);
+}
+
+// Pencil shading coverage (E059) at level L (0 none .. 4 darkest) from the hand-shaded tiles
+// (paper.rs: clusters of strokes with drifting direction, uneven spacing, overlapping
+// passes; level k holds every stroke of level k - 1). Fixed world scales, each present while
+// its texel is S.paper11.y to 4 S.paper11.y pixels at 720 lines on screen, with triangular
+// weights that sum to 1 (coverage is a mean, not zero-mean), each at its own offset and a
+// rotation drifting +-20 degrees about the pencil direction. Between levels the coverage is
+// mixed, which only fades strokes in, never swaps them.
+fn shade_cov(L: f32, uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy: vec2<f32>) -> f32 {
+    let gmax = max(gu, gv);
+    let aniso = smoothstep(0.08, 0.2, min(gu, gv) / max(gmax, 1e-9));
+    if (aniso <= 0.0 || L <= 0.0) {
+        return 0.0;
+    }
+    let plane = pcg(bitcast<u32>(i32(floor(pn * 4.0))) ^ 0xb5297a4du);
+    let lo = max(S.paper11.y, 0.1);
+    let foot = min(gu, gv) * G.misc.x;
+    let base = 0.0005;
+    let k0 = max(floor(log2(lo * foot / base)), 0.0);
+    let fl = min(floor(L), 3.0);
+    let fr = saturate(L - fl);
+    var cov = 0.0;
+    for (var j = 0; j < 3; j++) {
+        let k = k0 + f32(j);
+        let c = base * exp2(k);
+        let t = log2(max(c / max(foot, 1e-9), 1e-9) / lo);
+        let w = max(1.0 - abs(t - 1.0), 0.0);
+        if (w > 0.0) {
+            let h = hash2(0x51633e2du ^ plane, u32(k));
+            let a = S.paper7.w + (u01(h) - 0.5) * 0.7;
+            let rot = mat2x2<f32>(vec2<f32>(cos(a), sin(a)), vec2<f32>(-sin(a), cos(a)));
+            let q = vec2<f32>(cos(a) * uv.x - sin(a) * uv.y, sin(a) * uv.x + cos(a) * uv.y) / c;
+            let st = q / 512.0 + vec2<f32>(u01(pcg(h ^ 1u)), u01(pcg(h ^ 2u)));
+            let gx = (rot * duvx / c) / 512.0;
+            let gy = (rot * duvy / c) / 512.0;
+            let hi = textureSampleGrad(shade_tex, paper_smp, st, i32(fl), gx, gy).x;
+            var lo_c = 0.0;
+            if (fl >= 1.0) {
+                lo_c = textureSampleGrad(shade_tex, paper_smp, st, i32(fl) - 1, gx, gy).x;
+            }
+            // L in (fl, fl + 1]: from level fl (layer fl - 1) to level fl + 1 (layer fl).
+            cov += w * mix(lo_c, hi, fr);
+        }
+    }
+    return cov * aniso;
 }
 
 // The relief of paper kind `kind` in the surface layers, about unit standard deviation where
@@ -1440,6 +1487,10 @@ fn fs_main(in: VsOut) -> FsOut {
         t.cov = max(t.cov, tent_cov(abs(dpx), S.rule3.z * G.misc.x));
     }
 
+    var ph = 0.0;
+    if (S.paper3.w > 0.5 && S.paper2.x > 0.0) {
+        ph = paper_surface(vec2<f32>(u1, u2), dot(p, n), lod_u1, lod_v1, duv_x, duv_y, rr);
+    }
     // Wash, printed partly as screentone.
     var wash = 0.0;
     if (S.wash.x > 0.0) {
@@ -1536,6 +1587,24 @@ fn fs_main(in: VsOut) -> FsOut {
         }
     }
 
+    // Pencil shading from the hand-shaded tile (E059), driven by darkness from every source
+    // (the wash, which carries light, shadow, enclosure and the far fall, plus enclosure
+    // weighted by S.paper12.x), laid in patches that arrive at different darknesses, grey on
+    // grey, and catching the paper's tooth (S.paper12.y).
+    if (S.paper11.x > 0.0 && S.wash.x > 0.0) {
+        let dk = saturate(wash + S.paper12.x * (1.0 - ao));
+        var band = smoothstep(S.paper11.z, S.paper11.w, dk);
+        if (band > 0.0) {
+            let ps = max(S.paper8.y, 0.1);
+            let tn = 0.65 * vnoise3(0x7f4a7c15u, p / ps) + 0.35 * vnoise3(0x94d049bbu, p / (0.43 * ps));
+            let thr = saturate((tn - 0.25) * 2.0);
+            band *= mix(1.0, smoothstep(thr - 0.3, thr + 0.3, band * 1.3), S.paper8.x);
+            let cov = shade_cov(4.0 * band, vec2<f32>(u1, u2), dot(p, n) + 7.0, lod_u1, lod_v1, duv_x, duv_y);
+            let tooth = clamp(1.0 + S.paper12.y * ph / max(S.paper2.x * 0.35, 1e-4) * 0.5, 0.0, 2.0);
+            wash = 1.0 - (1.0 - wash) * (1.0 - saturate(S.paper11.x * cov * tooth));
+        }
+    }
+
     let view = G.flags.x;
     let hatch_on = view == VIEW_FINAL || view == VIEW_HATCHING;
     var white = speckle(f, in.ids.x);
@@ -1557,10 +1626,6 @@ fn fs_main(in: VsOut) -> FsOut {
     // (read by the composite to turn lines white inside black).
     out.fill = vec4<f32>(0.0, band_of(light) / 3.0, ao, select(0.0, t.black, hatch_on));
     out.ink = vec4<f32>(select(0.0, t.cov, hatch_on), select(0.0, speck, hatch_on), 0.0, 0.0);
-    var ph = 0.0;
-    if (S.paper3.w > 0.5 && S.paper2.x > 0.0) {
-        ph = paper_surface(vec2<f32>(u1, u2), dot(p, n), lod_u1, lod_v1, duv_x, duv_y, rr);
-    }
     out.tone = vec2<f32>(select(0.0, wash, hatch_on), 0.5 + 2.0 * ph);
     if (view == VIEW_SHADOW) {
         out.fill = vec4<f32>(0.0, sv.y / 4.0, ao, 0.0);

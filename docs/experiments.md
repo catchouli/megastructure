@@ -558,6 +558,29 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Setup: sheet `compare/E058-pencil-onset.png`: `far_white` 0.38 / 0.45 (default) / 0.55, native crops down from the rim and over the spawn rail; regenerate with `mega_capture --path shaft_rim_down --width 2560 --height 1440 --set far_white=0.55 --out <dir>`.
 - Verdict: 0.45. Question: should the first strokes start higher up the shaft or lower?
 
+## E059: Pencil shading from a hand-shaded texture, and a grey fall into darkness
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Pencil shading from a hand-shaded texture", "The fall into darkness")
+- Question: the owner: the E057 strokes are too evenly spaced, there is little range (mostly black, fading out suddenly), it should be mostly greys and black only at the very bottom; try a texture that blends in patches where it is really dark.
+- Setup: first the tone curve with marks off, tabulated as mean luminance by distance (final and depth views of the same camera, 640x360, binned): the old curve went from 153 to 64 between 200 and 300 m and stayed near black below. Tried: longer `rule_dist_len` alone (600: still dark from 400 m, because `fog_ao` darkens the air over low-ao surfaces); flatter curves with lower `fog_ao` (F: greys all the way but no black bottom at all); G and H (steeper late, `fog_ao` 1.2); H kept. Then a tonal art map generated at startup (`paper::shade_levels`: clustered strokes with drifting direction, uneven spacing, skipped strokes, pressure, burnishing; four nested levels), sampled on the surface through fixed world scales, driven by darkness from every source, in patches, grey on grey, catching the paper tooth. Sheet `compare/E059-texture-shading.png`: before (E057) / after at 2560x1440 on `shaft_rim_down`, `shaft_gallery_down`, `shaft_rim_pitch --t 0.85`, `shaft_b2_down`, `shaft_hall_deep_in`, `shaft_hall_deep_back`, `shaft_hall_deep_side`, frame 000558's camera and `shaft_spawn`, native crops of the pit and a deep hall wall, and the luminance table. Clip `compare/E059-rim-pitch-before-after.mp4`. Regenerate a cell with `mega_capture --path shaft_hall_deep_side --width 2560 --height 1440 --out <dir>`.
+- Failures on the way: the first tile was too light (mean coverage 0.01 to 0.23 over the four levels) and then its burnished clusters made black blocks at level 4; counts, pressure and burnishing retuned (means 0.05, 0.15, 0.32, 0.54). A shading onset of 0.35 put strokes on mid-grey hall walls; 0.45.
+- Result: the deep hall's walls, columns and corners carry pencil shading laid in clustered patches; the shaft falls through greys and is black only at the bottom; lit views unchanged. Luminance by distance, rim-down, after: 205, 170, 143, 95, 81, 72, 71, 40, 35 (to 150, 200, 250 ... 550 m).
+- Stability (61 frames, 720p; 5x5 error / pops / contrast-relative pops, before / after): `shaft_rim_pitch` 0.161, 0.014%, 0.029% / 0.160, 0.013%, 0.027%; `shaft_spawn_yaw` 0.265 / 0.265; `shaft_hall_walk` 0.295 / 0.296; `shaft_bridge_walk` 0.304 / 0.303; `hall_walk` 0.440 / 0.437; `shaft_hall_deep_in` t 0..0.35 (1.4 m) 0.203, 0.000%, 0.021% / 0.197, 0.000%, 0.024%.
+- Frame time: lower than E057 (see the feature document).
+- Verdict: kept (`shade` 0.5, `shade_from` 0.45, curve H). Questions on the sheet: does it look shaded by a person; is it mostly greys with black only at the very bottom?
+
+## E060: The pencil shading tile
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md`
+- Setup: sheet `compare/E060-shade-tile.png`: the four levels flat at 2x; regenerate the tiles with `SHADE_DUMP=<dir> cargo test --release -p mega_render -- --ignored --nocapture dump_shade_levels`.
+- Question on the sheet: does it look hand-shaded?
+
+## E061: Shading strength
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md`
+- Setup: sheet `compare/E061-shade-strength.png`: `shade` 0.35 / 0.5 / 0.7 on `shaft_hall_deep_side`, `shaft_hall_deep_back`, `shaft_gallery_down` and frame 000558's camera; regenerate with `mega_capture --path shaft_hall_deep_back --width 2560 --height 1440 --set shade=0.7 --out <dir>`.
+- Verdict: 0.5. Question on the sheet: how strong should the shading be?
+
 ## Queued
 
 

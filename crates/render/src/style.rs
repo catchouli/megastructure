@@ -440,6 +440,19 @@ pub struct StylePreset {
     /// Light level (after the distance darkening) at which the far pencil starts, much
     /// earlier than the wash's far darkening (`fall_white`), so it builds up gradually (E057).
     pub far_white: f32,
+    /// Pencil shading from the hand-shaded tile (E059): strength (0 off). Graphite darkens
+    /// the wash as `1 - (1 - w)(1 - shade * coverage)`, grey on grey.
+    pub shade: f32,
+    /// On-screen size of the tile's texels, pixels at 720 lines (the window's lower end).
+    pub shade_px: f32,
+    /// Darkness (wash coverage, plus `shade_ao * (1 - ao)`) where the shading starts...
+    pub shade_from: f32,
+    /// ...and where it reaches the darkest level.
+    pub shade_to: f32,
+    /// Weight of enclosure (1 - ao) in the darkness that drives the shading.
+    pub shade_ao: f32,
+    /// How much the graphite catches the paper's tooth (0 none).
+    pub shade_grain: f32,
 }
 
 impl StylePreset {
@@ -614,6 +627,12 @@ impl StylePreset {
             far_stretch: 4.0,
             far_wash: 1.0,
             far_white: 0.6,
+            shade: 0.0,
+            shade_px: 0.9,
+            shade_from: 0.35,
+            shade_to: 0.95,
+            shade_ao: 0.3,
+            shade_grain: 0.6,
         }
     }
 
@@ -668,6 +687,8 @@ impl StylePreset {
             paper8: [self.pencil_patches, self.pencil_patch_m, 0.0, 0.0],
             paper9: [self.far_mode, self.far_pencil, self.far_pencil_px, self.far_stretch],
             paper10: [0.0, self.far_wash, self.far_white, 0.0],
+            paper11: [self.shade, self.shade_px, self.shade_from, self.shade_to],
+            paper12: [self.shade_ao, self.shade_grain, 0.0, 0.0],
         }
     }
 }
@@ -829,7 +850,7 @@ impl StylePreset {
             paper_near_dist: 40.0,
             paper_near_amp: 0.5,
             // Pencil shading in shade from Paper004's laid lines, laid in patches (E052, E053).
-            pencil: 0.15,
+            pencil: 0.0,
             pencil_kind: 3.0,
             pencil_patches: 1.0,
             // Only at the dark end of the wash (E056): light and mid shade stay clean.
@@ -837,7 +858,11 @@ impl StylePreset {
             pencil_to: 0.75,
             // Distance shading as wash and pencil marks instead of ruling (E054).
             far_mode: 1.0,
-            far_pencil: 1.0,
+            far_pencil: 0.0,
+            // Pencil shading from the hand-shaded tile, in patches where it is dark (E059);
+            // it replaces the near laid-line pencil (E052) and the far strokes (E057).
+            shade: 0.5,
+            shade_from: 0.45,
             far_white: 0.45,
             far_pencil_px: 1.0,
             far_stretch: 2.0,
@@ -855,13 +880,16 @@ impl StylePreset {
             // smooth wash (E048).
             tone_noise: 0.0,
             // Ruling: nothing near, sparse at middle distance, merging into black far down.
-            fall_white: 0.28,
-            fall_black: 0.05,
-            fall_gamma: 1.5,
+            // A long, mostly grey fall into black (E059): light high up, mid grey for most of
+            // the depth, black only at the bottom.
+            fall_white: 0.3,
+            fall_black: 0.04,
+            fall_gamma: 2.4,
+            fog_ao: 1.2,
             rule_near: 40.0,
             rule_fade_in: 150.0,
             rule_down_gain: 1.0,
-            rule_dist_len: 300.0,
+            rule_dist_len: 380.0,
             rule_target_px: 9.0,
             rule_density: 3.0,
             // Calmer strokes: a gentler weight profile (fewer wedge-shaped strokes) and longer
@@ -1137,6 +1165,12 @@ impl StylePreset {
         "far_stretch",
         "far_wash",
         "far_white",
+        "shade",
+        "shade_px",
+        "shade_from",
+        "shade_to",
+        "shade_ao",
+        "shade_grain",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1298,6 +1332,12 @@ impl StylePreset {
             "far_stretch" => self.far_stretch = num(value)?,
             "far_wash" => self.far_wash = num(value)?,
             "far_white" => self.far_white = num(value)?,
+            "shade" => self.shade = num(value)?,
+            "shade_px" => self.shade_px = num(value)?,
+            "shade_from" => self.shade_from = num(value)?,
+            "shade_to" => self.shade_to = num(value)?,
+            "shade_ao" => self.shade_ao = num(value)?,
+            "shade_grain" => self.shade_grain = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
@@ -1369,4 +1409,6 @@ pub(crate) struct StyleGpu {
     paper8: [f32; 4],
     paper9: [f32; 4],
     paper10: [f32; 4],
+    paper11: [f32; 4],
+    paper12: [f32; 4],
 }

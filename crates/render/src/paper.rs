@@ -285,3 +285,152 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Pencil shading tiles (E059): a tonal art map of hand-laid pencil, generated at startup.
+
+/// Number of pencil shading levels (texture array layers), lightest first. Level k holds
+/// every stroke of level k - 1 and more, so blending between levels only adds strokes.
+pub const SHADE_LEVELS: usize = 4;
+
+/// Clusters added at each level.
+const SHADE_CLUSTERS: [usize; SHADE_LEVELS] = [200, 330, 500, 680];
+
+/// The pencil shading tiles, `SHADE_LEVELS` x `PAPER_TILE^2` graphite coverage values 0..1.
+///
+/// Strokes are laid in clusters, as a hand shades an area: each cluster has a direction
+/// drifting about the tile's x axis (about +-20 degrees; from level 3 some clusters cross
+/// at 40 to 60 degrees), strokes side by side at uneven spacing with occasional skipped
+/// strokes, ragged starts and ends, slightly varied angle, a pressure profile along each
+/// stroke (light where it starts, heaviest past the middle, lifting off at the end) and soft
+/// graphite edges. Later clusters press harder; a few late ones are burnished (tight, dark).
+/// Coverage combines like graphite layers, `1 - (1 - c)(1 - s)`.
+pub fn shade_levels() -> Vec<Vec<f32>> {
+    let n = PAPER_TILE;
+    let mut c = vec![0.0f32; n * n];
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let mut out = Vec::new();
+    for (lvl, &count) in SHADE_CLUSTERS.iter().enumerate() {
+        let a0 = lvl as f32 / SHADE_LEVELS as f32;
+        for _ in 0..count {
+            let arrive = a0 + rng.next() / SHADE_LEVELS as f32;
+            let (cx, cy) = (rng.next() * n as f32, rng.next() * n as f32);
+            let mut dir = (rng.next() + rng.next() - 1.0) * 0.36;
+            if lvl >= 2 && rng.next() < 0.3 {
+                dir += if rng.next() < 0.5 { 1.0 } else { -1.0 } * (0.7 + 0.35 * rng.next());
+            }
+            let burnish = lvl == SHADE_LEVELS - 1 && rng.next() < 0.05;
+            let len = 28.0 + 60.0 * rng.next();
+            let width = if burnish { 8.0 + 10.0 * rng.next() } else { 10.0 + 34.0 * rng.next() };
+            let press = (0.22 + 0.55 * arrive.powf(1.3)) * (0.7 + 0.5 * rng.next()) * if burnish { 1.15 } else { 1.0 };
+            let (da, db) = (dir.cos(), dir.sin());
+            let mut off = -0.5 * width;
+            while off < 0.5 * width {
+                let spacing = if burnish { 1.2 + 0.8 * rng.next() } else { 2.0 + 3.5 * rng.next() * rng.next() + 0.8 * rng.next() };
+                off += spacing;
+                if rng.next() < 0.12 {
+                    continue; // a skipped stroke
+                }
+                let sl = len * (0.55 + 0.55 * rng.next()) * (1.0 - 0.4 * (2.0 * off / width).powi(2));
+                let s0 = -0.5 * len + len * 0.25 * (rng.next() - 0.5);
+                let ang = dir + (rng.next() - 0.5) * 0.08;
+                let (sa, sb) = (ang.cos(), ang.sin());
+                // Start of the stroke in tile coordinates.
+                let x0 = cx + da * s0 - db * off;
+                let y0 = cy + db * s0 + da * off;
+                let w = (0.9 + 0.7 * rng.next()) * if burnish { 1.3 } else { 1.0 };
+                let p = press * (0.65 + 0.5 * rng.next());
+                stroke_into(&mut c, n, x0, y0, sa, sb, sl, w, p);
+            }
+        }
+        out.push(c.clone());
+    }
+    out
+}
+
+/// One straight stroke from (x0, y0) along (ux, uy) for `len` texels, `w` texels wide,
+/// pressure `p`, wrapped on the tile.
+#[allow(clippy::too_many_arguments)]
+fn stroke_into(c: &mut [f32], n: usize, x0: f32, y0: f32, ux: f32, uy: f32, len: f32, w: f32, p: f32) {
+    let (x1, y1) = (x0 + ux * len, y0 + uy * len);
+    let pad = w + 2.0;
+    let (xa, xb) = ((x0.min(x1) - pad).floor() as i32, (x0.max(x1) + pad).ceil() as i32);
+    let (ya, yb) = ((y0.min(y1) - pad).floor() as i32, (y0.max(y1) + pad).ceil() as i32);
+    for y in ya..=yb {
+        for x in xa..=xb {
+            let (px, py) = (x as f32 + 0.5 - x0, y as f32 + 0.5 - y0);
+            let t = px * ux + py * uy;
+            if t < -1.0 || t > len + 1.0 {
+                continue;
+            }
+            let d = (px * uy - py * ux).abs();
+            let tt = (t / len).clamp(0.0, 1.0);
+            // Pressure along the stroke: light start, heaviest past the middle, lift-off.
+            let prof = (tt / 0.15).min(1.0).powf(0.7) * (1.0 - ((tt - 0.6) / 0.4).max(0.0).powi(2)) * (0.85 + 0.15 * (tt * 6.0).sin());
+            let ends = (t + 1.0).clamp(0.0, 1.0) * (len + 1.0 - t).clamp(0.0, 1.0);
+            let edge = (0.5 * w - d + 0.5).clamp(0.0, 1.0);
+            let s = (p * prof * ends * edge).clamp(0.0, 1.0);
+            if s <= 0.0 {
+                continue;
+            }
+            let i = (y.rem_euclid(n as i32) as usize) * n + x.rem_euclid(n as i32) as usize;
+            c[i] = 1.0 - (1.0 - c[i]) * (1.0 - s);
+        }
+    }
+}
+
+/// Mip levels of pencil shading level `k` as R8, largest first (coverage averaged down).
+pub fn shade_mips(level: &[f32]) -> Vec<Vec<u8>> {
+    let mut lv: Vec<f32> = level.to_vec();
+    let mut size = PAPER_TILE;
+    let mut out = Vec::new();
+    loop {
+        out.push(lv.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8).collect());
+        if size == 1 {
+            break;
+        }
+        let half = size / 2;
+        let mut next = vec![0.0f32; half * half];
+        for y in 0..half {
+            for x in 0..half {
+                next[y * half + x] = 0.25 * (lv[2 * y * size + 2 * x] + lv[2 * y * size + 2 * x + 1] + lv[(2 * y + 1) * size + 2 * x] + lv[(2 * y + 1) * size + 2 * x + 1]);
+            }
+        }
+        lv = next;
+        size = half;
+    }
+    out
+}
+
+#[cfg(test)]
+mod shade_tests {
+    use super::*;
+
+    #[test]
+    fn shade_levels_nest_and_darken() {
+        let l = shade_levels();
+        assert_eq!(l.len(), SHADE_LEVELS);
+        let means: Vec<f32> = l.iter().map(|v| v.iter().sum::<f32>() / v.len() as f32).collect();
+        for k in 1..SHADE_LEVELS {
+            assert!(means[k] > means[k - 1], "{means:?}");
+            // Nested: no texel gets lighter from one level to the next.
+            assert!(l[k].iter().zip(&l[k - 1]).all(|(a, b)| *a + 1e-6 >= *b));
+        }
+        assert!(means[0] > 0.02 && means[SHADE_LEVELS - 1] < 0.9, "{means:?}");
+    }
+
+    /// Writes the levels as PNGs to $SHADE_DUMP (`SHADE_DUMP=<dir> cargo test --release -p
+    /// mega_render -- --ignored --nocapture dump_shade_levels`).
+    #[test]
+    #[ignore]
+    fn dump_shade_levels() {
+        let dir = std::env::var("SHADE_DUMP").expect("SHADE_DUMP");
+        let l = shade_levels();
+        for (k, v) in l.iter().enumerate() {
+            let m = v.iter().sum::<f32>() / v.len() as f32;
+            println!("level {}: mean coverage {m:.3}", k + 1);
+            let px: Vec<u8> = v.iter().map(|c| ((1.0 - c) * 255.0) as u8).collect();
+            image::save_buffer(format!("{dir}/shade_level_{}.png", k + 1), &px, PAPER_TILE as u32, PAPER_TILE as u32, image::ColorType::L8).unwrap();
+        }
+    }
+}
