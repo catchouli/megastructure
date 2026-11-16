@@ -470,6 +470,13 @@ pub struct StylePreset {
     pub light_far: f32,
     pub light_far_start: f32,
     pub light_far_end: f32,
+    /// Blacks (E066): light value at and below which surfaces are solid black.
+    pub black_point: f32,
+    /// Range of light above `black_point` over which the black closes in; 0 off (no blacks).
+    pub black_range: f32,
+    /// How much that range varies by patch (0 even, 1 strongly patchy), so black arrives in
+    /// pools rather than along one contour of light.
+    pub black_patch: f32,
 }
 
 impl StylePreset {
@@ -657,6 +664,9 @@ impl StylePreset {
             light_far: 0.0,
             light_far_start: 40.0,
             light_far_end: 200.0,
+            black_point: 0.03,
+            black_range: 0.0,
+            black_patch: 0.7,
         }
     }
 
@@ -715,6 +725,7 @@ impl StylePreset {
             paper12: [self.shade_ao, self.shade_grain, 0.0, 0.0],
             paper13: [self.light_wash, self.light_white, self.light_gamma, self.light_sun],
             paper14: [self.light_far, self.light_far_start, self.light_far_end, 0.0],
+            paper15: [self.black_point, self.black_range, self.black_patch, 0.0],
         }
     }
 }
@@ -893,6 +904,17 @@ impl StylePreset {
             light_white: 1.0,
             light_gamma: 1.3,
             light_sun: 4.0,
+            // A striking dark end (E066): the wash may go much darker (`wash_max` 0.85 instead
+            // of 0.5, a linear curve), and where the total light is very low it closes to solid
+            // black in patches, with white contours and specks inside. The open shaft's light
+            // never gets that low, so its cast shadows stay grey.
+            wash_max: 0.85,
+            wash_gamma: 1.0,
+            black_point: 0.06,
+            black_range: 0.2,
+            black_patch: 0.7,
+            wash_speckle: 0.0,
+            speckle: 0.06,
             shade_from: 0.45,
             far_white: 0.45,
             far_pencil_px: 1.0,
@@ -1209,6 +1231,9 @@ impl StylePreset {
         "light_far",
         "light_far_start",
         "light_far_end",
+        "black_point",
+        "black_range",
+        "black_patch",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1383,6 +1408,9 @@ impl StylePreset {
             "light_far" => self.light_far = num(value)?,
             "light_far_start" => self.light_far_start = num(value)?,
             "light_far_end" => self.light_far_end = num(value)?,
+            "black_point" => self.black_point = num(value)?,
+            "black_range" => self.black_range = num(value)?,
+            "black_patch" => self.black_patch = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
@@ -1458,4 +1486,5 @@ pub(crate) struct StyleGpu {
     paper12: [f32; 4],
     paper13: [f32; 4],
     paper14: [f32; 4],
+    paper15: [f32; 4],
 }

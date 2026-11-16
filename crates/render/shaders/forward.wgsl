@@ -327,6 +327,8 @@ struct RuleIn {
     c: f32,
 };
 
+// Private: solid black coverage for the white specks (E066).
+var<private> SPECK_BLACK: f32 = 0.0;
 // Private: the near-shadow-edge factor for shadow strokes (shadow_hatch_near).
 var<private> FNEAR: f32 = 1.0;
 
@@ -1536,6 +1538,23 @@ fn fs_main(in: VsOut) -> FsOut {
         // continuous modulation of the grey with no hard edges (E036).
         let ht = saturate((w0 - tt) / max(max(fwidth(tt), 0.05), S.grain.x) + 0.5);
         wash = mix(w0, ht, S.wash2.y);
+        // Blacks (E066): where the total light is very low (below S.paper15.x plus a range
+        // S.paper15.y that varies by patch), the wash closes to solid ink and the fragment
+        // counts as solid black, so contours and strokes turn white over it and specks
+        // appear. The open shaft's light never gets this low (its cast-shadow light is
+        // clamped well above it), so its shadows stay grey.
+        if (S.paper15.y > 0.0) {
+            let lb = mix(lit_t, dark_t, amount);
+            let tb = 0.65 * vnoise3(0x27d4eb2fu, p / 3.0) + 0.35 * vnoise3(0x165667b1u, p / 1.3);
+            let edge = S.paper15.x + S.paper15.y * mix(1.0, 0.4 + 1.2 * tb, S.paper15.z);
+            let bk = 1.0 - smoothstep(S.paper15.x, max(edge, S.paper15.x + 1e-3), lb);
+            wash = 1.0 - (1.0 - wash) * (1.0 - bk);
+            // Lines turn white over solid black and over wash dark enough that black lines would
+            // vanish into it (the near-black of sealed corridors), so the walls, floor edges and
+            // doors stay drawn.
+            SPECK_BLACK = max(t.black, smoothstep(0.6, 0.95, bk));
+            t.black = max(t.black, max(smoothstep(0.35, 0.8, bk), smoothstep(0.72, 0.85, wash)));
+        }
         if (S.halftone.x > 0.0) {
             // Faded on foreshortened surfaces, where dots would be squeezed into lines.
             let fs = saturate(2.0 * min(lod_u1, lod_v1) / max(max(lod_u1, lod_v1), 1e-9));
@@ -1641,7 +1660,8 @@ fn fs_main(in: VsOut) -> FsOut {
         let wl = hatch_layer(LayerIn(u1, u2, g1, g2, lod1, lod_v1, 0.0, 0x3c6ef372u, 0.0, 1.0, 0.0, edge, S.white.y, 0.7, S.hatch2.y));
         white = max(white, wl.cov * S.white.x);
     }
-    var speck = white * t.black;
+    // White specks only inside solid black (E066: not over dark grey).
+    var speck = white * select(t.black, SPECK_BLACK, S.paper15.y > 0.0);
     if (S.dark.z > 0.0 && S.wash.x > 0.0) {
         // White specks in dark wash.
         speck = max(speck, speckle(f, in.ids.x ^ 0x2545f491u) * smoothstep(0.3, 0.65, wash) * S.dark.z);
