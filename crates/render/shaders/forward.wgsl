@@ -1353,7 +1353,10 @@ fn fs_main(in: VsOut) -> FsOut {
         plight = S.paper18.x * fall * (0.35 + 0.65 * max(dot(n, tl / max(dl, 1e-4)), 0.0));
     }
     var lit = (S.light.x * G.sun_params.y * max(ndl, 0.0) * sun_vis + ambient + noise) * shade + bounced + plight;
-    let dark = clamp((ambient * S.shadow.x + noise) * shade, S.shadow.y, S.shadow.z) + bounced + plight;
+    // Exposure adaptation (E073): G.sun_params.z is the gain, 1 when off or in bright
+    // surroundings. A multiplier, so light near zero stays near zero and black stays black.
+    lit *= G.sun_params.z;
+    let dark = (clamp((ambient * S.shadow.x + noise) * shade, S.shadow.y, S.shadow.z) + bounced + plight) * G.sun_params.z;
     // Smooth part of the light only: the shadow edge has its own anti-aliasing below.
     let edge = max(fwidth(lit), 0.004);
 

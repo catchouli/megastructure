@@ -500,6 +500,15 @@ pub struct StylePreset {
     /// 1: soft shadow edges filtered with a 3x3 tent instead of 5x5 (cheaper, slightly coarser
     /// penumbra; E071 option). 0 the 5x5.
     pub shadow_soft_fast: f32,
+    /// Exposure adaptation (E073): 1 on, 0 off. The light value is multiplied by a gain that
+    /// rises in dark surroundings (driven by the eye's position, adapting slowly).
+    pub exposure_adapt: f32,
+    /// Largest gain (in the darkest surroundings).
+    pub exposure_max: f32,
+    /// Local light at and below which the gain is at its largest...
+    pub exposure_dark: f32,
+    /// ...and at and above which it is 1.
+    pub exposure_bright: f32,
 }
 
 impl StylePreset {
@@ -700,6 +709,10 @@ impl StylePreset {
             player_radius: 8.0,
             player_falloff: 1.5,
             shadow_soft_fast: 0.0,
+            exposure_adapt: 0.0,
+            exposure_max: 2.0,
+            exposure_dark: 0.06,
+            exposure_bright: 0.34,
         }
     }
 
@@ -954,6 +967,7 @@ impl StylePreset {
             black_range: 0.25,
             // The player's light, so the immediate surroundings read in the dark (E070).
             player_light: 0.6,
+            exposure_adapt: 1.0,
             player_radius: 10.0,
             player_falloff: 1.5,
             black_patch: 0.7,
@@ -1300,6 +1314,10 @@ impl StylePreset {
         "player_radius",
         "player_falloff",
         "shadow_soft_fast",
+        "exposure_adapt",
+        "exposure_max",
+        "exposure_dark",
+        "exposure_bright",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1487,6 +1505,10 @@ impl StylePreset {
             "player_radius" => self.player_radius = num(value)?,
             "player_falloff" => self.player_falloff = num(value)?,
             "shadow_soft_fast" => self.shadow_soft_fast = num(value)?,
+            "exposure_adapt" => self.exposure_adapt = num(value)?,
+            "exposure_max" => self.exposure_max = num(value)?,
+            "exposure_dark" => self.exposure_dark = num(value)?,
+            "exposure_bright" => self.exposure_bright = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,

@@ -59,6 +59,10 @@ OPTIONS:
     --no-prepass     no depth prepass (the default)
     --no-cull        diagnostic: draw every triangle in every pass (as before E069)
     --no-portals     diagnostic: frustum culling only, no portal visibility (E072)
+    --adapt          exposure adaptation on (E073; off by default); prints the gain per frame
+    --fps <n>        frames per second of a sequence, for the adaptation (default 30)
+    --adapt-from <g> with --adapt implied: start from gain g instead of settled, to study
+                     the transition with a still camera
     --width <W>      image width in pixels, default 1280
     --height <H>     image height in pixels, default 720
     --list-paths     print the available path names (with their scenes) and exit
@@ -113,6 +117,12 @@ struct Args {
     prepass: bool,
     no_cull: bool,
     no_portals: bool,
+    /// Exposure adaptation on (E073); off by default so sheets stay comparable.
+    adapt: bool,
+    /// Frames per second of a sequence, for the adaptation's time step.
+    fps: f32,
+    /// Start the adaptation from this gain instead of settled.
+    adapt_from: Option<f32>,
 }
 
 #[derive(Default)]
@@ -159,6 +169,9 @@ fn parse_args() -> Result<Option<Args>> {
     let mut prepass = false;
     let mut no_cull = false;
     let mut no_portals = false;
+    let mut adapt = false;
+    let mut fps = 30.0f32;
+    let mut adapt_from = None;
     let mut camera: Option<mega_render::Camera> = None;
     fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
         it.next().ok_or_else(|| anyhow!("{flag} needs a value"))
@@ -242,6 +255,12 @@ fn parse_args() -> Result<Option<Args>> {
             "--prepass" => prepass = true,
             "--no-cull" => no_cull = true,
             "--no-portals" => no_portals = true,
+            "--adapt" => adapt = true,
+            "--fps" => fps = number(&value(&mut it, &a)?, &a)?,
+            "--adapt-from" => {
+                adapt_from = Some(number(&value(&mut it, &a)?, &a)?);
+                adapt = true;
+            }
             "--no-png" => png = false,
             "--error-png" => error_png = true,
             "--stroke-vis" => {
@@ -306,7 +325,7 @@ fn parse_args() -> Result<Option<Args>> {
             bail!("--sun-dist must be positive");
         }
     }
-    Ok(Some(Args { path, camera, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol, sets, sun, shadow_filter, centre_ink, timing, no_prepass, prepass, no_cull, no_portals }))
+    Ok(Some(Args { path, camera, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol, sets, sun, shadow_filter, centre_ink, timing, no_prepass, prepass, no_cull, no_portals, adapt, fps, adapt_from }))
 }
 
 fn main() {
@@ -381,6 +400,14 @@ fn run() -> Result<()> {
     let base_sun = Sun::for_scene(&args.scene);
     let centre = scene.mesh.bounds().map(|(lo, hi)| (glam::Vec3::from(lo) + glam::Vec3::from(hi)) * 0.5).unwrap_or_default();
     renderer.set_sun(args.sun.at(base_sun, centre, 0.0));
+    // Exposure adaptation is off unless asked for (E073), so captures of different places
+    // stay comparable; `--set exposure_adapt=1` works too. The gain settles on the first
+    // frame's position at once and then adapts at --fps.
+    renderer.set_preset(StylePreset { exposure_adapt: if args.adapt { 1.0 } else { 0.0 }, ..renderer.preset().clone() });
+    renderer.set_time_step(Some(1.0 / args.fps.max(1.0)));
+    if let Some(g) = args.adapt_from {
+        renderer.start_exposure_from(g);
+    }
     for (k, v) in &args.sets {
         let mut p = renderer.preset().clone();
         p.set(k, v).map_err(|e| anyhow!("--set: {e}"))?;
@@ -524,6 +551,10 @@ fn run() -> Result<()> {
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
         renderer.render(&mut encoder, &target_view, &camera);
+        if args.adapt {
+            let (l, tg, g) = renderer.exposure_state();
+            println!("exposure frame {i} t {t:.3}: local light {l:.3} target {tg:.3} gain {g:.3}");
+        }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo { texture: &target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyBufferInfo {

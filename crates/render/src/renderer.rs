@@ -458,6 +458,11 @@ pub struct Renderer {
     portals: crate::cull::Portals,
     visible_spaces: Option<std::collections::HashMap<u32, [f32; 4]>>,
     portal_culling: bool,
+    /// Exposure adaptation (E073).
+    exposure: crate::exposure::Exposure,
+    /// Fixed time step for the adaptation (tools), or None for the wall clock.
+    time_step: Option<f32>,
+    last_render: Option<std::time::Instant>,
     culling: bool,
     /// Incremented on every upload; with the cascade matrix it keys the cached far cascade.
     scene_gen: u64,
@@ -967,6 +972,9 @@ impl Renderer {
             portals: crate::cull::Portals::default(),
             visible_spaces: None,
             portal_culling: true,
+            exposure: Default::default(),
+            time_step: None,
+            last_render: None,
             culling: true,
             scene_gen: 0,
             far_cascade_cache: None,
@@ -1106,6 +1114,28 @@ impl Renderer {
         self.portal_culling = on;
     }
 
+    /// A fixed time step for exposure adaptation, in seconds (None: the wall clock between
+    /// `render` calls). Tools rendering sequences set 1/60 so results do not depend on speed.
+    pub fn set_time_step(&mut self, dt: Option<f32>) {
+        self.time_step = dt;
+    }
+
+    /// Jump the exposure gain to its target on the next frame (a scene start, a teleport).
+    pub fn settle_exposure(&mut self) {
+        self.exposure.settle();
+    }
+
+    /// Start the exposure gain at `gain` and adapt from there, instead of settling (tools
+    /// studying the transition).
+    pub fn start_exposure_from(&mut self, gain: f32) {
+        self.exposure.start_from(gain);
+    }
+
+    /// Exposure state of the last frame: (local light, target gain, gain).
+    pub fn exposure_state(&self) -> (f32, f32, f32) {
+        (self.exposure.last_local, self.exposure.last_target, self.exposure.gain())
+    }
+
     /// Spaces the portal flood reached in the last frame, or None if it did not run.
     pub fn visible_space_count(&self) -> Option<usize> {
         self.visible_spaces.as_ref().map(|v| v.len())
@@ -1225,6 +1255,7 @@ impl Renderer {
         self.strokes = strokes;
         self.stroke_chunks = stroke_chunks;
         self.portals = crate::cull::Portals::default();
+        self.exposure = crate::exposure::Exposure::new(mesh);
         self.stroke_buf = storage_buffer(&self.device, "strokes", &self.strokes);
         self.scene_gen += 1;
         self.far_cascade_cache = None;
@@ -1286,6 +1317,7 @@ impl Renderer {
         if let Some(buf) = &self.bounce_buf {
             self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&data));
         }
+        self.exposure.set_bounce(&data);
         self.bounce_baker = Some(baker);
         self.bounce_sun = Some(sun);
         self.bounce_ms = Some(ms);
@@ -1373,6 +1405,23 @@ impl Renderer {
         } else {
             self.sun.position.extend(1.0)
         };
+        // Exposure adaptation (E073): the target gain from the light around the eye, followed
+        // slowly. Off: gain 1 and the state kept settled.
+        let sun_i = if self.sun.is_up(camera.position) { self.sun.intensity } else { 0.0 };
+        let now = std::time::Instant::now();
+        let dt = self.time_step.unwrap_or_else(|| self.last_render.map_or(0.0, |t| (now - t).as_secs_f32().min(0.25)));
+        self.last_render = Some(now);
+        let gain = if self.preset.exposure_adapt > 0.5 {
+            let p = &self.preset;
+            let fade = self.bounce_fade();
+            let local = self.exposure.local_light(camera.position, p.ambient, p.bounce * p.sun_strength * sun_i * fade, p.bounce_sky * p.ambient * fade);
+            self.exposure.last_local = local;
+            let target = crate::exposure::target_gain(local, p.exposure_dark, p.exposure_bright, p.exposure_max.max(1.0));
+            self.exposure.step(target, dt)
+        } else {
+            self.exposure.settle();
+            1.0
+        };
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
@@ -1380,7 +1429,7 @@ impl Renderer {
             camera_fwd: camera.forward().extend(0.0).to_array(),
             sun: sun.to_array(),
             // A remote sun below the horizon lights nothing (and casts no shadow).
-            sun_params: [self.sun.radius, if self.sun.is_up(camera.position) { self.sun.intensity } else { 0.0 }, 0.0, 0.0],
+            sun_params: [self.sun.radius, sun_i, gain, 0.0],
             screen: [w, h, 1.0 / w, 1.0 / h],
             misc: [h / REFERENCE_HEIGHT, 2.0 * (camera.fov_y * 0.5).tan() / h, self.shadow_filter as u32 as f32, self.bounce_fade()],
             flags: [self.view.index(), self.color_format.is_srgb() as u32, self.hatch_lod as u32, self.stroke_vis as u32],

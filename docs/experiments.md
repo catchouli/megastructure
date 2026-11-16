@@ -849,6 +849,14 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: identical on 16 landmarks and all walk frames but one pixel; up to 4 pixels on five; 198 pixels by at most 4 levels on `lab_corridor_vaulted` (a far-side stroke that reached through a crease no longer drawn). Visible spaces 2 to 20, main pass 0.4 to 38% of 437k triangles. GPU frame 0.05 to 0.2 ms faster (frame 6.6 to 8.0 ms at 3024x1832, 4.7 to 5.5 ms at 2560x1440 with the 0.6 player light). Motion unchanged (`lab_axis_walk` 0.142 against 0.141).
 - Verdict: on. Next: cull shadow casters by the sun's `OUTSIDE` portals; finer chunks in large spaces for the cascades.
 
+## E073: Exposure adaptation from where the player stands
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Exposure adaptation")
+- Question: bring the corridors up "just enough" without touching the outdoors, without jumping when the view turns, and keep black available.
+- Setup: local light from a 3 m grid of baked ao and bounce, averaged within 7 m of the eye; gain 1 above 0.34, 2 below 0.06; 0.7 s rise, 0.35 s fall; applied to the light before every tone decision. A first try with thresholds 0.12 / 0.45 gave the far ledge axis 1.34 and was moved down. Sheet: off / on settled / on with the player light at 0.4 on nine labyrinth views and two shaft controls; a filmstrip and an off/on clip of `lab_passage_ledge` (new: service passage to a ledge and back). Metrics at 960x540, 61 frames.
+- Result: outdoors and the halls 1.0 to 1.01; corridors 1.37 to 2.0; the service passage and vent stay near black, the cistern opens up most. Turns unchanged (`lab_far_ledge_yaw` 0.212 / 0.218, the small rise from the 1.01 gain; `shaft_spawn_yaw` 0.283 / 0.283), `lab_axis_walk` 0.298 / 0.297. `lab_corridor_walk` 0.082 / 0.269 and the passage walk 0.59 / 1.15, but a fixed gain of the same size gives the same numbers (0.269, 1.18): the rise is the brighter image showing more detail in motion, not the adaptation. A still camera adapting 1 to 2: under a grey level per frame, no pops. GPU frame unchanged; the image with the field at 0 identical to before on four views.
+- Verdict: on in the game. Marks moving with the gain read as gradual brightening, so the split (pencil and black from unadapted light) was not built. With the gain on, the player light could come down to about 0.4 (shown on the sheet).
+
 ## Queued
 
 

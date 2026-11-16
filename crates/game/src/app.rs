@@ -43,6 +43,8 @@ impl App {
 
     pub fn update(&mut self, dt: f32, input: &InputState) {
         self.sim.update(dt, input);
+        // Exposure adaptation follows the simulation's clock (E073).
+        self.renderer.set_time_step(Some(dt));
     }
 
     /// Record the scene into `target_view`. Overlays (egui) are added by the caller.

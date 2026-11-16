@@ -3,6 +3,7 @@
 
 pub mod camera;
 pub mod cull;
+pub mod exposure;
 pub mod paper;
 pub mod paths;
 pub mod renderer;

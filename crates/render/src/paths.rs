@@ -58,9 +58,11 @@ pub const NAMES: &[&str] = &[
     "lab_corridor_plain",
     "lab_duct",
     "lab_service",
+    "lab_vent",
     "lab_axis_walk",
     "lab_far_ledge_yaw",
     "lab_corridor_walk",
+    "lab_passage_ledge",
     "shaft_hall_deep_in",
     "shaft_hall_deep_back",
     "shaft_hall_deep_side",
@@ -114,9 +116,11 @@ pub fn by_name(name: &str) -> Option<fn(f32) -> Camera> {
         "lab_corridor_plain" => lab_corridor_plain,
         "lab_duct" => lab_duct,
         "lab_service" => lab_service,
+        "lab_vent" => lab_vent,
         "lab_axis_walk" => lab_axis_walk,
         "lab_far_ledge_yaw" => lab_far_ledge_yaw,
         "lab_corridor_walk" => lab_corridor_walk,
+        "lab_passage_ledge" => lab_passage_ledge,
         "shaft_hall_deep_in" => shaft_hall_deep_in,
         "shaft_hall_deep_back" => shaft_hall_deep_back,
         "shaft_hall_deep_side" => shaft_hall_deep_side,
@@ -310,6 +314,7 @@ lab_paths! {
     lab_corridor_plain => "corridor_plain",
     lab_duct => "duct",
     lab_service => "service",
+    lab_vent => "vent",
 }
 
 /// From `far_ledge_axis` to `hall_from_arch` (across the bridge and through the arch),
@@ -326,6 +331,110 @@ pub fn lab_corridor_walk(t: f32) -> Camera {
     let c = lab_landmark("corridor_slot");
     let d = Vec3::new(c.yaw.sin(), 0.0, c.yaw.cos());
     Camera { position: c.position + d * lerp(0.0, 8.0, t.clamp(0.0, 1.0)), pitch: 0.0, ..c }
+}
+
+/// The walk for exposure adaptation (E073): along a sealed passage out onto a ledge over the
+/// void. Of the passages that end on a ledge with a level run of at least 8 m before the door,
+/// the darkest kind (service, slot, low, plain, vaulted, in that order; the run up to 14 m); the line runs from the inner end of that
+/// run through the door cell to a point 1.6 m out on the ledge, at eye height. Computed once
+/// per process from the default seed.
+fn ledge_passage_line() -> &'static [Vec3] {
+    use mega_gen::labyrinth::{graph::SpaceKind, grid::Cell, plan::PassStyle, CELL};
+    static L: std::sync::OnceLock<Vec<Vec3>> = std::sync::OnceLock::new();
+    L.get_or_init(|| {
+        let plan = mega_gen::labyrinth::plan::plan(mega_gen::labyrinth::DEFAULT_SEED);
+        let eye = |c: Cell| c.floor_centre() + Vec3::Y * 1.65;
+        let mut best: Vec<Vec3> = Vec::new();
+        let mut best_key = (usize::MAX, 0.0f32);
+        const DARK_FIRST: [PassStyle; 5] = [PassStyle::Service, PassStyle::Slot, PassStyle::Low, PassStyle::Plain, PassStyle::Vaulted];
+        for pass in plan.passages.iter() {
+            let Some(rank) = DARK_FIRST.iter().position(|s| *s == pass.style) else { continue };
+            for end in pass.ends.iter().filter(|e| plan.graph.spaces[e.target].kind == SpaceKind::Ledge) {
+                let mut cells: Vec<Cell> = pass.flats().collect();
+                if cells.first() != Some(&end.cell) {
+                    cells.reverse();
+                }
+                if cells.first() != Some(&end.cell) {
+                    continue;
+                }
+                let (dx, dz) = end.dir.d();
+                let out = eye(end.cell) + Vec3::new(dx as f32, 0.0, dz as f32) * (CELL * 0.5 + 1.6);
+                let mut line = vec![out];
+                let mut len = 0.0;
+                let mut prev: Option<Cell> = None;
+                for c in cells {
+                    if let Some(p) = prev {
+                        if c.y != p.y || (c.x - p.x).abs() + (c.z - p.z).abs() != 1 || len >= 14.0 {
+                            break;
+                        }
+                    }
+                    let q = eye(c);
+                    len += q.distance(*line.last().unwrap());
+                    line.push(q);
+                    prev = Some(c);
+                }
+                if len >= 8.0 && (rank < best_key.0 || (rank == best_key.0 && len > best_key.1)) {
+                    best_key = (rank, len);
+                    best = line;
+                }
+            }
+        }
+        if best.len() < 2 {
+            let sp = lab_landmark("spawn").position;
+            best = vec![sp, sp + Vec3::Z * 8.0];
+        }
+        best.reverse();
+        best
+    })
+}
+
+/// A point at arc length `s` along `line`, extended straight beyond both ends.
+fn along(line: &[Vec3], s: f32) -> Vec3 {
+    let n = line.len();
+    if n < 2 {
+        return line.first().copied().unwrap_or(Vec3::ZERO);
+    }
+    if s <= 0.0 {
+        return line[0] + (line[0] - line[1]).normalize_or_zero() * -s;
+    }
+    let mut s = s;
+    for w in line.windows(2) {
+        let l = w[0].distance(w[1]);
+        if s <= l {
+            return w[0].lerp(w[1], s / l.max(1e-6));
+        }
+        s -= l;
+    }
+    line[n - 1] + (line[n - 1] - line[n - 2]).normalize_or_zero() * s
+}
+
+/// From inside a sealed passage out through its door onto a ledge over the void and back
+/// (E073, exposure adaptation), following the passage's cells (`ledge_passage_line`): walking out over t 0..0.4,
+/// standing on the ledge looking at the void until 0.5, turning round until 0.55, walking
+/// back in until 0.95, standing. The heading looks 1.5 m ahead and behind on the line, so
+/// it turns smoothly at corners. Frames for 1.4 m/s at 30 fps: length / 1.4 / 0.4 * 30
+/// (`ledge_passage_length` prints the length in tests).
+pub fn lab_passage_ledge(t: f32) -> Camera {
+    let c = lab_landmark("spawn");
+    let line = ledge_passage_line();
+    let len: f32 = line.windows(2).map(|w| w[0].distance(w[1])).sum();
+    let t = t.clamp(0.0, 1.0);
+    let ease = |x: f32| x * x * (3.0 - 2.0 * x);
+    let at = |s: f32, back: bool| {
+        let d = along(line, s + 1.5) - along(line, s - 1.5);
+        let yaw = d.x.atan2(d.z) + if back { PI } else { 0.0 };
+        Camera { position: along(line, s), yaw, pitch: 0.0, ..c }
+    };
+    if t < 0.4 {
+        at(len * t / 0.4, false)
+    } else if t < 0.5 {
+        at(len, false)
+    } else if t < 0.55 {
+        let a = at(len, false);
+        Camera { yaw: a.yaw + PI * ease((t - 0.5) / 0.05), ..a }
+    } else {
+        at(len * (1.0 - ((t - 0.55) / 0.4).min(1.0)), true)
+    }
 }
 
 /// At `far_ledge_axis`, turning 90 degrees left to right.
@@ -425,6 +534,15 @@ pub fn shaft_b2_down(t: f32) -> Camera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ledge_passage_length() {
+        let line = ledge_passage_line();
+        let len: f32 = line.windows(2).map(|w| w[0].distance(w[1])).sum();
+        println!("ledge passage walk: {} points, {len:.1} m", line.len());
+        println!("{line:?}");
+        assert!(line.len() >= 2 && len > 3.0);
+    }
 
     #[test]
     fn all_names_resolve_and_are_finite() {

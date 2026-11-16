@@ -104,6 +104,8 @@ Labyrinth paths (`lab_*`, scene `labyrinth`) are built from the generator's `Pla
 
 Performance (E069): `--bench N --timing` prints the median GPU time per pass from timestamp queries (shadow cascades, depth prepass, forward, contours, ink lines; see "Measured" in `ink-renderer.md` for how to read them on a tile-based GPU) and the triangles drawn per pass; `--no-cull` draws everything; `--no-portals` keeps frustum culling but not portal visibility (E072); `--prepass` adds a depth prepass. `--timing` reports the minimum over the frames (`MEGA_TIMING_MEDIAN=1` for the median), since other work on the GPU only ever adds time, and the visible-space count. Captures wait for the bounce bake before the first frame.
 
+Exposure adaptation (E073) is off in captures so different places stay comparable. `--adapt` turns it on: the gain settles on the first frame's position, then adapts at `--fps N` frames per second (default 30) and is printed per frame; `--adapt-from G` starts from gain G instead, to study the transition with a still camera.
+
 To add a path, write the function, add it to `NAMES` and `by_name`, and make sure `scene_of` maps it to its scene.
 
 ### Code locations
