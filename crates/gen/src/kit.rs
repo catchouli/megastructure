@@ -334,6 +334,32 @@ pub fn recess(b: &mut MeshBuilder, frame: Frame, r: Rect2, depth: f32, step: f32
     coarse
 }
 
+/// The faces of a rectangular hole through a wall (a door's or window's thickness): the two
+/// jambs, the lintel and the sill, from the plane of `frame` back `depth` into `-n`, facing
+/// into the hole. A walkable threshold (`walk`) gets a slab collider under it; the jambs and
+/// lintel are covered by the colliders of the walls either side. Strokes along the hole's four
+/// corners at `edge_rank`.
+pub fn reveal(b: &mut MeshBuilder, frame: Frame, r: Rect2, depth: f32, step: f32, walk: bool, edge_rank: Option<u32>) -> u32 {
+    let coarse = b.new_coarse();
+    let f = frame;
+    let (w, h) = (r.u1 - r.u0, r.v1 - r.v0);
+    let p = |a: f32, c: f32, d: f32| f.at(a, c, -d);
+    b.rect(p(r.u0, r.v0, 0.0), -f.n * depth, f.v * h, f.u, f.v, step, coarse);
+    b.rect(p(r.u1, r.v0, 0.0), -f.n * depth, f.v * h, -f.u, f.v, step, coarse);
+    b.rect(p(r.u0, r.v1, 0.0), f.u * w, -f.n * depth, -f.v, f.u, step, coarse);
+    b.rect(p(r.u0, r.v0, 0.0), f.u * w, -f.n * depth, f.v, f.n, step, coarse);
+    if let Some(rank) = edge_rank {
+        for (a, c) in [(r.u0, r.v0), (r.u1, r.v0), (r.u0, r.v1), (r.u1, r.v1)] {
+            b.stroke(p(a, c, 0.0), p(a, c, depth), f.n, f.n, StrokeKind::Crease, rank);
+        }
+    }
+    if walk {
+        let axes = [f.u, f.v, f.n];
+        b.collider(solid(f.at((r.u0 + r.u1) * 0.5, r.v0 - 0.3, -depth * 0.5), axes, Vec3::new(w * 0.5 + 0.2, 0.3, depth * 0.5 + 0.05)));
+    }
+    coarse
+}
+
 /// A railing drawn in ink only: a top rail at `RAILING_HEIGHT`, a mid rail and posts, from
 /// `a` to `c` (points on the walking surface; may slope). `out` is the horizontal direction
 /// away from the walking side. Adds a thin collider. The rails are lines, not geometry, so
@@ -415,6 +441,8 @@ pub struct Stair {
     /// (perpendicular to `dir`), or None for a free-standing stair.
     pub wall: Option<Vec3>,
     pub railing: bool,
+    /// Walls on both sides (a stair in a passage): no side faces, soffit or railings.
+    pub enclosed: bool,
 }
 
 /// What a built stair measured.
@@ -445,6 +473,7 @@ pub fn stair(b: &mut MeshBuilder, s: &Stair) -> StairInfo {
     let per = n.div_ceil(flights);
     let hw = s.width * 0.5;
     let open_sides: Vec<f32> = match s.wall {
+        _ if s.enclosed => vec![],
         Some(wv) => vec![if wv.dot(side) > 0.0 { -1.0 } else { 1.0 }],
         None => vec![-1.0, 1.0],
     };
@@ -467,6 +496,11 @@ pub fn stair(b: &mut MeshBuilder, s: &Stair) -> StairInfo {
             if let Some(wv) = s.wall {
                 faces[if wv.dot(side) > 0.0 { 5 } else { 4 }] = false;
             }
+            if s.enclosed {
+                faces[4] = false;
+                faces[5] = false;
+                faces[2] = false;
+            }
             block(b, centre, [dir, Vec3::Y, side], Vec3::new(len * 0.5, s.waist * 0.5, hw), faces, dir, 1.5, [Some(2), Some(2), Some(3)], true);
             if s.railing {
                 for &sd in &open_sides {
@@ -477,14 +511,14 @@ pub fn stair(b: &mut MeshBuilder, s: &Stair) -> StairInfo {
             at += dir * len;
         }
         first = false;
-        flight(b, at, dir, side, hw, m, rise, run, waist_v, &open_sides, s.wall.is_some(), s.railing);
+        flight(b, at, dir, side, hw, m, rise, run, waist_v, &open_sides, s.wall.is_some() && !s.enclosed, s.railing, !s.enclosed);
         at += dir * (m as f32 * run) + Vec3::Y * (m as f32 * rise);
     }
     StairInfo { top: at, risers: n, rise, run, length: (at - s.foot).with_y(0.0).length() }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn flight(b: &mut MeshBuilder, foot: Vec3, dir: Vec3, side: Vec3, hw: f32, m: usize, rise: f32, run: f32, waist_v: f32, open_sides: &[f32], against_wall: bool, rail: bool) {
+fn flight(b: &mut MeshBuilder, foot: Vec3, dir: Vec3, side: Vec3, hw: f32, m: usize, rise: f32, run: f32, waist_v: f32, open_sides: &[f32], against_wall: bool, rail: bool, soffit: bool) {
     let coarse = b.new_coarse();
     let y0 = foot.y;
     let pt = |s: f32, y: f32, w: f32| Vec3::new(foot.x, y, foot.z) + dir * s + side * w;
@@ -527,7 +561,9 @@ fn flight(b: &mut MeshBuilder, foot: Vec3, dir: Vec3, side: Vec3, hw: f32, m: us
     let slope_dir = (dir * run + Vec3::Y * rise).normalize();
     let soffit_n = side.cross(slope_dir).normalize();
     let soffit_n = if soffit_n.y > 0.0 { -soffit_n } else { soffit_n };
-    b.rect(pt(0.0, bottom(0.0), -hw), slope_dir * (len / slope_dir.with_y(0.0).length()), side * (2.0 * hw), soffit_n, slope_dir, 1.5, coarse);
+    if soffit {
+        b.rect(pt(0.0, bottom(0.0), -hw), slope_dir * (len / slope_dir.with_y(0.0).length()), side * (2.0 * hw), soffit_n, slope_dir, 1.5, coarse);
+    }
     if against_wall {
         let w = -open_sides[0] * hw;
         b.stroke(pt(0.0, bottom(0.0), w), pt(len, bottom(len), w), soffit_n, -open_sides[0] * side, StrokeKind::Crease, 2);
@@ -589,15 +625,16 @@ pub fn column_round(b: &mut MeshBuilder, base: Vec3, radius: f32, height: f32, s
     let joints: Vec<f32> = grid_lines(y1 - y0, drum, &[]).iter().map(|x| x + y0).collect();
     let ang = |k: usize| 2.0 * PI * k as f32 / sides as f32;
     let rim = |k: usize, y: f32| Vec3::new(base.x + radius * ang(k).cos(), y, base.z + radius * ang(k).sin());
+    // Smooth normals: each vertex carries its radial direction, so the shading is round and
+    // only the silhouette shows the facets.
     for j in 0..joints.len() - 1 {
         let fine = b.panel();
-        for k in 0..sides {
-            let (p, q) = (rim(k, joints[j]), rim(k + 1, joints[j]));
-            let mid = (ang(k) + ang(k + 1)) * 0.5;
-            let n = Vec3::new(mid.cos(), 0.0, mid.sin());
-            let vs = grid_lines(joints[j + 1] - joints[j], step, &[]);
-            b.grid_face(p, (q - p).normalize(), Vec3::Y, &[0.0, (q - p).length()], &vs, n, Vec3::Y, fine, coarse);
-        }
+        let vs: Vec<f32> = grid_lines(joints[j + 1] - joints[j], step, &[]).iter().map(|v| v + joints[j]).collect();
+        let at = |i: usize, jj: usize| {
+            let a = ang(i);
+            (rim(i, vs[jj]), Vec3::new(a.cos(), 0.0, a.sin()), Vec3::Y)
+        };
+        b.smooth_grid(sides + 1, vs.len(), &at, fine, coarse);
     }
     for (jj, &y) in joints.iter().enumerate() {
         let rank = if jj == 0 || jj == joints.len() - 1 { 1 } else { 2 };
@@ -878,16 +915,15 @@ pub fn arch(b: &mut MeshBuilder, a: &Arch) -> u32 {
     }
     for k in 0..a.voussoirs {
         let fine = b.panel();
-        for j in 0..a.facets {
-            let i = k * a.facets + j;
-            let (t0, t1) = (th(i), th(i + 1));
-            let tm = (t0 + t1) * 0.5;
-            let inward = -(f.u * tm.cos() + f.v * tm.sin());
-            let p0 = circ(r, t0, 0.0);
-            let p1 = circ(r, t1, 0.0);
-            let ds = grid_lines(a.thickness, step, &[]);
-            b.grid_face(p0, (p1 - p0).normalize(), -f.n, &[0.0, (p1 - p0).length()], &ds, inward, p1 - p0, fine, coarse);
-        }
+        // Smooth normals along the curve, one strip per voussoir.
+        let ds = grid_lines(a.thickness, step, &[]);
+        let at = |j: usize, jj: usize| {
+            let t = th(k * a.facets + j);
+            let inward = -(f.u * t.cos() + f.v * t.sin());
+            let tangent = -f.u * t.sin() + f.v * t.cos();
+            (circ(r, t, ds[jj]), inward, tangent)
+        };
+        b.smooth_grid(a.facets + 1, ds.len(), &at, fine, coarse);
         if k > 0 {
             let t = th(k * a.facets);
             let inward = -(f.u * t.cos() + f.v * t.sin());
@@ -942,7 +978,7 @@ mod tests {
     fn stair_geometry_and_ramp() {
         let mut b = MeshBuilder::new();
         let s = Stair { foot: Vec3::new(1.0, 10.0, 2.0), dir: Vec3::Z, width: 1.4, height: 23.3, risers: None,
-            max_risers: 40, landing: 1.5, waist: 0.3, wall: Some(Vec3::X), railing: true };
+            max_risers: 40, landing: 1.5, waist: 0.3, wall: Some(Vec3::X), railing: true, enclosed: false };
         let info = stair(&mut b, &s);
         assert!((info.top.y - 33.3).abs() < 1e-3, "{info:?}");
         let (m, cols) = check(b);

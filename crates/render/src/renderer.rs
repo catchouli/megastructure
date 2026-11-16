@@ -233,6 +233,8 @@ impl Sun {
         // Every scene but `test` gets the shaft's sun (new generated scenes included).
         match scene {
             "test" => Self::default(),
+            // High enough to reach down the deep void, and onto the hall's outer end.
+            "labyrinth" => Self::remote(Self::direction_from_angles(62.0, 135.0)),
             _ => Self::remote(Self::direction_from_angles(74.0, -110.0)),
         }
     }

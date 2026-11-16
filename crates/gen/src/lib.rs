@@ -5,8 +5,10 @@ pub mod ao;
 pub mod bounce;
 pub mod builder;
 pub mod kit;
+pub mod labyrinth;
 pub mod mesh;
 pub mod scenes;
+pub mod seed;
 pub mod shaft;
 pub mod test_scene;
 

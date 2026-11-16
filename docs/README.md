@@ -31,8 +31,9 @@ Constants that other systems depend on (for example, movement limits the generat
 | Bounced light | `features/bounced-light.md` | Working (one bounce, per-vertex CPU bake; headless verified) |
 | Kit of parts | `features/kit-of-parts.md` | In progress (M1 kit) |
 | One Shaft | `features/one-shaft.md` | Working (M1 scene) |
+| Labyrinth | `features/labyrinth.md` | In progress (M2 first slice: graph, embedding, reachability; headless verified) |
 
-Still to be split out of `PLAN.md` when work starts: space graph, layout, decay, streaming and LOD.
+Still to be split out of `PLAN.md` when work starts: decay, streaming and LOD (the space graph and layout are in `features/labyrinth.md` for now).
 
 ## Testing without a window
 

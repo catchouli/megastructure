@@ -18,7 +18,7 @@ pub struct Scene {
 }
 
 /// Names accepted by [`by_name`]. The first is the default.
-pub const NAMES: &[&str] = &["test", "shaft"];
+pub const NAMES: &[&str] = &["test", "shaft", "labyrinth"];
 
 pub const DEFAULT: &str = NAMES[0];
 
@@ -36,6 +36,11 @@ pub fn by_name(name: &str) -> Option<Scene> {
             let s = crate::shaft::build(crate::shaft::DEFAULT_SEED);
             let (spawn, spawn_yaw) = crate::shaft::spawn();
             Some(Scene { name: "shaft", mesh: s.mesh, spawn, spawn_yaw, colliders: s.colliders })
+        }
+        "labyrinth" => {
+            let l = crate::labyrinth::build(crate::labyrinth::DEFAULT_SEED);
+            let (spawn, spawn_yaw) = l.spawn();
+            Some(Scene { name: "labyrinth", mesh: l.mesh, spawn, spawn_yaw, colliders: l.colliders })
         }
         _ => None,
     }

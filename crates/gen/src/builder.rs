@@ -372,6 +372,37 @@ impl MeshBuilder {
         }
     }
 
+    /// A curved panel with smooth shading: an `nu` by `nv` grid of vertices from
+    /// `at(i, j) = (position, normal, hatch)`, two triangles per cell, all with fine id `fine`.
+    /// Each cell is wound to face its first corner's normal. AO is set to 1.
+    pub fn smooth_grid(&mut self, nu: usize, nv: usize, at: &dyn Fn(usize, usize) -> (Vec3, Vec3, Vec3), fine: u32, coarse: u32) {
+        let base = self.mesh.vertices.len() as u32;
+        for j in 0..nv {
+            for i in 0..nu {
+                let (p, n, h) = at(i, j);
+                let n = n.normalize();
+                let h = (h - n * n.dot(h)).normalize();
+                self.mesh.vertices.push(Vertex { position: p.to_array(), normal: n.to_array(), hatch_axis: h.to_array(), id_fine: fine, id_coarse: coarse, ao: 1.0 });
+            }
+        }
+        let pos = |k: u32, v: &Vec<Vertex>| Vec3::from(v[k as usize].position);
+        for j in 0..nv - 1 {
+            for i in 0..nu - 1 {
+                let a = base + (j * nu + i) as u32;
+                let bb = a + 1;
+                let c = a + nu as u32 + 1;
+                let d = a + nu as u32;
+                let g = (pos(bb, &self.mesh.vertices) - pos(a, &self.mesh.vertices)).cross(pos(d, &self.mesh.vertices) - pos(a, &self.mesh.vertices));
+                let n = Vec3::from(self.mesh.vertices[a as usize].normal);
+                if g.dot(n) >= 0.0 {
+                    self.mesh.indices.extend_from_slice(&[a, bb, c, a, c, d]);
+                } else {
+                    self.mesh.indices.extend_from_slice(&[a, c, bb, a, d, c]);
+                }
+            }
+        }
+    }
+
     pub fn collider(&mut self, c: Collider) {
         self.colliders.push(c);
     }

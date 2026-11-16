@@ -596,6 +596,39 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Setup: sheet `compare/E063-light-exposure.png`: `light_white` 0.9 / 1.0 / 1.15 on `shaft_spawn`, `shaft_arch_view`, `shaft_rim_down`; regenerate with `mega_capture --path shaft_arch_view --width 2560 --height 1440 --set light_white=1.15 --out <dir>`.
 - Verdict: 1.0. Question on the sheet: how much tone should the light carry?
 
+## E201: The labyrinth, first generated region
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md`
+- Question: the owner asked for "more geometry ideally, and more of a labyrinth to explore". Can a space graph built by a director and a small grammar, embedded on a cell grid and built from the kit, give a region worth exploring: cycles, real vertical extent, contrast of scale, sight lines across voids, sun in places and dark deep places?
+- Setup: new scene `labyrinth`, default seed `0x1ab_0001`. Sheet `compare/E201-labyrinth-tour.png`: 15 views at 2560x1440 (full frames in `compare/E201-labyrinth-tour/`) and a plan and section of the layout. Captures use `--preset nihei_ink --sun-elev 62 --sun-azim 135` (the scene has no preset or sun of its own in the render crate yet). Regenerate a view with `cargo run --release --bin mega_capture -- --scene labyrinth --camera <x,y,z,yaw,pitch,fov> --preset nihei_ink --sun-elev 62 --sun-azim 135 --width 2560 --height 1440 --out <dir>`; the cameras: spawn `162,73.65,149.8,3.1416,-0.15,1.4`; spawn ledge edge `158,73.65,147,3.5,-0.6,1.4`; far ledge on the arch axis `150,43.65,146,3.1416,0.1,1.4`; arch ledge `150,43.65,108,0,0.15,1.4`; hall from the arch `150,43.65,100,3.1416,0.15,1.4`; hall from its exterior end `142,43.65,8,0,0.2,1.4`; gallery `117,61.65,80,1.9,-0.3,1.4`; void bottom `146,1.65,128,0.3,1.1,1.5`; wall stair `165,13.65,108,0.2,0.25,1.4`; overlook `127.3,115.65,138,1.5708,-0.9,1.4`; tower well `114,37.65,134,0,1.2,1.5`; undercroft `236,1.65,200,0.3,0.05,1.4`; light well bridge `46.5,67.65,40,1.5708,-0.1,1.4`; loggia `186,43.65,6,3.1416,-0.1,1.4`; corridor by the void `170,73.65,134,0,0,1.3`. Diagram: `LABYRINTH_SVG=<file.svg> cargo test --release -p mega_gen -- --ignored labyrinth_diagram`.
+- Result: 41 spaces (39 walkable), cycle rank 3 or more, core loop from storey 12 down to 0 and up again, about 1.4 km (9.5 min at a walk). Reachability passes for every space and door for 60 seeds. The axial view (far ledge, bridge, arch, hall, windows) and the views down from the spawn ledge read as intended; the hall is mid grey with sun at its far end; the undercroft, service passages and tower wells are dark. The corridors are tall plain boxes and alike; the light well is small. 180,586 triangles and 16,867 strokes, under the shaft's triangle count.
+- Failure on the way: the first renders passed the field of view in degrees; `--camera` takes radians, so `80` became a huge angle and every view was a fisheye.
+- Verdict: kept as the first slice of M2. Question on the sheet: does it feel like a labyrinth worth exploring, and which spaces want more?
+
+## E202: Embedding failures and door cells
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("Embedding")
+- Question: why did the default seed need 13 embedding attempts, and what makes routing reliable?
+- Setup: `LABYRINTH_DEBUG=1 cargo test --release -p mega_gen -- --ignored --nocapture labyrinth_report` prints why each attempt failed; `SWEEP=60 cargo test --release -p mega_gen -- --ignored --nocapture labyrinth_seed_sweep` for the mean.
+- Result: every failure was "no door candidates": earlier passages ran past a stair tower or junction and took the only cells its later doors could use (a tower has two door cells a storey), and a rule keeping doors apart counted the two cells round a tower corner as neighbours. Also the wall stair's lower ledge had its doors past the stair's foot, so the ledge ran under the stair. Fixes: cells later passages need as doors cost 15 extra cells to route through (stair cells too); a tower door may move to the nearest storey with a free cell (the passage takes the difference in stairs); doors are kept apart only along the same wall; ledges either side of the wall stair keep their doors on their own side and the stair starts two cells from the corner. Default seed: 13 attempts to 1; 60 seeds: mean 1.47, at most 4, none failing.
+- Verdict: kept.
+
+## E203: Clutter on the void walls
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("Building it")
+- Question: the void's walls were blank planes 156 m tall with a few joints. Can buttresses and accreted blocks, kept clear of everything that must stay open, make them read as built-up structure without blocking doors, ledges, stairs and sight lines?
+- Setup: `geom::wall_clutter`: per wall, one to three buttress piers in the free vertical stretches, then six to eleven blocks (2.5 to 14 m wide, 2.5 to 18 m tall, 1.2 to 4.5 m deep), some with a smaller block on top and a dark slot, rejected if they come within 1 to 2.5 m of a door, window, the arch, a ledge, the wall stair, a beam end or 6.5 m of a corner. Compare tour views 1 to 4 and 8 of E201 against the same cameras before (regenerate the before by commenting out the `wall_clutter` call).
+- Result: the void walls now have scale and rhythm; seen from the bottom they converge in a forest of piers and blocks towards the light. About 9,000 triangles. Reachability unchanged.
+- Verdict: kept. Machinery (M4) should later take some of these places.
+
+## E204: Sun elevation for the labyrinth
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("Light"), `features/sun-and-sky.md`
+- Question: the render crate gives an unknown scene a sun 32 degrees up. Does sun reach into the labyrinth's void, and what elevation should the scene ask for?
+- Setup: sheet `compare/E204-labyrinth-sun.png`: elevation 32 / 50 / 65 at azimuth 135 on three views (spawn ledge looking down, across the void from the arch ledge, the hall from its exterior end). Regenerate with `mega_capture --scene labyrinth --camera 150,43.65,108,0,0.15,1.4 --preset nihei_ink --sun-elev 65 --sun-azim 135 --out <dir>`.
+- Result: at 32 degrees no sun reaches the void below the spawn ledge; the hall's far end is lit through its windows at every elevation. At 50 a sliver reaches the far void wall; at 65 the sun cuts a long bright shaft down the void walls, the contrast the owner asked for.
+- Verdict: about 62 degrees, azimuth 135, used for the E201 captures; to be set in `Sun::for_scene("labyrinth")` by whoever owns the render crate. Question on the sheet: is a high sun the right default here?
+
 ## Queued
 
 

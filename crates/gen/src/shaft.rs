@@ -376,6 +376,7 @@ pub fn build(seed: u64) -> Shaft {
         waist: 0.35,
         wall: Some(Vec3::X),
         railing: true,
+        enclosed: false,
     });
     debug_assert!((info.top.y - hall_y).abs() < 1e-3 && (info.top.z - LEDGE_EDGE_Z).abs() < 1e-3, "{info:?}");
 
