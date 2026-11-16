@@ -2,7 +2,7 @@
 
 ## Status
 
-Working, 2026-11-15. Milestone M1 scene: generated from a seed, registered as `"shaft"`, walkable route checked in collider space, eleven camera paths, sun shadows (E011). The walking controller that will consume the colliders is not built. The sky pass and screentone are out of scope.
+Working, 2026-11-15. Milestone M1 scene: generated from a seed, registered as `"shaft"`, walkable route checked in collider space, thirteen camera paths (two of them rotation probes), sun shadows (E011). The walking controller that will consume the colliders is not built. The sky pass and screentone are out of scope.
 
 ## What it is
 
@@ -59,7 +59,7 @@ Times local occlusion from the colliders at 70% strength (`kit-of-parts.md`, E00
 
 ### Look
 
-`StylePreset::nihei_vast` (`ink-renderer.md`) and `Sun::for_scene("shaft")`: a remote sun 74 degrees up at azimuth -110 (west-south-west), with cast shadows. The east wall is lit from the rim down to about 220 m deep, just below the spawn level, so the stair crosses a white field; below that the west rim's shadow cuts across it, and bridges throw black bars on the walls below them. Cast shadow is solid black with white ink inside it, faces turned away from the sun are toned by depth (E011 to E019). Until E011 the sun was 54 degrees up at (-0.55, 0.8, -0.2) and scaled by ao; with real shadows that sun lit only the top 87 m of the east wall and the spawn view went black. `mega_capture` and the game pick preset and sun from the scene name.
+`StylePreset::nihei_vast` (`ink-renderer.md`) and `Sun::for_scene("shaft")`: a remote sun 74 degrees up at azimuth -110 (west-south-west), with cast shadows. The east wall is lit from the rim down to about 220 m deep, just below the spawn level, so the stair crosses a white field; below that the west rim's shadow cuts across it, and bridges throw black bars on the walls below them. Cast shadow is dense single hatching with a crisp edge; solid black is left for recesses, with white ink inside it (E011 to E025). Until E011 the sun was 54 degrees up at (-0.55, 0.8, -0.2) and scaled by ao; with real shadows that sun lit only the top 87 m of the east wall and the spawn view went black. `mega_capture` and the game pick preset and sun from the scene name.
 
 ### Camera paths
 
@@ -76,6 +76,7 @@ Times local occlusion from the colliders at 70% strength (`kit-of-parts.md`, E00
 | `shaft_arch_view` | The arch whole from B1, across the shaft |
 | `shaft_rim_down` | From just below the rim, straight down 600 m |
 | `shaft_b2_down` | Over B2's railing at 470 m, looking down past the lower bridges |
+| `shaft_spawn_yaw`, `shaft_spawn_pitch` | At the spawn, turning 90 degrees left to right, or tipping from 45 degrees down to 45 up (rotation probes, E020) |
 
 Reproduce, from the workspace root (each writes `frame_NNNN.png` under `--out`):
 

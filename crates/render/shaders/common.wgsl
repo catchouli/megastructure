@@ -48,6 +48,8 @@ struct Style {
     fog2: vec4<f32>,            // fog darkening over solid black, sun shadow, white line max rank
     white: vec4<f32>,           // white hatch strength, its pitch scale, panel tone, cross break gap
     strokes: vec4<f32>,         // hatch patch amount, patch width (lines), patch length, taper px
+    feather: vec4<f32>,         // hatch feather (spacings), end jitter, shadow feather (m), shadow hatch dir
+    feather2: vec4<f32>,        // shadow break gap, taper length in widths, max line width px
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;

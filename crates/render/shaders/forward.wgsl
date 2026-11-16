@@ -47,8 +47,12 @@ struct LayerIn {
     v: f32,
     g: f32,
     gv: f32,
-    // Derivative used to choose the octave (equal to g except in diagnostic modes).
+    // Rotation-invariant footprints of u and v in metres per pixel (see fs_main). lod
+    // chooses the octave; lodv sets stroke shapes along the line. Coverage uses g and gv.
     lod: f32,
+    lodv: f32,
+    // Light gradient along the lines, per metre (for feathering tone boundaries).
+    lgrad: f32,
     salt: u32,
     light: f32,
     thresh: f32,
@@ -81,14 +85,6 @@ fn line_key(salt: u32, n: i32) -> u32 {
     return hash2(salt, bitcast<u32>(n));
 }
 
-// The octave a layer is drawn at for this fragment: spacing s0 of octave k0, and the
-// crossfade towards octave k0 + 1.
-struct Oct {
-    s0: f32,
-    k0: f32,
-    frac: f32,
-};
-
 // 1D value noise with its derivative: x value, y d/dx.
 fn vnoise_d(key: u32, x: f32) -> vec2<f32> {
     let i = floor(x);
@@ -100,54 +96,60 @@ fn vnoise_d(key: u32, x: f32) -> vec2<f32> {
     return vec2<f32>(mix(a, b, w), (b - a) * 6.0 * f * (1.0 - f));
 }
 
-// Patch cells. Lines are grouped into columns S.strokes.y lines wide (at the layer's
-// octave); along the lines each column is cut into runs S.strokes.z breakup lengths long,
-// staggered from column to column. Every line of a run starts at the run's start (with a
-// small per-line jitter) and stops at a shared end point (with a small per-line jitter),
-// leaving a gap of about the layer's gap fraction before the next run: a group of
-// parallel strokes laid down together, as a hand hatches. Everything is keyed to world
-// positions and line identities, so it stays on the surface.
-// x metres since the stroke started, y metres until it ends, z a random value per run.
-fn patch_run(salt: u32, key: u32, pos: f32, v: f32, wdt: f32, len: f32, gap: f32) -> vec3<f32> {
-    let ci = i32(floor(pos / wdt + 0.5));
-    let hc = hash2(salt, bitcast<u32>(ci));
-    let vv = v / len + u01(hc);
-    let sj = floor(vv);
-    let fr = vv - sj;
-    let hs = hash2(hc, bitcast<u32>(i32(sj)));
-    let kl = pcg(key ^ hs);
-    let start = 0.06 * u01(kl);
-    let end = 1.0 - gap * (0.4 + 1.2 * u01(hs)) + (u01(pcg(kl ^ 9u)) - 0.5) * 0.12;
-    return vec3<f32>((fr - start) * len, (end - fr) * len, u01(pcg(hs ^ 5u)));
-}
-
-fn patch_size(o: Oct, k: f32) -> vec2<f32> {
-    return vec2<f32>(o.s0 * exp2(k) * S.strokes.y, S.hatch2.x * S.strokes.z * exp2(o.k0 + k));
+// Patch runs, nested across line levels so that a line's strokes depend only on its own
+// identity, never on the octave being drawn (E020). Lines are grouped into columns: a line of
+// level l belongs to column floor(n / (L 2^l)), L = S.strokes.y, so at any octave a column
+// holds about L drawn lines, and the columns of level l + 1 are unions of two of level l.
+// Along the lines, runs start from a world grid of length R0 2^11 (R0 = hatch_break_len *
+// hatch_patch_len) with a phase per top column; going down one level, each run is split once,
+// at a random point between 25% and 75%, chosen per run and per column of that level. A line
+// of level l uses the runs reached after splitting down to l. Runs of level l are therefore
+// unions of runs of level l - 1: lines in one column start together at the run's start (a
+// common start edge), and their ends are jittered per line (a ragged trailing end).
+// x metres since the stroke started, y metres until it ends, z a random value per run,
+// w the run's length.
+fn patch_run(salt: u32, key: u32, n: i32, lvl: f32, v: f32, gap: f32) -> vec4<f32> {
+    let lines = max(S.strokes.y, 1.0);
+    let top = 11;
+    let ln = i32(min(lvl, f32(top)));
+    let r_top = S.hatch2.x * S.strokes.z * exp2(f32(top));
+    let fnn = f32(n);
+    var id = hash2(salt, bitcast<u32>(i32(floor(fnn / (lines * exp2(f32(top)))))));
+    let ph = u01(id);
+    let jt = floor(v / r_top + ph);
+    var a = (jt - ph) * r_top;
+    var b = a + r_top;
+    id = hash2(id, bitcast<u32>(i32(jt)));
+    for (var j = top - 1; j >= ln; j--) {
+        let cj = i32(floor(fnn / (lines * exp2(f32(j)))));
+        let h = hash2(id, bitcast<u32>(cj));
+        let m = a + (b - a) * (0.25 + 0.5 * u01(h));
+        let right = v >= m;
+        a = select(a, m, right);
+        b = select(m, b, right);
+        id = hash2(h, select(0x2545f491u, 0x9e3779b9u, right));
+    }
+    let len = b - a;
+    let kl = pcg(key ^ id);
+    // Ragged at both ends, by S.feather.y of the run: the start skewed (most strokes start
+    // near the run's start, a few later), the end uniform.
+    let js = u01(kl);
+    let start = a + len * S.feather.y * js * js;
+    let end = b - len * (gap * (0.6 + 0.8 * u01(id)) + S.feather.y * u01(pcg(kl ^ 9u)));
+    return vec4<f32>(v - start, end - v, u01(pcg(id ^ 5u)), len);
 }
 
 // Random offset added to the light value along line n, so band edges are made of line ends.
-// With patches on, it is mostly shared by one run of one column, so a band edge is a group
-// of strokes stopping together rather than a sawtooth.
-fn band_jit(c: LayerIn, n: i32, pos: f32, o: Oct) -> f32 {
+// With patches on, it is mostly one value per run, so a band edge is a group of strokes
+// stopping together rather than a sawtooth.
+fn band_jit(c: LayerIn, n: i32) -> f32 {
+    // Per line only. Until E026 it was shared by the lines of a patch run, which made a
+    // whole run (a rectangle of lines) switch band at once: flat-topped blocks of hatching,
+    // and of solid black where the light sat just above band_black.
     let key = line_key(c.salt, n) ^ 0x51ed270bu;
     let len = S.light.w * exp2(min(line_level(n), 10.0));
-    let filt = 1.0 - saturate(c.gv / len * 2.0);
-    var j = vnoise(key, c.v / len + 31.7) - 0.5;
-    if (S.strokes.x > 0.0) {
-        // Same narrow switch between the octave layouts as the breakup.
-        let wk1 = smoothstep(0.35, 0.65, o.frac);
-        var r = 0.0;
-        if (wk1 < 1.0) {
-            let p0 = patch_size(o, 0.0);
-            r += (1.0 - wk1) * patch_run(c.salt ^ 0x27d4eb2fu, key, pos, c.v, p0.x, p0.y, 0.0).z;
-        }
-        if (wk1 > 0.0) {
-            let p1 = patch_size(o, 1.0);
-            r += wk1 * patch_run(c.salt ^ 0x165667b1u, key, pos, c.v, p1.x, p1.y, 0.0).z;
-        }
-        j = mix(j, r - 0.5 + 0.3 * j, S.strokes.x);
-    }
-    return j * S.light.z * filt;
+    let filt = 1.0 - saturate(c.lodv / len * 2.0);
+    return (vnoise(key, c.v / len + 31.7) - 0.5) * S.light.z * filt;
 }
 
 // Width multiplier for a stroke end d pixels away, over taper length tp.
@@ -155,48 +157,64 @@ fn end_taper(d: f32, tp: f32) -> f32 {
     return select(1.0, smoothstep(0.0, tp, d), tp > 0.0);
 }
 
-// Coverage of line n, whose centre is at u = pos.
-fn line_cov(c: LayerIn, n: i32, pos: f32, o: Oct) -> f32 {
+// Coverage of a stroke of full width w (pixels) narrowed to w * k, with one edge kept in place
+// (side +-1), at signed distance sd (pixels) from the stroke's centre line. A stroke that
+// thins keeps one straight edge and loses the other, like a pen lifting off at an angle,
+// rather than closing symmetrically into a point.
+fn stroke_cov(sd: f32, w: f32, k: f32, side: f32) -> f32 {
+    let kk = saturate(k);
+    return tent_cov(abs(sd - side * 0.5 * w * (1.0 - kk)), w * kk);
+}
+
+// Coverage of line n, whose centre is at u = pos. fade (0..1) is how much of the line the
+// octave crossfade keeps. Distances along the line are taken in true pixels (c.gv) for
+// anti-aliasing and in rotation-invariant pixels (c.lodv) for the shape of the stroke, so a
+// stroke keeps its shape as the camera turns. Every way a stroke fades (octave crossfade,
+// band edge, break, shadow edge) narrows it rather than greying it: a visible mark is
+// full-strength ink (E026).
+fn line_cov(c: LayerIn, n: i32, pos: f32, fade: f32) -> f32 {
+    if (fade <= 0.0) {
+        return 0.0;
+    }
     let key = line_key(c.salt, n);
     let lvl = line_level(n);
     let dark = saturate((c.thresh - c.light) / max(c.thresh - c.next, 1e-3));
-    let w = S.hatch.z * G.misc.x * c.width_scale * (1.0 + (u01(pcg(key)) - 0.5) * S.hatch.w) * (1.0 + S.hatch2.w * dark);
+    // Width in rotation-invariant pixels (E020), capped (E026) so near walls are not drawn
+    // as bars: up close, spacing carries tone, not width. Converted to true pixels for
+    // coverage.
+    let wi = min(S.hatch.z * G.misc.x * c.width_scale * (1.0 + (u01(pcg(key)) - 0.5) * S.hatch.w) * (1.0 + S.hatch2.w * dark),
+        S.feather2.z * G.misc.x);
+    let w = wi * (c.lod / c.g);
     let gap = c.gap;
-    let tp = S.strokes.w * G.misc.x;
-    let ad = abs(c.u - pos) / c.g;
+    let sd = (c.u - pos) / c.g;
+    let inv = c.gv / max(c.lodv, 1e-9);
+    // Per stroke: which edge stays when it thins, and how long its tapers are: a multiple of
+    // its width (S.feather2.y), at least S.strokes.w pixels, varied by +-40%.
+    let side = select(-1.0, 1.0, (pcg(key ^ 0x2f6b9e01u) & 1u) == 1u);
+    let tp = max(S.strokes.w * G.misc.x, S.feather2.y * wi) * (0.6 + 0.8 * u01(pcg(key ^ 0x6c8e9cf5u)));
     // Tone: present where the jittered light is below the band threshold. Distance in
-    // pixels to where it stops, from the light's change per pixel (c.edge). A line ending
-    // at a band edge tapers like a lifted pen.
-    let d_tone = (c.thresh - c.light - band_jit(c, n, pos, o)) / max(c.edge, 1e-4);
+    // pixels to where it stops, from the light's change per pixel (c.edge).
+    // Feathering: this stroke's end at the band edge moves along the line by its own amount
+    // in metres, scaled by the spacing of its level, so coarser (longer-lived) lines run on
+    // further and the boundary thins out stroke by stroke.
+    var fshift = 0.0;
+    if (S.feather.x > 0.0) {
+        let delta = S.feather.x * S.hatch.x * exp2(min(lvl, 10.0)) * (u01(pcg(key ^ 0x3c6ef372u)) - 0.35);
+        fshift = clamp(c.lgrad * delta, -0.2, 0.2);
+    }
+    let d_tone = (c.thresh - c.light + fshift - band_jit(c, n)) / max(c.edge, 1e-4);
     let tone = saturate(d_tone + 0.5);
-    let wt = w * end_taper(d_tone, tp);
+    var k = fade * end_taper(d_tone * inv, tp);
+    if (SH_GATE != 0u) {
+        k *= line_shadow(c.salt, n);
+    }
     if (S.strokes.x > 0.0) {
-        // Patch runs at this octave's size, switching to the next octave's in a narrow
-        // band of the octave crossfade (a wide crossfade of two different layouts would
-        // leave many strokes half drawn, grey).
-        let wk1 = smoothstep(0.35, 0.65, o.frac);
-        var cov = 0.0;
-        for (var k = 0; k < 2; k++) {
-            let wgt = select(wk1, 1.0 - wk1, k == 0);
-            if (wgt <= 0.0) {
-                continue;
-            }
-            let ps = patch_size(o, f32(k));
-            let r = patch_run(c.salt ^ (0x9e3779b9u * u32(k + 1)), key, pos, c.v, ps.x, ps.y, gap);
-            let ds = r.x / c.gv;
-            let de = r.y / c.gv;
-            let min_ok = c.gv * 2.0 < ps.y;
-            var cv: f32;
-            if (min_ok) {
-                // Blunt start, trailing end.
-                let wk = wt * end_taper(ds, tp * 0.25) * end_taper(de, tp);
-                cv = tent_cov(ad, wk) * saturate(ds + 0.5) * saturate(de + 0.5);
-            } else {
-                cv = tent_cov(ad, wt) * (1.0 - gap);
-            }
-            cov += cv * wgt;
-        }
-        return cov * tone;
+        let r = patch_run(c.salt ^ 0x9e3779b9u, key, n, lvl, c.v, gap);
+        let minified = saturate(c.lodv * 4.0 / r.w - 0.5);
+        // Short taper where the stroke starts, long where it trails off.
+        let kr = k * end_taper(r.x / c.lodv, tp * 0.3) * end_taper(r.y / c.lodv, tp);
+        let sharp = stroke_cov(sd, w, kr, side) * saturate(r.x / c.gv + 0.5) * saturate(r.y / c.gv + 0.5);
+        return mix(sharp, stroke_cov(sd, w, k, side) * (1.0 - gap), minified) * tone;
     }
     // Per-line breakup: noise along v with a segment length that grows with the line's
     // level, so lines that survive to coarse octaves break up at a similar screen scale.
@@ -205,13 +223,35 @@ fn line_cov(c: LayerIn, n: i32, pos: f32, o: Oct) -> f32 {
     // Signed distance in pixels along the line to the nearest break end (first order).
     let df = nl.y / bl;
     let d_break = (nl.x - gap) / max(abs(df) * c.gv, 1e-6);
-    let minified = saturate(c.gv / bl * 2.0);
+    let minified = saturate(c.lodv / bl * 2.0);
     let present = mix(saturate(d_break + 0.5), 1.0 - gap, minified);
-    let wb = wt * mix(end_taper(d_break, tp * select(1.0, 0.33, df > 0.0)), 1.0, minified);
-    return tent_cov(ad, wb) * present * tone;
+    let kb = k * mix(end_taper(d_break * inv, tp * select(1.0, 0.3, df > 0.0)), 1.0, minified);
+    return stroke_cov(sd, w, kb, side) * present * tone;
 }
 
-// One layer of ruled lines. The octave comes from the derivative of u alone, so a grazing
+// Fragment context for drawing inside a cast shadow (set in fs_main).
+var<private> SH_GATE: u32;
+var<private> FP: vec3<f32>;
+var<private> FN: vec3<f32>;
+var<private> FS: vec3<f32>;
+var<private> FDIR: vec3<f32>;
+var<private> FAMT: f32;
+var<private> FDPX: vec3<f32>;
+var<private> FDPY: vec3<f32>;
+
+// How much a shadow stroke is drawn at this fragment: the cast-shadow amount, either of the
+// fragment itself (crisp edge) or, with S.feather.z > 0, tested at a point moved along the
+// stroke by the stroke's own random amount, so each stroke ends at its own place near the
+// shadow edge (feathered edge).
+fn line_shadow(salt: u32, n: i32) -> f32 {
+    if (S.feather.z <= 0.0) {
+        return FAMT;
+    }
+    let d = S.feather.z * (2.0 * u01(pcg(line_key(salt, n) ^ 0x1b56c4e9u)) - 1.0);
+    return 1.0 - smoothstep(0.35, 0.65, sun_vis_cheap(FP + FDIR * d));
+}
+
+// One layer of ruled lines. The octave comes from the footprint of u alone, so a grazing
 // floor picks the octave its lines actually need. Octave k has lines every spacing*2^k; the
 // lines of octave k+1 are the even lines of octave k, so crossfading only fades the odd
 // lines and nothing jumps when k crosses an integer.
@@ -235,14 +275,14 @@ fn hatch_layer(c: LayerIn) -> LayerOut {
     let n_even = i32(je) * step0 * 2;
     let jo = round((c.u / s0 - 1.0) * 0.5);
     let n_odd = (i32(jo) * 2 + 1) * step0;
-    let o = Oct(s0, k0, frac);
-    let ce = line_cov(c, n_even, je * s1, o);
-    let co = line_cov(c, n_odd, (2.0 * jo + 1.0) * s0, o) * (1.0 - frac);
+    // The odd lines fade out over the octave by narrowing, not by opacity (E026).
+    let ce = line_cov(c, n_even, je * s1, 1.0);
+    let co = line_cov(c, n_odd, (2.0 * jo + 1.0) * s0, 1.0 - frac);
     var cov = max(ce, co);
 
     // Past the last octave the pitch keeps shrinking: fade to the mean tone.
     let over = saturate(raw - kmax);
-    let pitch = s0 / c.g;
+    let pitch = s0 / c.lod;
     let mean = saturate(S.hatch.z * G.misc.x * c.width_scale / pitch) * (1.0 - c.gap)
         * (1.0 - smoothstep(c.thresh - c.edge, c.thresh + c.edge, c.light));
     out.cov = mix(cov, mean, over);
@@ -251,7 +291,7 @@ fn hatch_layer(c: LayerIn) -> LayerOut {
     // towards the nearest octave-(k0+1) line as frac goes to 1, so it never jumps.
     let jn = round(c.u / s0);
     let n_near = i32(jn) * step0;
-    out.jit = mix(band_jit(c, n_near, jn * s0, o), band_jit(c, n_even, je * s1, o), frac);
+    out.jit = mix(band_jit(c, n_near), band_jit(c, n_even), frac);
     return out;
 }
 
@@ -396,6 +436,34 @@ fn sun_visibility(p: vec3<f32>, n: vec3<f32>, s: vec3<f32>, dpx: vec3<f32>, dpy:
     return vec2<f32>(1.0, 4.0);
 }
 
+// Cheaper sun visibility for the feathered shadow edge: the smooth kernel in the first
+// cascade that contains q, no blending between cascades and no receiver-plane bias.
+fn sun_vis_cheap(q: vec3<f32>) -> f32 {
+    if (SH.params.x < 0.5) {
+        return 1.0;
+    }
+    let margin = 3.0 / shadow_size();
+    for (var i = 0u; i < 4u; i++) {
+        let l = cascade_lookup(i, q, FN, FS);
+        if (l.w > margin && l.z > 0.0) {
+            // The receiver's plane is the fragment's own face, so its depth gradient applies
+            // to the moved point too (without it, grazed faces shadowed themselves in specks).
+            return shadow_pcf(i, l.xy, l.z, cascade_plane(i, FDPX, FDPY, cascade_w(i, q)));
+        }
+    }
+    return 1.0;
+}
+
+// Derivative along v of a quantity with screen derivatives (lx, ly), given the screen
+// derivatives of the coordinates u and v: solves [ux vx; uy vy] [Lu Lv] = [lx ly].
+fn grad_along(ux: f32, uy: f32, vx: f32, vy: f32, lx: f32, ly: f32) -> f32 {
+    let det = ux * vy - vx * uy;
+    if (abs(det) < 1e-14) {
+        return 0.0;
+    }
+    return abs((ux * ly - uy * lx) / det);
+}
+
 // Fraction of a ring of taps at S.shadow2.w metres (and half that) around p, in the light's
 // view, that is lit, from the scene-wide cascade. A lit point is near a shadow edge as this
 // falls below 1, a shadowed one as it rises above 0 (indication).
@@ -427,13 +495,16 @@ struct Frag {
     g1: f32,
     g2: f32,
     lod1: f32,
-    lod2: f32,
+    lodv1: f32,
+    lgrad1: f32,
     // Crosshatch layer, at its own angle.
     u3: f32,
     v3: f32,
     g3: f32,
     gv3: f32,
     lod3: f32,
+    lodv3: f32,
+    lgrad3: f32,
     edge: f32,
 };
 
@@ -458,10 +529,13 @@ fn tone_ink(f: Frag, light: f32) -> Tone {
         t.black = 1.0;
         return t;
     }
-    let h1 = hatch_layer(LayerIn(f.u1, f.u2, f.g1, f.g2, f.lod1, 0x68e31da4u, light, S.bands.x, S.bands.z, f.edge, 1.0, 1.0, S.hatch2.y));
+    // Shadow strokes (drawn with SH_GATE set) have their own salt and gap fraction.
+    let gap1 = select(S.hatch2.y, S.feather2.x, SH_GATE != 0u);
+    let salt1 = select(0x68e31da4u, 0x7c3a91e5u, SH_GATE != 0u);
+    let h1 = hatch_layer(LayerIn(f.u1, f.u2, f.g1, f.g2, f.lod1, f.lodv1, f.lgrad1, salt1, light, S.bands.x, S.bands.z, f.edge, 1.0, 1.0, gap1));
     var c2 = 0.0;
     if (light <= S.bands.y + margin) {
-        c2 = hatch_layer(LayerIn(f.u3, f.v3, f.g3, f.gv3, f.lod3, 0xb5297a4du, light, S.bands.y, S.bands.z, f.edge, S.cross.x, S.cross.y, S.white.w)).cov;
+        c2 = hatch_layer(LayerIn(f.u3, f.v3, f.g3, f.gv3, f.lod3, f.lodv3, f.lgrad3, 0xb5297a4du, light, S.bands.y, S.bands.z, f.edge, S.cross.x, S.cross.y, S.white.w)).cov;
     }
     let black = 1.0 - smoothstep(S.bands.z - f.edge, S.bands.z + f.edge, light + h1.jit);
     t.black = black;
@@ -495,7 +569,8 @@ fn speckle(f: Frag, salt: u32) -> f32 {
     if (S.speckle.x <= 0.0) {
         return 0.0;
     }
-    let gg = vec2<f32>(f.g1, f.g2);
+    // Rotation-invariant footprints, so a speck stays the same speck as the camera turns.
+    let gg = vec2<f32>(f.lod1, f.lodv1);
     let base = 0.02;
     let kf = max(log2(max(S.speckle.z * G.misc.x * max(gg.x, gg.y) / base, 1e-6)), 0.0);
     let k0 = floor(kf);
@@ -528,17 +603,40 @@ fn fs_main(in: VsOut) -> FsOut {
     let g2 = max(length(vec2<f32>(dpdx(u2), dpdy(u2))), 1e-7);
     let g3 = max(length(vec2<f32>(dpdx(u3), dpdy(u3))), 1e-7);
     let gv3 = max(length(vec2<f32>(dpdx(v3), dpdy(v3))), 1e-7);
-    // Diagnostic alternatives for the octave experiment. Coverage still uses the true
-    // derivative; only the octave choice changes.
+    // Rotation-invariant footprints (E020). Everything that decides what is drawn (octave,
+    // stroke shapes, specks) uses these; only anti-aliasing uses the screen derivatives. The
+    // screen derivative of a coordinate changes as the camera turns, because a rectilinear
+    // image magnifies towards its edges (about 1.4 octaves at the edge of a 70 degree view),
+    // so choosing the octave from it made the pattern on a wall change as the view turned.
+    // Instead: the pixel is a fixed angle a (that of the image centre), and a displacement on
+    // the surface is seen from the eye at distance r along the ray d. The rate at which
+    // coordinate dot(P, e) changes per pixel is then r * a * |e - n (e.d) / (n.d)|, the
+    // derivative a pixel at the image centre would see. It depends only on the eye position
+    // and the surface.
+    let to_p = p - G.camera_pos.xyz;
+    let rr = length(to_p);
+    let dv = to_p / max(rr, 1e-6);
+    let nd_raw = dot(n, dv);
+    let nd = select(-1.0, 1.0, nd_raw >= 0.0) * max(abs(nd_raw), 0.02);
+    let ra = rr * G.misc.y;
+    let lod_u1 = max(ra * length(perp - n * (dot(perp, dv) / nd)), 1e-7);
+    let lod_v1 = max(ra * length(ax - n * (dot(ax, dv) / nd)), 1e-7);
+    let lod_u3 = max(ra * length(e2 - n * (dot(e2, dv) / nd)), 1e-7);
+    let lod_v3 = max(ra * length(d2 - n * (dot(d2, dv) / nd)), 1e-7);
+    // Diagnostic alternatives for the octave experiments (E002, E020). Coverage still uses
+    // the true derivative; only the octave choice changes.
     let iso = length(fwidth(p)) * 0.7071;
-    var lod1 = g1;
-    var lod3 = g3;
+    var lod1 = lod_u1;
+    var lod3 = lod_u3;
     if (G.flags.z == 1u) {
         lod1 = iso;
         lod3 = iso;
     } else if (G.flags.z == 2u) {
         lod1 = 0.0;
         lod3 = 0.0;
+    } else if (G.flags.z == 3u) {
+        lod1 = g1;
+        lod3 = g3;
     }
 
     // Light with the sun unobstructed, and the light inside a shadow.
@@ -593,17 +691,65 @@ fn fs_main(in: VsOut) -> FsOut {
         lit = mix(lit, min(lit, S.bands.y + 0.5 * range), saturate(near * S.shadow2.z));
     }
 
-    let f = Frag(u1, u2, g1, g2, lod1, g2, u3, v3, g3, gv3, lod3, edge);
+    // Light gradient along each layer's lines (per metre), for feathering band edges:
+    // solve the screen derivatives of the light for its derivative along v.
+    let lx = dpdx(lit);
+    let ly = dpdy(lit);
+    let lgrad1 = grad_along(dpdx(u1), dpdy(u1), dpdx(u2), dpdy(u2), lx, ly);
+    let lgrad3 = grad_along(dpdx(u3), dpdy(u3), dpdx(v3), dpdy(v3), lx, ly);
+    let f = Frag(u1, u2, g1, g2, lod1, lod_v1, lgrad1, u3, v3, g3, gv3, lod3, lod_v3, lgrad3, edge);
+
+    // Inside a cast shadow the hatching may run in its own direction: along the sun's
+    // direction projected onto the surface (S.feather.w), so a shadow on a hatched wall
+    // still separates from it. The direction is constant per face for a remote sun.
+    var sax = ax;
+    let sp = s - n * ndl;
+    if (S.feather.w > 0.5 && length(sp) > 0.2) {
+        sax = normalize(sp);
+    }
+    let sperp = normalize(cross(n, sax));
+    let su1 = dot(p, sperp);
+    let su2 = dot(p, sax);
+    let sg1 = max(length(vec2<f32>(dpdx(su1), dpdy(su1))), 1e-7);
+    let sg2 = max(length(vec2<f32>(dpdx(su2), dpdy(su2))), 1e-7);
+    var slod1 = max(ra * length(sperp - n * (dot(sperp, dv) / nd)), 1e-7);
+    let slodv1 = max(ra * length(sax - n * (dot(sax, dv) / nd)), 1e-7);
+    if (G.flags.z == 3u) {
+        slod1 = sg1;
+    }
+    let fsh = Frag(su1, su2, sg1, sg2, slod1, slodv1, 0.0, u3, v3, g3, gv3, lod3, lod_v3, 0.0, edge);
+
+    // The lit side is drawn where the fragment is lit; the shadow side's strokes are each
+    // gated by line_shadow, at the fragment (crisp edge) or at a point moved along the
+    // stroke (feathered edge), so with feathering shadow strokes run over the edge into the
+    // lit side or stop short of it.
+    FP = p;
+    FN = n;
+    FS = s;
+    FDIR = sax;
+    FAMT = amount;
+    FDPX = dpdx(p);
+    FDPY = dpdy(p);
+    var near_shadow = amount > 0.0;
+    if (!near_shadow && S.feather.z > 0.0 && S.fog2.y > 0.0 && facing > 0.5) {
+        near_shadow = sun_vis_cheap(p + sax * S.feather.z) < 0.99 || sun_vis_cheap(p - sax * S.feather.z) < 0.99;
+    }
     var t: Tone;
-    if (amount <= 0.0) {
-        t = tone_ink(f, lit);
-    } else if (amount >= 1.0) {
-        t = tone_ink(f, dark_l);
+    if (amount >= 1.0 && S.feather.z <= 0.0) {
+        t = tone_ink(fsh, dark_l);
     } else {
-        let a = tone_ink(f, lit);
-        let b = tone_ink(f, dark_l);
-        t.cov = mix(a.cov, b.cov, amount);
-        t.black = mix(a.black, b.black, amount);
+        t = tone_ink(f, lit);
+        t.cov *= 1.0 - amount;
+        t.black *= 1.0 - amount;
+        if (near_shadow) {
+            SH_GATE = 1u;
+            let b = tone_ink(fsh, dark_l);
+            SH_GATE = 0u;
+            // Solid black inside the shadow (if its light is that low) follows the fragment.
+            let bb = b.black * amount;
+            t.cov = max(t.cov, max(b.cov * select(1.0, amount, b.black >= 1.0), bb));
+            t.black = max(t.black, bb);
+        }
     }
     let light = mix(lit, dark_l, amount);
 
@@ -612,7 +758,7 @@ fn fs_main(in: VsOut) -> FsOut {
     var white = speckle(f, in.ids.x);
     if (S.white.x > 0.0 && t.black > 0.0) {
         // Sparse white rules in the black, along the first hatch direction.
-        let wl = hatch_layer(LayerIn(u1, u2, g1, g2, lod1, 0x3c6ef372u, 0.0, 1.0, 0.0, edge, S.white.y, 0.7, S.hatch2.y));
+        let wl = hatch_layer(LayerIn(u1, u2, g1, g2, lod1, lod_v1, 0.0, 0x3c6ef372u, 0.0, 1.0, 0.0, edge, S.white.y, 0.7, S.hatch2.y));
         white = max(white, wl.cov * S.white.x);
     }
     let speck = white * t.black;

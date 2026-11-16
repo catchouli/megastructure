@@ -34,13 +34,14 @@ OPTIONS:
     --metrics        print the mean absolute difference between consecutive frames, at
                      full resolution and after a 4x4 box downsample (0..255 grey levels)
                      and after reprojecting the previous frame into the current one by
-                     depth, and the temporal second difference (for a still camera).
+                     depth (raw, after a 5x5 and after a 13x13 blur), and the temporal
+                     second difference (for a still camera).
                      Paper grain is switched off while measuring.
     --no-png         do not write PNG files (with --metrics); --out is then optional
     --error-png      with --metrics, also write the blurred reprojection error of each
                      frame, times 8, as error_NNNN.png (white = no difference)
-    --hatch-lod <M>  diagnostic hatch octave selection: directional (default), isotropic,
-                     fixed
+    --hatch-lod <M>  diagnostic hatch octave selection: directional (default, rotation-
+                     invariant), isotropic, fixed, screen (screen derivatives, before E020)
     --stroke-vis <M> diagnostic stroke visibility test: block (default), centreline, pixel
     --shadow-filter <M>  diagnostic shadow map filter: smooth (default), bilinear, hard
     --depth-tol <X>  override the preset's stroke depth tolerance
@@ -208,7 +209,7 @@ fn parse_args() -> Result<Option<Args>> {
             "--depth-tol" => depth_tol = Some(number(&value(&mut it, &a)?, &a)?),
             "--hatch-lod" => {
                 let v = value(&mut it, &a)?;
-                hatch_lod = HatchLod::from_name(&v).ok_or_else(|| anyhow!("unknown hatch LOD mode '{v}'; use directional, isotropic or fixed"))?;
+                hatch_lod = HatchLod::from_name(&v).ok_or_else(|| anyhow!("unknown hatch LOD mode '{v}'; use directional, isotropic, fixed or screen"))?;
             }
             "--bench" => bench = Some(number(&value(&mut it, &a)?, &a)?),
             other => bail!("unknown argument '{other}'\n\n{USAGE}"),
@@ -406,7 +407,7 @@ fn run() -> Result<()> {
     let mut prev2: Option<Vec<f32>> = None;
     let mut second = Vec::new();
     let (mut mad_full, mut mad_down, mut rmad, mut rpop) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let (mut rblur, mut ink) = (Vec::new(), Vec::new());
+    let (mut rblur, mut ink, mut rcoarse) = (Vec::new(), Vec::new(), Vec::new());
     for i in 0..args.frames {
         let t = if args.frames == 1 {
             args.t.unwrap_or(0.5)
@@ -486,7 +487,8 @@ fn run() -> Result<()> {
             depth_readback.unmap();
             ink.push(grey.iter().map(|g| 255.0 - g).sum::<f32>() / grey.len() as f32);
             let blurred = box_blur(&grey, w, h, 2);
-            let cur = Frame { grey, blurred, depth, view_proj: camera.view_proj(aspect) };
+            let coarse = box_blur(&grey, w, h, 6);
+            let cur = Frame { grey, blurred, coarse, depth, view_proj: camera.view_proj(aspect) };
             if let (Some(p2), Some(p1)) = (&prev2, &prev) {
                 // Temporal second difference of the blurred image: near zero for ink that
                 // moves (or changes) at a steady rate, large for ink that jumps. Only
@@ -497,9 +499,11 @@ fn run() -> Result<()> {
             if let Some(prev) = &prev {
                 mad_full.push(mad(&prev.grey, &cur.grey));
                 mad_down.push(mad(&downsample4(&prev.grey, w, h), &downsample4(&cur.grey, w, h)));
-                let (m, pop, _) = reprojected_mad(prev, &cur, w, h, false);
-                let (bm, _, berr) = reprojected_mad(prev, &cur, w, h, true);
+                let (m, pop, _) = reprojected_mad(prev, &cur, w, h, 0);
+                let (bm, _, berr) = reprojected_mad(prev, &cur, w, h, 1);
+                let (cm, _, _) = reprojected_mad(prev, &cur, w, h, 2);
                 rblur.push(bm);
+                rcoarse.push(cm);
                 if let (true, Some(out)) = (args.error_png, &args.out) {
                     let img: Vec<u8> = berr.iter().map(|e| 255 - ((e * 8.0).min(255.0) as u8)).collect();
                     let file = out.join(format!("error_{i:04}.png"));
@@ -543,6 +547,12 @@ fn run() -> Result<()> {
             pm * 100.0,
             px_ * 100.0
         );
+        let (cm, cx) = stats(&rcoarse);
+        println!(
+            "metrics {} view {}: reprojected MAD after 13x13 blur (stroke-group density) mean {cm:.3} max {cx:.3}",
+            args.path,
+            args.view.name()
+        );
         if !second.is_empty() {
             let (sm, sx) = stats(&second);
             println!(
@@ -583,6 +593,8 @@ fn downsample4(g: &[f32], w: u32, h: u32) -> Vec<f32> {
 struct Frame {
     grey: Vec<f32>,
     blurred: Vec<f32>,
+    /// 13x13 box blur: ink density at the scale of a stroke group.
+    coarse: Vec<f32>,
     depth: Vec<f32>,
     view_proj: glam::Mat4,
 }
@@ -592,8 +604,13 @@ struct Frame {
 /// difference and the fraction of compared pixels that differ by more than 64 levels.
 /// Ink that stays put on surfaces leaves only resampling error; swimming or popping ink
 /// adds to it.
-fn reprojected_mad(prev: &Frame, cur: &Frame, w: u32, h: u32, blurred: bool) -> (f32, f32, Vec<f32>) {
-    let (pg, cg) = if blurred { (&prev.blurred, &cur.blurred) } else { (&prev.grey, &cur.grey) };
+/// `blur`: 0 raw, 1 the 5x5 blur, 2 the 13x13 blur.
+fn reprojected_mad(prev: &Frame, cur: &Frame, w: u32, h: u32, blur: u32) -> (f32, f32, Vec<f32>) {
+    let (pg, cg) = match blur {
+        0 => (&prev.grey, &cur.grey),
+        1 => (&prev.blurred, &cur.blurred),
+        _ => (&prev.coarse, &cur.coarse),
+    };
     let mut err = vec![0.0f32; (w * h) as usize];
     let inv = cur.view_proj.inverse();
     let (wf, hf) = (w as f32, h as f32);

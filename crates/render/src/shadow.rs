@@ -1,9 +1,12 @@
 //! Sun shadow cascades: where each shadow map looks, computed on the CPU every frame so the
 //! sun can move.
 //!
-//! Three cascades follow the camera (bounding spheres of view-frustum slices, snapped to
-//! whole texels so they do not shimmer as the camera moves) and the last one covers the
-//! whole scene's bounds, which is what lets a 600 m shaft hold its shadows at any range.
+//! Three cascades follow the camera (spheres around the eye of radius 8, 30 and 110 m,
+//! snapped to whole texels so they do not shimmer as the camera moves) and the last one
+//! covers the whole scene's bounds, which is what lets a 600 m shaft hold its shadows at any
+//! range. The spheres are centred on the eye, not on slices of the view frustum, so which
+//! cascade a point uses does not change as the camera turns (E020); with a wide view they
+//! are also smaller than the frustum-slice spheres.
 //! A remote sun gives orthographic maps, a near sun perspective ones from its position.
 //! See "Shadow pass" in docs/features/ink-renderer.md.
 
@@ -33,17 +36,6 @@ pub struct Cascades {
     pub perspective: bool,
 }
 
-/// Bounding sphere (centre distance along the view axis, radius) of the frustum slice
-/// between view distances `n` and `f`, for a frustum whose corner rays leave the axis at
-/// `k = sqrt(tan_x^2 + tan_y^2)` per unit distance. It depends only on n, f and the field
-/// of view, so it does not change as the camera turns.
-fn slice_sphere(n: f32, f: f32, k: f32) -> (f32, f32) {
-    let k2 = k * k;
-    let x = ((f + n) * 0.5 * (1.0 + k2)).min(f);
-    let r2 = ((f - x) * (f - x) + f * f * k2).max((x - n) * (x - n) + n * n * k2);
-    (x, r2.sqrt())
-}
-
 fn up_for(dir: Vec3) -> Vec3 {
     if dir.y.abs() > 0.99 {
         Vec3::Z
@@ -67,18 +59,12 @@ fn corners(lo: Vec3, hi: Vec3) -> [Vec3; 8] {
 /// Fit the cascades for one frame. `sun` is the sun's world position, or with
 /// `directional` the unit direction towards it. `bounds` is the scene's axis-aligned box.
 pub fn fit(camera: &Camera, aspect: f32, sun: Vec3, directional: bool, bounds: Option<(Vec3, Vec3)>) -> Cascades {
-    let ty = (camera.fov_y * 0.5).tan();
-    let k = (ty * ty * (1.0 + aspect * aspect)).sqrt();
-    let fwd = camera.forward();
+    let _ = aspect;
     let mut spheres = [(Vec3::ZERO, 0.0f32); SHADOW_CASCADES];
-    let mut n = crate::camera::NEAR;
     for (i, &f) in CAMERA_SPLITS.iter().enumerate() {
-        let (x, r) = slice_sphere(n, f, k);
-        spheres[i] = (camera.position + fwd * x, r);
-        n = f;
+        spheres[i] = (camera.position, f);
     }
-    let (x, r) = slice_sphere(n, FALLBACK_FAR, k);
-    spheres[SHADOW_CASCADES - 1] = (camera.position + fwd * x, r);
+    spheres[SHADOW_CASCADES - 1] = (camera.position, FALLBACK_FAR);
 
     let mut out = Cascades { view_proj: [Mat4::IDENTITY; SHADOW_CASCADES], texel: [1.0; SHADOW_CASCADES], perspective: !directional };
     let size = SHADOW_SIZE as f32;
@@ -166,14 +152,15 @@ mod tests {
     }
 
     #[test]
-    fn slice_sphere_contains_its_corners() {
-        let k = 0.9;
-        for (n, f) in [(0.1, 8.0), (8.0, 30.0), (30.0, 110.0), (110.0, 1000.0)] {
-            let (x, r) = slice_sphere(n, f, k);
-            for (a, rad) in [(n, n * k), (f, f * k)] {
-                assert!(((a - x) * (a - x) + rad * rad).sqrt() <= r * 1.0001);
-            }
-        }
+    fn cascade_choice_does_not_depend_on_view_direction() {
+        // Turning the camera in place leaves every cascade where it was (E020).
+        let dir = Vec3::new(-0.3, 0.9, -0.1).normalize();
+        let a = fit(&cam(), 1.5, dir, true, None);
+        let mut turned = cam();
+        turned.yaw += 1.1;
+        turned.pitch = 0.3;
+        let b = fit(&turned, 1.5, dir, true, None);
+        assert_eq!(a.view_proj, b.view_proj);
     }
 
     #[test]

@@ -27,6 +27,12 @@ pub const NAMES: &[&str] = &[
     "shaft_arch_view",
     "shaft_rim_down",
     "shaft_b2_down",
+    "hall_yaw",
+    "hall_pitch",
+    "hall_walk",
+    "shaft_spawn_yaw",
+    "shaft_spawn_pitch",
+    "shaft_hall_wall",
 ];
 
 pub fn by_name(name: &str) -> Option<fn(f32) -> Camera> {
@@ -46,6 +52,12 @@ pub fn by_name(name: &str) -> Option<fn(f32) -> Camera> {
         "shaft_arch_view" => shaft_arch_view,
         "shaft_rim_down" => shaft_rim_down,
         "shaft_b2_down" => shaft_b2_down,
+        "hall_yaw" => hall_yaw,
+        "hall_pitch" => hall_pitch,
+        "hall_walk" => hall_walk,
+        "shaft_spawn_yaw" => shaft_spawn_yaw,
+        "shaft_spawn_pitch" => shaft_spawn_pitch,
+        "shaft_hall_wall" => shaft_hall_wall,
         _ => return None,
     })
 }
@@ -82,6 +94,53 @@ pub fn hall_orbit(t: f32) -> Camera {
 /// climbing the left wall.
 pub fn still_hall(_t: f32) -> Camera {
     Camera::look_at(Vec3::new(-2.0, 5.0, 172.0), Vec3::new(-16.0, 6.0, 130.0))
+}
+
+// --- Rotation and walking-speed probes (E020) ------------------------------------------------
+//
+// Over t 0..1 the rotation paths turn 90 degrees, so `--frames 61` is a turn at 90 degrees
+// per second at 60 fps (1.5 degrees per frame). `hall_walk` moves 6 m over t 0..1, so
+// `--frames 61 --t1 0.2333` is 1.4 m/s at 60 fps (2.3 cm per frame). The position is fixed
+// in the rotation paths, so reprojection between frames is exact and any change in the ink
+// on surfaces is swimming.
+
+/// From the `still_hall` position, turning 90 degrees left to right about the vertical.
+pub fn hall_yaw(t: f32) -> Camera {
+    let c = still_hall(0.0);
+    Camera::new(c.position, c.yaw + lerp(-0.25 * PI, 0.25 * PI, t), c.pitch)
+}
+
+/// From the `still_hall` position, tipping from 45 degrees down to 45 degrees up.
+pub fn hall_pitch(t: f32) -> Camera {
+    let c = still_hall(0.0);
+    Camera::new(c.position, c.yaw, lerp(-0.25 * PI, 0.25 * PI, t))
+}
+
+/// From the `still_hall` position, walking 6 m along its view direction (level).
+pub fn hall_walk(t: f32) -> Camera {
+    let c = still_hall(0.0);
+    let d = Vec3::new(c.yaw.sin(), 0.0, c.yaw.cos());
+    Camera::new(c.position + d * lerp(0.0, 6.0, t), c.yaw, c.pitch)
+}
+
+/// At the shaft spawn, turning 90 degrees left to right.
+pub fn shaft_spawn_yaw(t: f32) -> Camera {
+    let (eye, yaw) = shaft::spawn();
+    Camera::new(Vec3::from(eye), yaw + lerp(-0.25 * PI, 0.25 * PI, t), -0.22)
+}
+
+/// At the shaft spawn, tipping from 45 degrees down to 45 degrees up.
+pub fn shaft_spawn_pitch(t: f32) -> Camera {
+    let (eye, yaw) = shaft::spawn();
+    Camera::new(Vec3::from(eye), yaw, lerp(-0.25 * PI, 0.25 * PI, t))
+}
+
+/// The owner's screenshot 20261116-000630 (facing the far wall of the hall), approached along
+/// its view direction from 78 m to 2 m away: t 0.85 is the screenshot's distance (about 10 m).
+/// For checking that the hatching keeps its character with distance (E026).
+pub fn shaft_hall_wall(t: f32) -> Camera {
+    let z = lerp(-60.0, -136.0, t);
+    Camera::new(Vec3::new(-0.02, 432.24, z), 3.2532, 0.0387)
 }
 
 // --- One Shaft -----------------------------------------------------------------------------

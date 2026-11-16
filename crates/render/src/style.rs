@@ -92,6 +92,32 @@ pub struct StylePreset {
     /// Fraction of each crosshatch line lost to breaks (the first layer uses
     /// `hatch_break_gap`); higher leaves the crosshatch as patches over the first layer.
     pub cross_break_gap: f32,
+    /// Feathering of tone boundaries, in line spacings: each stroke's end at a band edge is
+    /// moved along the line by its own random amount, `hatch_feather * spacing * 2^level *
+    /// (h - 0.35)` metres (h uniform per line), using the light gradient along the line. Lines
+    /// that survive to coarser octaves move further, so every second or fourth stroke runs on
+    /// past the others and the edge thins out instead of stopping on a line. 0 disables.
+    pub hatch_feather: f32,
+    /// Jitter of where a stroke starts and ends inside its patch run, as a fraction of the
+    /// run (patch hatching), so a group of strokes has a ragged start and end, not a ruled one.
+    pub hatch_end_jitter: f32,
+    /// Feathering of the cast shadow edge in metres: each shadow stroke tests the shadow at a
+    /// point moved along the stroke by its own random amount (up to this, either way), so the
+    /// shadow ends in staggered stroke ends. 0 gives a crisp cut-off along the shadow edge.
+    pub shadow_feather: f32,
+    /// Fraction of each stroke lost to breaks inside a cast shadow (elsewhere
+    /// `hatch_break_gap`): lower makes shadow hatching read as one continuous dark shape.
+    pub shadow_break_gap: f32,
+    /// Taper length of a hatch stroke's ends as a multiple of its width (at least
+    /// `hatch_taper_px`), varied by +-40% per stroke; one edge of the stroke stays straight
+    /// while it thins.
+    pub hatch_taper_width: f32,
+    /// Largest hatch line width in pixels (at 720 lines): near walls are drawn with more
+    /// lines, not thicker ones.
+    pub hatch_width_max_px: f32,
+    /// Direction of the hatching inside a cast shadow: 0 the surface's own hatch axis, 1
+    /// along the sun's direction projected onto the surface.
+    pub shadow_hatch_dir: f32,
     /// The crosshatch layer's target pitch relative to the first layer's.
     pub cross_pitch_scale: f32,
     /// The crosshatch layer's line width relative to the first layer's.
@@ -243,7 +269,7 @@ impl StylePreset {
             ambient: 0.5,
             sun_occlusion: 0.0,
             band_hatch: 0.62,
-            band_cross: 0.45,
+            band_cross: 0.0,
             band_black: 0.3,
             band_jitter: 0.09,
             band_jitter_len: 0.6,
@@ -261,6 +287,13 @@ impl StylePreset {
             hatch_patch_len: 4.0,
             hatch_taper_px: 6.0,
             cross_break_gap: 0.45,
+            hatch_feather: 6.0,
+            hatch_end_jitter: 0.1,
+            shadow_feather: 0.0,
+            shadow_break_gap: 0.22,
+            hatch_taper_width: 5.0,
+            hatch_width_max_px: 1.6,
+            shadow_hatch_dir: 0.0,
             cross_pitch_scale: 1.6,
             cross_width_scale: 0.8,
 
@@ -299,7 +332,7 @@ impl StylePreset {
             tone_noise: 0.0,
             tone_noise_len: 20.0,
             panel_tone: 0.0,
-            hatch_density_gain: 0.0,
+            hatch_density_gain: 1.0,
             indication: 0.0,
             indication_radius: 3.0,
             pool_ao: 0.0,
@@ -347,6 +380,8 @@ impl StylePreset {
             fog2: [self.fog_black, self.sun_shadow, self.white_line_rank, 0.0],
             white: [self.white_hatch, self.white_hatch_pitch, self.panel_tone, self.cross_break_gap],
             patch: [self.hatch_patch, self.hatch_patch_lines, self.hatch_patch_len, self.hatch_taper_px],
+            feather: [self.hatch_feather, self.hatch_end_jitter, self.shadow_feather, self.shadow_hatch_dir],
+            feather2: [self.shadow_break_gap, self.hatch_taper_width, self.hatch_width_max_px, 0.0],
         }
     }
 }
@@ -362,9 +397,8 @@ impl StylePreset {
             fog_density: 0.0026,
             fog_max: 0.8,
             fog_ao: 1.5,
-            ambient: 0.75,
+            ambient: 0.85,
             sun_strength: 0.4,
-            band_cross: 0.36,
             hatch_width_gain: 1.0,
             rank_fade_start: [500.0, 140.0, 40.0, 16.0],
             rank_fade_end: [900.0, 260.0, 80.0, 32.0],
@@ -374,10 +408,12 @@ impl StylePreset {
             // Shadows and tone composition (E011 to E017).
             sun_occlusion: 0.0,
             sun_shadow: 1.0,
-            shadow_ambient: 0.0,
-            shadow_light_min: 0.0,
-            shadow_light_max: 0.0,
-            shadow_attached: 0.3,
+            shadow_ambient: 0.55,
+            shadow_light_min: 0.36,
+            shadow_light_max: 0.48,
+            shadow_attached: 0.0,
+            shadow_break_gap: 0.04,
+            shadow_feather: 0.8,
             fog_black: 1.0,
             white_lines: 1.0,
             white_line_rank: 1.0,
@@ -386,7 +422,14 @@ impl StylePreset {
             speckle: 0.1,
             shadow_jitter: 0.1,
             shadow_jitter_len: 1.2,
-            panel_tone: 0.08,
+            panel_tone: 0.0,
+            tone_noise: 0.08,
+            tone_noise_len: 15.0,
+            hatch_feather: 6.0,
+            hatch_end_jitter: 0.1,
+            hatch_break_gap: 0.05,
+            hatch_density_gain: 1.0,
+            band_cross: 0.0,
             cross_angle: 75.0,
             cross_angle_jitter: 30.0,
             sky_tone: Some(0.0),
@@ -460,6 +503,13 @@ impl StylePreset {
         "hatch_patch_len",
         "hatch_taper_px",
         "cross_break_gap",
+        "hatch_feather",
+        "hatch_end_jitter",
+        "shadow_feather",
+        "shadow_break_gap",
+        "hatch_taper_width",
+        "hatch_width_max_px",
+        "shadow_hatch_dir",
         "cross_pitch_scale",
         "cross_width_scale",
         "stroke_width_px",
@@ -546,6 +596,13 @@ impl StylePreset {
             "hatch_patch_len" => self.hatch_patch_len = num(value)?,
             "hatch_taper_px" => self.hatch_taper_px = num(value)?,
             "cross_break_gap" => self.cross_break_gap = num(value)?,
+            "hatch_feather" => self.hatch_feather = num(value)?,
+            "hatch_end_jitter" => self.hatch_end_jitter = num(value)?,
+            "shadow_feather" => self.shadow_feather = num(value)?,
+            "shadow_break_gap" => self.shadow_break_gap = num(value)?,
+            "hatch_taper_width" => self.hatch_taper_width = num(value)?,
+            "hatch_width_max_px" => self.hatch_width_max_px = num(value)?,
+            "shadow_hatch_dir" => self.shadow_hatch_dir = num(value)?,
             "cross_pitch_scale" => self.cross_pitch_scale = num(value)?,
             "cross_width_scale" => self.cross_width_scale = num(value)?,
             "stroke_width_px" => self.stroke_width_px = num(value)?,
@@ -641,4 +698,6 @@ pub(crate) struct StyleGpu {
     fog2: [f32; 4],
     white: [f32; 4],
     patch: [f32; 4],
+    feather: [f32; 4],
+    feather2: [f32; 4],
 }

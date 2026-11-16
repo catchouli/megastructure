@@ -102,13 +102,18 @@ impl DebugView {
 /// the octave experiment (E001 in docs/experiments.md) can be repeated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HatchLod {
-    /// From `length(vec2(dpdx(u), dpdy(u)))` of the hatch coordinate itself.
+    /// From the footprint of the hatch coordinate itself, computed from the eye distance and
+    /// the angle of the surface with a fixed angular pixel size, so it does not change as
+    /// the camera turns (E020).
     #[default]
     Directional,
     /// From the isotropic `length(fwidth(world_position))`.
     Isotropic,
     /// Always octave 0 (no level of detail).
     Fixed,
+    /// From the screen derivative `length(vec2(dpdx(u), dpdy(u)))`: the choice before E020,
+    /// directional but not rotation-invariant.
+    Screen,
 }
 
 impl HatchLod {
@@ -117,6 +122,7 @@ impl HatchLod {
             "directional" => Some(Self::Directional),
             "isotropic" => Some(Self::Isotropic),
             "fixed" => Some(Self::Fixed),
+            "screen" => Some(Self::Screen),
             _ => None,
         }
     }
@@ -1143,10 +1149,10 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_wgsl() {
-        // struct Globals: two mat4x4 and seven vec4. struct Style: twenty-five vec4.
+        // struct Globals: two mat4x4 and seven vec4. struct Style: twenty-seven vec4.
         // struct ShadowU: four mat4x4 and two vec4.
         assert_eq!(std::mem::size_of::<Globals>(), 2 * 64 + 7 * 16);
-        assert_eq!(std::mem::size_of::<StyleGpu>(), 25 * 16);
+        assert_eq!(std::mem::size_of::<StyleGpu>(), 27 * 16);
         assert_eq!(std::mem::size_of::<ShadowGpu>(), 4 * 64 + 2 * 16);
     }
 
@@ -1160,7 +1166,8 @@ mod tests {
     #[test]
     fn nihei_bands_are_ordered() {
         let p = StylePreset::nihei();
-        assert!(p.band_hatch > p.band_cross && p.band_cross > p.band_black && p.band_black > 0.0);
+        // band_cross below band_black means no crosshatch band (E023).
+        assert!(p.band_hatch > p.band_black && p.band_black > 0.0 && p.band_cross < p.band_hatch);
         assert!(p.contour_fine_near < p.contour_fine_far);
         for r in 0..4 {
             assert!(p.rank_fade_start[r] < p.rank_fade_end[r]);

@@ -41,7 +41,7 @@ Run from the workspace root: `cargo run --release -p mega_capture -- <options>`.
 | `--no-png` | Do not write frames (with `--metrics`); `--out` becomes optional | |
 | `--error-png` | With `--metrics`, also write `error_NNNN.png`: blurred reprojection residual times 8, white is none | |
 | `--bench <N>` | Render one frame (`--t`) N times without readback and print ms per frame | |
-| `--hatch-lod <m>` | Diagnostic: `directional` (default), `isotropic`, `fixed` (E002) | |
+| `--hatch-lod <m>` | Diagnostic: `directional` (default, rotation-invariant), `isotropic`, `fixed`, `screen` (the screen-derivative choice before E020) (E002, E020) | |
 | `--stroke-vis <m>` | Diagnostic: `block` (default), `centreline`, `pixel` (E003) | |
 | `--depth-tol <x>` | Override the preset's stroke depth tolerance | |
 | `--list-paths` | Print path names with their scenes and exit | |
@@ -58,6 +58,7 @@ With `--metrics` the tool also reads back the depth buffer. For each pair of con
 - consecutive MAD: mean absolute grey difference, at full resolution and after a 4x4 box downsample. Dominated by legitimate motion; kept for reference.
 - reprojected MAD: every pixel of the current frame is moved back into the previous frame through its depth and both cameras, pixels that were off screen or hidden (linear depth differs by more than 1%) are skipped, and the previous frame is sampled bilinearly. Raw and after a 5x5 box blur, plus the share of pixels off by more than 64 levels ("pops").
 - mean ink (255 minus mean grey) and both MADs divided by it, to compare views with different amounts of ink. With large solid blacks the mean ink is high and the per-ink figure small; compare the blurred MAD itself between such views.
+- reprojected MAD after a 13x13 blur: density at the scale of a group of strokes, so coherent changes (patches re-forming, tone breathing) stand out from the resampling error of thin lines (E020).
 - temporal second difference: mean of `|f(t) - 2 f(t-1) + f(t-2)|` over the 5x5-blurred frames. Only meaningful with a still camera: ink that moves or changes at a steady rate (a shadow edge under a slowly moving sun) leaves almost none, ink that jumps (texel steps) leaves a lot (E012).
 
 Ink that stays on surfaces leaves only resampling error; swimming, popping or shimmering ink adds to it. Compare a view against `strokes` or `lines` on the same stretch. A slow stretch, for example `--path corridor_walk --frames 40 --t0 0.05 --t1 0.062`, keeps per-frame motion near walking speed at 60 fps. See E001.
@@ -74,6 +75,10 @@ Defined in `crates/render/src/paths.rs` as `fn(t: f32) -> Camera`, `t` clamped t
 | `corridor_strafe` | Fixed at z=40, x from -1.3 to 1.3, looking down the corridor |
 | `hall_orbit` | One lap at radius 22 m and 9 m height around the middle of the hall (z=195), looking at the centre |
 | `still_hall` | One fixed view in the hall looking towards the arch, with the stair climbing the left wall; `t` is ignored |
+| `hall_yaw`, `hall_pitch` | From the `still_hall` position, turning 90 degrees about the vertical, or tipping from 45 degrees down to 45 up, over t 0..1: with `--frames 61` a turn at 90 degrees per second at 60 fps |
+| `hall_walk` | From the `still_hall` position, 6 m along its view direction over t 0..1; `--frames 61 --t1 0.2333` is 1.4 m/s at 60 fps |
+
+`shaft_hall_wall` approaches the owner's screenshot 20261116-000630 from 78 m to 2 m (t 0.85 is the screenshot's distance; E026). The shaft has the same rotation probes at the spawn: `shaft_spawn_yaw` and `shaft_spawn_pitch` (E020). Example: `mega_capture --path shaft_spawn_yaw --frames 61 --view hatching --metrics --no-png`.
 
 To add a path, write the function, add it to `NAMES` and `by_name`, and make sure `scene_of` maps it to its scene.
 
