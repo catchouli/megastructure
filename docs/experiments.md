@@ -516,7 +516,35 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Could it replace the distance ruling? Not as built: it is a texture fixed at a few pixels per texel and fades out with distance like the paper, so it cannot draw the long strokes that close into black far down the shaft. A version gated by distance instead of faded, at larger on-screen scale, could take that job; untried.
 - Verdict: on at 0.15 with patches, no crossing. Question on the sheet: does the pencil shading in shade add to the drawing or clutter it?
 
+## E054: Distance shading as wash and pencil instead of ruling
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Distance shading as wash and pencil")
+- Question: the owner wants the distance shading replaced; the ruling is "a bit clumsy". Looking down the shaft its strokes are long radiating wedges that read as spikes at the black and belong to a different language from the paper and pencil. Can the fall into darkness be wash and pencil?
+- Setup: `far_mode` 1 sends the far tone (the one that drove the ruling: same gate and darkening fields) into the wash, to solid ink at the bottom. Tried: C, the wash alone falling into black (`far_pencil` 0); A, wash plus far pencil from Paper004's relief, first as zero-mean bands (`far_pencil` 0.6 to 1.5, 2 to 3 px per texel, stretch 3 to 6, with and without a second direction), then thresholded into discrete marks with light gaps; B, a generated stroke texture (tonal art map), not tried this round. New path `shaft_rim_pitch`. Sheet `compare/E054-distance-shading.png`: ruling / C / A (marks, default) at 2560x1440 on `shaft_rim_down`, `shaft_gallery_down`, `shaft_b2_down` (mid depth) and `shaft_spawn`, plus native crops of the fall into black; clip `compare/E054-rim-pitch-ruling-marks.mp4` (`shaft_rim_pitch`, 121 frames, 1280x720, ruling left, marks right). Regenerate a cell with `mega_capture --path shaft_gallery_down --width 2560 --height 1440 --set far_mode=0 --out <dir>` (or `--set far_pencil=0` for C).
+- Failures on the way: the zero-mean band version smeared into soft streaks on the steeply foreshortened shaft walls (anisotropic filtering of stretched relief), reading as motion blur, not pencil; more strength made blurry dark bands; 3 px per texel with stretch 4 to 6 was the worst. Thresholding the ridges into marks fixed most of it; 1 px per texel and stretch 2 are the crispest.
+- Result: both new methods fall smoothly into black with no spikes and no boundary; C is the calmest, a plain gradient; A adds diagonal pencil marks gathering on the dark far walls in patches, with light gaps in the black. Across the shaft from spawn and in the hall nothing changes (the gate keeps near walls clear).
+- Stability (61 frames, 720p; 5x5 error, pops over 64 levels, contrast-relative pops), ruling / C / A: `shaft_rim_pitch` 0.166, 0.014%, 0.029% / 0.159, 0.014%, 0.029% / 0.163, 0.014%, 0.042%; `shaft_rim_down` t 0..0.1 0.119 / 0.118 / 0.119; `shaft_spawn_yaw` 0.274 / 0.271 / 0.271; `shaft_hall_walk` 0.317 / 0.309 / 0.310; `shaft_bridge_walk` 0.309 / 0.307 / 0.307. All equal; A has slightly more relative pops looking down (marks resampling on grazing walls).
+- Frame time: faster than the ruling (`shaft_rim_down` 2.80 against 3.62 ms at 720p, 6.84 against 7.50 ms at 1440p).
+- Verdict: A is the `nihei_ink` default (`far_mode` 1, `far_pencil` 0.6, 1 px, stretch 2); ruling at `far_mode` 0, C at `far_pencil` 0. Question on the sheet: which reads as one drawing falling into darkness?
+
+## E055: Far pencil strength
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md`
+- Setup: sheet `compare/E055-far-pencil-strength.png`: `far_pencil` 0.3 / 0.6 / 1.0, native crops over the spawn rail and down from the rim at 2560x1440, plus a fourth column and full frames of the spawn and the hall with the balance the owner leans towards (`--set paper_tooth=0.0072 --set pencil=0.3`: paper x0.6, near pencil doubled); regenerate with `mega_capture --path shaft_gallery_down --width 2560 --height 1440 --set far_pencil=1.0 --out <dir>`.
+- Result: 0.3 leaves the far walls nearly smooth; 1.0 makes them busy dark scribble. With the shifted balance the near walls carry visible diagonal pencil in shade and less tooth, and the near and far marks read as the same hand.
+- Verdict: 0.6; balance left for the owner. Question on the sheet: how many marks should gather before the black, and does the shifted balance read better as a whole?
+
+## E056: Pencil in the darkest places
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Pencil shading in shade"), `features/capture-tool.md`
+- Question: the owner wants pencil mainly in the darkest areas and to judge it in the deepest part of the hall and at the bottom of the shaft, not on the sunlit shaft walls.
+- Setup: new paths `shaft_hall_deep_in`, `shaft_hall_deep_back`, `shaft_hall_deep_side`. Sheet `compare/E056-pencil-dark-places.png` at 2560x1440: the three deep-hall views, the bottom of the shaft (`shaft_gallery_down`) and the lit spawn, each with the pencil at wash 0.15 to 0.5 (E053) / at the dark end 0.4 to 0.75 / dark end with the owner's shifted balance (pencil 0.3, paper x0.6), plus a native crop of the deep side wall. Regenerate with `mega_capture --path shaft_hall_deep_side --width 2560 --height 1440 --set pencil=0.3 --out <dir>`.
+- Result: the deep hall is not dark: its walls are 172 to 184 of 255 (light to mid grey) and nearly uniform, lifted by openness and bounce, so with the pencil at the dark end there is little of it there (only on the shaded faces of the columns and the darker corners); with the shifted balance it is visible on the walls. The bottom of the shaft carries the far pencil marks either way; the lit spawn view is clean.
+- Verdict: pencil range 0.4 to 0.75 as default (light and mid shade clean). For the owner: the deep hall needs darker lighting (less openness or bounce there, or real enclosure) before it can show pencil grading into dark; that is a generator and lighting change, not done here. Question on the sheet: with pencil kept to the dark end, does it show where you want it and stay out of the lit shaft?
+
 ## Queued
+
+- A generated stroke texture (tonal art map style) for the far pencil, approach B of E054.
 
 Experiments the plan already calls for, in rough order:
 

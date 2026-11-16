@@ -426,6 +426,19 @@ pub struct StylePreset {
     pub pencil_patches: f32,
     /// Size of the pencil patches in metres.
     pub pencil_patch_m: f32,
+    /// Distance shading (E054): 0 the distance ruling (`rule_*`, `fall_*`); 1 the tone that
+    /// drove the ruling deepens the wash instead, with pencil strokes gathering on it.
+    pub far_mode: f32,
+    /// With `far_mode` 1: strength of the far pencil strokes (0: the wash alone).
+    pub far_pencil: f32,
+    /// On-screen size of the far strokes' relief, pixels per texel at 720 lines.
+    pub far_pencil_px: f32,
+    /// Lengthening of the far strokes along their direction.
+    pub far_stretch: f32,
+    /// Strength of a second far stroke direction (60 degrees round) in the darkest patches.
+    pub far_cross: f32,
+    /// How much of the far tone goes into the wash (1: all, to solid ink at the bottom).
+    pub far_wash: f32,
 }
 
 impl StylePreset {
@@ -594,6 +607,12 @@ impl StylePreset {
             pencil_angle: 45.0,
             pencil_patches: 0.0,
             pencil_patch_m: 2.5,
+            far_mode: 0.0,
+            far_pencil: 0.0,
+            far_pencil_px: 3.0,
+            far_stretch: 4.0,
+            far_cross: 0.0,
+            far_wash: 1.0,
         }
     }
 
@@ -646,6 +665,8 @@ impl StylePreset {
             paper6: [self.paper_near_dist, self.paper_near_amp, self.pencil, self.pencil_kind],
             paper7: [self.pencil_from, self.pencil_to, self.pencil_cross, self.pencil_angle.to_radians()],
             paper8: [self.pencil_patches, self.pencil_patch_m, 0.0, 0.0],
+            paper9: [self.far_mode, self.far_pencil, self.far_pencil_px, self.far_stretch],
+            paper10: [self.far_cross, self.far_wash, 0.0, 0.0],
         }
     }
 }
@@ -810,6 +831,14 @@ impl StylePreset {
             pencil: 0.15,
             pencil_kind: 3.0,
             pencil_patches: 1.0,
+            // Only at the dark end of the wash (E056): light and mid shade stay clean.
+            pencil_from: 0.4,
+            pencil_to: 0.75,
+            // Distance shading as wash and pencil marks instead of ruling (E054).
+            far_mode: 1.0,
+            far_pencil: 0.6,
+            far_pencil_px: 1.0,
+            far_stretch: 2.0,
             paper_take: 0.08,
             halftone: 0.05,
             halftone_pitch: 0.01,
@@ -1098,6 +1127,12 @@ impl StylePreset {
         "pencil_angle",
         "pencil_patches",
         "pencil_patch_m",
+        "far_mode",
+        "far_pencil",
+        "far_pencil_px",
+        "far_stretch",
+        "far_cross",
+        "far_wash",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1253,6 +1288,12 @@ impl StylePreset {
             "pencil_angle" => self.pencil_angle = num(value)?,
             "pencil_patches" => self.pencil_patches = num(value)?,
             "pencil_patch_m" => self.pencil_patch_m = num(value)?,
+            "far_mode" => self.far_mode = num(value)?,
+            "far_pencil" => self.far_pencil = num(value)?,
+            "far_pencil_px" => self.far_pencil_px = num(value)?,
+            "far_stretch" => self.far_stretch = num(value)?,
+            "far_cross" => self.far_cross = num(value)?,
+            "far_wash" => self.far_wash = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
@@ -1322,4 +1363,6 @@ pub(crate) struct StyleGpu {
     paper6: [f32; 4],
     paper7: [f32; 4],
     paper8: [f32; 4],
+    paper9: [f32; 4],
+    paper10: [f32; 4],
 }

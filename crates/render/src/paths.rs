@@ -35,6 +35,10 @@ pub const NAMES: &[&str] = &[
     "shaft_hall_wall",
     "shaft_wall_approach",
     "shaft_hall_walk",
+    "shaft_rim_pitch",
+    "shaft_hall_deep_in",
+    "shaft_hall_deep_back",
+    "shaft_hall_deep_side",
 ];
 
 pub fn by_name(name: &str) -> Option<fn(f32) -> Camera> {
@@ -62,6 +66,10 @@ pub fn by_name(name: &str) -> Option<fn(f32) -> Camera> {
         "shaft_hall_wall" => shaft_hall_wall,
         "shaft_wall_approach" => shaft_wall_approach,
         "shaft_hall_walk" => shaft_hall_walk,
+        "shaft_rim_pitch" => shaft_rim_pitch,
+        "shaft_hall_deep_in" => shaft_hall_deep_in,
+        "shaft_hall_deep_back" => shaft_hall_deep_back,
+        "shaft_hall_deep_side" => shaft_hall_deep_side,
         _ => return None,
     })
 }
@@ -162,6 +170,35 @@ pub fn shaft_wall_approach(t: f32) -> Camera {
 pub fn shaft_hall_walk(t: f32) -> Camera {
     let y = shaft::hall_floor() + EYE_HEIGHT;
     Camera::new(Vec3::new(-7.0, y, lerp(-42.0, -102.0, t)), PI, -0.12)
+}
+
+/// Just below the rim, tipping from looking across the shaft (pitch -0.4) to straight down
+/// it (-1.45): the far walls descend into darkness through the frame (E054). Over t 0..1
+/// the pitch changes 60 degrees; `--frames 61` is 1 degree per frame.
+pub fn shaft_rim_pitch(t: f32) -> Camera {
+    let eye = Vec3::new(-20.0, shaft::TOP - 6.0, 20.0);
+    Camera::new(eye, 2.36, lerp(-0.4, -1.45, t))
+}
+
+// Deep in the giant hall, the darkest places in the scene, for judging pencil shading in
+// shade (E056). Over t the eye moves 4 m, so `--t` picks a slightly different spot.
+
+/// 80 m into the hall, looking further in at the back wall and its door.
+pub fn shaft_hall_deep_in(t: f32) -> Camera {
+    let y = shaft::hall_floor() + EYE_HEIGHT;
+    Camera::new(Vec3::new(lerp(-6.0, -2.0, t), y, -118.0), PI + 0.15, 0.05)
+}
+
+/// At the back of the hall, looking back towards the arch and the lit shaft.
+pub fn shaft_hall_deep_back(t: f32) -> Camera {
+    let y = shaft::hall_floor() + EYE_HEIGHT;
+    Camera::new(Vec3::new(lerp(8.0, 4.0, t), y, -130.0), -0.1, 0.08)
+}
+
+/// In the back corner of the hall, looking along the side wall towards the arch.
+pub fn shaft_hall_deep_side(t: f32) -> Camera {
+    let y = shaft::hall_floor() + EYE_HEIGHT;
+    Camera::new(Vec3::new(-26.0, y, lerp(-134.0, -130.0, t)), 0.35, 0.12)
 }
 
 // --- One Shaft -----------------------------------------------------------------------------

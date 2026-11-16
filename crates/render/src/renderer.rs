@@ -1278,10 +1278,10 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_wgsl() {
-        // struct Globals: two mat4x4 and seven vec4. struct Style: forty-six vec4.
+        // struct Globals: two mat4x4 and seven vec4. struct Style: forty-eight vec4.
         // struct ShadowU: four mat4x4 and two vec4.
         assert_eq!(std::mem::size_of::<Globals>(), 2 * 64 + 7 * 16);
-        assert_eq!(std::mem::size_of::<StyleGpu>(), 46 * 16);
+        assert_eq!(std::mem::size_of::<StyleGpu>(), 48 * 16);
         assert_eq!(std::mem::size_of::<ShadowGpu>(), 4 * 64 + 2 * 16);
     }
 
@@ -1317,7 +1317,7 @@ mod tests {
         // Older presets keep the generated paper tile (paper_kind 0); nihei_ink uses a scan.
         assert_eq!(StylePreset::nihei_wash().paper_kind, 0.0);
         for p in [StylePreset::nihei(), StylePreset::nihei_vast(), StylePreset::nihei_wash(), StylePreset::nihei_hybrid()] {
-            assert_eq!((p.pencil, p.paper_near_amp), (0.0, 1.0));
+            assert_eq!((p.pencil, p.paper_near_amp, p.far_mode), (0.0, 1.0, 0.0));
         }
         assert!((StylePreset::nihei_ink().paper_kind as usize) < crate::paper::PAPER_KINDS.len());
         let ink = StylePreset::nihei_ink();

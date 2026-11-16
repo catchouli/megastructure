@@ -96,6 +96,10 @@ Defined in `crates/render/src/paths.rs` as `fn(t: f32) -> Camera`, `t` clamped t
 
 `shaft_hall_walk` walks 60 m down the hall at eye height, eyes slightly down, so the floor recedes at grazing angles through many octaves of the surface screentone (E036). `--frames 61 --t1 0.02333` is 1.4 m/s at 60 fps: `mega_capture --path shaft_hall_walk --frames 61 --t0 0 --t1 0.02333 --metrics --no-png`.
 
+`shaft_rim_pitch` stands just below the rim and tips from looking across the shaft to straight down (pitch -0.4 to -1.45 over t, 1 degree per frame at `--frames 61`), so the far walls pass through the frame as they descend into darkness (E054).
+
+`shaft_hall_deep_in`, `shaft_hall_deep_back` and `shaft_hall_deep_side` are the darkest places in the scene, at the back of the giant hall: looking further in at the back wall, looking back towards the arch and the lit shaft, and along a side wall from the back corner; t moves the eye 4 m (E056). With `shaft_gallery_down` and `shaft_rim_down` (the bottom of the shaft) they are the views for judging pencil shading.
+
 To add a path, write the function, add it to `NAMES` and `by_name`, and make sure `scene_of` maps it to its scene.
 
 ### Code locations

@@ -833,7 +833,7 @@ fn halftone(w: f32, uv: vec2<f32>, gmax: f32) -> f32 {
 // The E040 mottle was removed in E049. Returns the relief h, already weighted.
 fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy: vec2<f32>, r: f32) -> f32 {
     let kind = i32(clamp(round(S.paper5.y), 0.0, 4.0));
-    let tn = paper_layers(kind, -1.0, uv, pn, gu, gv, duvx, duvy);
+    let tn = paper_layers(kind, -1.0, uv, pn, gu, gv, duvx, duvy, S.paper2.y, 1.0, S.paper5.x);
     // Calmer up close (E051): the amplitude rises from paper_near_amp at the eye to 1 at
     // paper_near_dist metres, smoothly, so walking up to a wall the paper quietens instead
     // of turning to embossed stucco.
@@ -850,14 +850,14 @@ fn paper_surface(uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy
 // w_a^2 + w_b^2 = 1 and contrast is the same at every distance (the E044 window left
 // octave-periodic dips to about 0.7, which showed as blotchy zones on a wall seen at an
 // angle). Faded by the world cap S.paper5.x over two octaves and on grazing surfaces.
-fn paper_layers(kind: i32, angle: f32, uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy: vec2<f32>) -> f32 {
+fn paper_layers(kind: i32, angle: f32, uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, duvy: vec2<f32>, lo_px: f32, stretch: f32, cap: f32) -> f32 {
     let gmax = max(gu, gv);
     let aniso = smoothstep(0.08, 0.2, min(gu, gv) / max(gmax, 1e-9));
     if (aniso <= 0.0) {
         return 0.0;
     }
     let plane = pcg(bitcast<u32>(i32(floor(pn * 4.0))) ^ u32(kind) * 0x9e3779b9u);
-    let lo = max(S.paper2.y, 0.1);
+    let lo = max(lo_px, 0.1);
     let foot = min(gu, gv) * G.misc.x;
     // Width over height of each relief (mega_render::paper::PAPER_ASPECT).
     var aspects = array<f32, 5>(1.0, 1.7066667, 0.7753906, 1.0, 1.0);
@@ -874,12 +874,14 @@ fn paper_layers(kind: i32, angle: f32, uv: vec2<f32>, pn: f32, gu: f32, gv: f32,
         } else if (t >= 1.0 && t < 2.0) {
             w = cos(1.5707963 * (t - 1.0));
         }
-        w *= 1.0 - smoothstep(0.25 * S.paper5.x, S.paper5.x, c);
+        w *= 1.0 - smoothstep(0.25 * cap, cap, c);
         if (w > 0.0) {
             let h = hash2(0x5851f42du ^ plane, u32(k));
             let a = select(u01(h) * 6.2831853, angle, angle >= 0.0);
             let q = vec2<f32>(cos(a) * uv.x - sin(a) * uv.y, sin(a) * uv.x + cos(a) * uv.y) / c;
-            let sa = vec2<f32>(1.0 / (512.0 * aspect), 1.0 / 512.0);
+            // stretch > 1 lengthens the relief along the layer's x axis (E054: far pencil
+            // strokes from Paper004's laid lines).
+            let sa = vec2<f32>(1.0 / (512.0 * aspect * max(stretch, 1.0)), 1.0 / 512.0);
             let st = q * sa + vec2<f32>(u01(pcg(h ^ 1u)), u01(pcg(h ^ 2u)));
             let rot = mat2x2<f32>(vec2<f32>(cos(a), sin(a)), vec2<f32>(-sin(a), cos(a)));
             let gx = (rot * duvx / c) * sa;
@@ -1312,6 +1314,9 @@ fn fs_main(in: VsOut) -> FsOut {
     let cg_lit = grad_along_signed(dpdx(u1), dpdy(u1), dpdx(u2), dpdy(u2), dpdx(c_lit), dpdy(c_lit));
     let cg_dark = grad_along_signed(dpdx(su1), dpdy(su1), dpdx(su2), dpdy(su2), dpdx(c_dark), dpdy(c_dark));
 
+    // Distance shading mode (E054): 0 ruling, 1 the tone that drove the ruling goes into
+    // the wash instead, with pencil strokes gathering on it.
+    let far_pencil = S.paper9.x > 0.5;
     var t: Tone;
     if (ruled) {
         if (S.rule3.w > 0.5) {
@@ -1320,9 +1325,16 @@ fn fs_main(in: VsOut) -> FsOut {
         // The ruled widths need a real footprint, so the octave diagnostics are applied in
         // rule_layer rather than by zeroing it.
         let rl = RuleIn(u1, u2, g1, g2, lod_u1, lod_v1, cg_lit, 0x68e31da4u, c_lit);
-        var cov = rule_layer(rl) * (1.0 - amount);
+        var cov = 0.0;
+        if (!far_pencil) {
+            cov = rule_layer(rl) * (1.0 - amount);
+        }
         var cblack = smoothstep(0.85, 0.985, c_lit) * (1.0 - amount);
-        if (near_shadow) {
+        if (far_pencil) {
+            // Distance shading as wash and pencil (E054): no ruled strokes; the black of the
+            // merge follows the far tone, so specks and white lines still appear in it.
+            cblack = smoothstep(0.85, 0.985, mix(c_lit, c_dark, amount));
+        } else if (near_shadow) {
             SH_GATE = 1u;
             // Shadow strokes are heavy where the occluder is (towards the sun along the
             // surface) and trail off away from it, as a shadow hangs from what casts it.
@@ -1363,7 +1375,14 @@ fn fs_main(in: VsOut) -> FsOut {
     // Wash, printed partly as screentone.
     var wash = 0.0;
     if (S.wash.x > 0.0) {
-        let w0 = mix(wash_curve(lit_t), wash_curve(dark_t), amount);
+        var w0 = mix(wash_curve(lit_t), wash_curve(dark_t), amount);
+        // Far tone into the wash (E054): the light darkened with distance and depth below the
+        // eye, gated near the eye (rule_near, rule_fade_in, rule_down_gain, rule_dist_len),
+        // deepens the wash towards solid ink at the bottom of the shaft.
+        let cf = select(0.0, mix(c_lit, c_dark, amount), far_pencil && ruled);
+        if (cf > 0.0) {
+            w0 = 1.0 - (1.0 - w0) * (1.0 - cf * S.paper10.y);
+        }
         let tt = screentone_t(in.clip.xy, dv, p, vec2<f32>(u1, u2), vec2<f32>(lod1, lod_v1), dot(p, n));
         // The threshold's ramp: one pixel of the threshold map (hard, two-level grain), or
         // with screentone_soft a ramp that wide in threshold units, so the grain becomes a
@@ -1398,7 +1417,7 @@ fn fs_main(in: VsOut) -> FsOut {
             if (band > 0.0) {
                 let pk = i32(clamp(round(S.paper6.w), 0.0, 4.0));
                 let env = mix(S.paper6.y, 1.0, smoothstep(0.0, max(S.paper6.x, 1e-3), rr));
-                var pr = paper_layers(pk, S.paper7.w, vec2<f32>(u1, u2), dot(p, n) + 17.0, lod_u1, lod_v1, duv_x, duv_y);
+                var pr = paper_layers(pk, S.paper7.w, vec2<f32>(u1, u2), dot(p, n) + 17.0, lod_u1, lod_v1, duv_x, duv_y, S.paper2.y, 1.0, S.paper5.x);
                 if (S.paper7.z > 0.0) {
                     var cb = smoothstep(S.paper7.y, 1.0, w0) * S.paper7.z;
                     if (S.paper8.x > 0.0) {
@@ -1407,10 +1426,41 @@ fn fs_main(in: VsOut) -> FsOut {
                         cb *= mix(1.0, smoothstep(0.45, 0.65, t2), S.paper8.x);
                     }
                     if (cb > 0.0) {
-                        pr += cb * paper_layers(pk, S.paper7.w + 1.5707963, vec2<f32>(u1, u2), dot(p, n) + 31.0, lod_u1, lod_v1, duv_x, duv_y);
+                        pr += cb * paper_layers(pk, S.paper7.w + 1.5707963, vec2<f32>(u1, u2), dot(p, n) + 31.0, lod_u1, lod_v1, duv_x, duv_y, S.paper2.y, 1.0, S.paper5.x);
                     }
                 }
                 wash = saturate(wash + S.paper6.z * band * env * 0.25 * pr);
+            }
+        }
+        // Far pencil strokes (E054): the same laid-line relief, stretched along its lines
+        // into strokes and drawn at a larger on-screen size (S.paper9.z px per texel) with no
+        // distance cap, gathering in patches as the far tone rises; a second direction 60
+        // degrees round joins in the darkest patches (S.paper10.x). Faded into the black at the
+        // end, leaving only the light side as occasional gaps.
+        if (cf > 0.0 && S.paper9.y > 0.0) {
+            var fb = smoothstep(0.03, 0.6, cf);
+            let ps = max(S.paper8.y, 0.1) * 2.0;
+            let tn = 0.65 * vnoise3(0x1b873593u, p / ps) + 0.35 * vnoise3(0xcc9e2d51u, p / (0.43 * ps));
+            let thr = saturate((tn - 0.25) * 2.0);
+            fb *= smoothstep(thr - 0.3, thr + 0.3, fb * 1.3);
+            if (fb > 0.0) {
+                let fpx = S.paper9.z;
+                var pr = paper_layers(3, S.paper7.w, vec2<f32>(u1, u2), dot(p, n) + 53.0, lod_u1, lod_v1, duv_x, duv_y, fpx, S.paper9.w, 1e6);
+                if (S.paper10.x > 0.0) {
+                    let t2 = vnoise3(0x85ebca6bu, p / ps);
+                    let cb = S.paper10.x * smoothstep(0.55, 0.9, cf) * smoothstep(0.4, 0.6, t2);
+                    if (cb > 0.0) {
+                        pr += cb * paper_layers(3, S.paper7.w + 1.0471976, vec2<f32>(u1, u2), dot(p, n) + 71.0, lod_u1, lod_v1, duv_x, duv_y, fpx, S.paper9.w, 1e6);
+                    }
+                }
+                let amp = S.paper9.y * fb * (1.0 - 0.6 * smoothstep(0.85, 1.0, cf));
+                // Marks rather than bands: the relief's ridges, thresholded softly, darken the
+                // wash as discrete strokes (the threshold falls as the tone rises, so marks
+                // thicken and join); the troughs leave occasional light gaps.
+                let thrm = mix(1.3, 0.3, fb);
+                let mark = smoothstep(thrm - 0.35, thrm + 0.35, pr);
+                let gap = smoothstep(1.2, 2.0, -pr) * 0.5;
+                wash = saturate(wash + amp * 0.5 * (mark - gap));
             }
         }
     }
