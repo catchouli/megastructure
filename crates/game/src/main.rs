@@ -16,6 +16,8 @@ mod world;
 
 #[cfg(test)]
 mod shaft_tests;
+#[cfg(test)]
+mod vent_tests;
 
 use anyhow::{anyhow, bail, Result};
 use cli::Mode;

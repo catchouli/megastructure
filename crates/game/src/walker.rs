@@ -437,7 +437,19 @@ impl Walker {
 
     /// Walking: slide along the ground, step up ledges, stay stuck to the ground below.
     fn ground_move(&mut self, world: &World, dt: f32) {
-        let motion = horizontal(self.vel) * dt;
+        let flat_motion = horizontal(self.vel) * dt;
+        // Down a slope, move along it (same horizontal speed) rather than out level and then
+        // snapped down: level, the top of the capsule runs ahead of the slope into the ceiling
+        // where a sloped vent meets a level one, and stops dead there (E113). Up a slope the
+        // slide along it does the same already.
+        let mut motion = flat_motion;
+        let n = self.ground_normal;
+        if n.y >= min_ground_y() && n.y < 0.9999 {
+            let dy = -(n.x * motion.x + n.z * motion.z) / n.y;
+            if dy < 0.0 {
+                motion.y = dy;
+            }
+        }
         let start = self.pos;
         let h = self.height();
         let a = slide(world, start, motion, Mode::Ground, h);
@@ -446,7 +458,7 @@ impl Walker {
         if a.wall {
             // Blocked by something steep: see whether it is a ledge that can be stepped onto.
             let progress = horizontal_distance(start, a.pos);
-            if let Some(b) = self.try_step(world, start, motion) {
+            if let Some(b) = self.try_step(world, start, flat_motion) {
                 if horizontal_distance(start, b) > progress + 1e-3 {
                     self.eye_offset -= b.y - start.y;
                     best = b;

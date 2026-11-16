@@ -195,6 +195,22 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: the 0.45 m mouth was entered from the start. At the 1.4 m mouth only 1 of 12 jumps got in: the step-up raised the crouched capsule as far as there was room, which near the mouth put its head into the wall above (the mouth leaves 0.1 m of play), the forward probe was blocked and the step refused; the body then slid down the face, perched on the lip's corner and slid off. With the lower retries 11 of 12 got in; the one miss crouches at take-off 0.3 m from the wall, where the lifted feet meet the lip's face still rising and the speed into the wall is clipped away. All earlier step tests and the shaft routes were unchanged.
 - Verdict: retries kept (`STEP_RETRY`).
 
+## E113: Crawling down a ramp into a level vent
+- Date: 2026-11-16
+- Feature: `features/player-movement.md`, `features/labyrinth.md`
+- Question: the labyrinth's vents change storey on 12 m ramps at 26.6 degrees inside a taller slot, and the level part beyond has 0.1 m of headroom over the crouched capsule. Does the walker crawl down the ramp into it smoothly?
+- Setup: `vent_tests.rs` crawling every vent of four seeds, counting steps slower than 3 m/s on a straight run (no turn for half a second); the default seed's `vent/0` traced step by step at the foot of its ramp (x 230, z 88).
+- Result: at the foot of every down-ramp the crawl stopped dead from 4 m/s in one step and took about 10 steps to get going again: the ground move went level and then snapped down, so the top of the capsule, still above the slope, ran into the edge of the level part's ceiling; that edge's normal is not walkable, so it counted as a wall and took the speed. Up the ramps was fine. Changed: on ground sloping down along the motion, move along the slope with the same horizontal speed. After it, no straight-run slowdowns in any of the 72 crawls; the shaft's stair tests and its exact route line were unchanged.
+- Verdict: kept. A generator fix would also have done (more headroom at the foot of a ramp), but the walker should not stop there.
+
+## E114: The labyrinth's vents, crawled by the walker
+- Date: 2026-11-16
+- Feature: `features/player-movement.md`, `features/labyrinth.md`
+- Question: the generator checked its vents (1.2 m wide, 1.0 m high, 0.3 m lip, 90 degree bends, 26.6 degree ramps, flanges, grilles) with its own flood fill. Does the real walker crawl them?
+- Setup: `vent_tests.rs`: every vent of the default seed and seeds 1, 2 and 3 (ten each), both ways, out and back for a lookout. Start standing 1 to 2 m in front of the mouth, crouch, steer at the centres of the plan's cells, let go and stand at the other side. Run with `cargo test --release -p megastructure -- --ignored --nocapture every_vent`. Also a full-speed exit onto the default seed's outlet ledge, and a reading of the grille and flange code in `crates/gen/src/labyrinth/geom.rs`.
+- Result: after E113, all 72 crawls pass: never standing inside, never in a collider, never airborne (ramp tops and bottoms included), no stall, no straight-run slowdown, eye steps at most 0.033 m, no death, standing on every exit. Speeds: 4 m/s level, 3.2 m/s up ramps (cos^2), 3.5 m/s at the low point of a 90 degree turn taken by the bot at a cell centre; 60 m with two ramps takes about 16 s. Lips (0.3 m) are stepped crouched at every mouth. Flanges and seams are drawn strokes only, not colliders, so cannot snag; torn-off and hanging grilles are built without colliders, so cannot block either; lookout grilles have one, and the walker stops at it and turns round. The outlet: letting go at full speed just after stepping down onto the 1.8 m unrailed ledge stops 1.79 m from the mouth's face with the edge at 2.40 m. Seed 1's `vent/look0` is 132 m with eight ramps, a 73 s crawl there and back for a dead end (seed 2's is 84 m with five).
+- Verdict: the vents work with the walker. Passed to the generator: hanging grilles hang across the crouched eye's path (the camera passes through them); very long lookouts.
+
 ## E011: Sun shadows, and what a shadow is drawn as
 - Date: 2026-11-15
 - Feature: `features/ink-renderer.md`, `features/sun-and-sky.md`, `features/one-shaft.md`
