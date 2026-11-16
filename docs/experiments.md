@@ -719,6 +719,24 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: with the shafts and the old spread (0.84) the whole undercroft rose to 0.2 to 0.56 and still printed one even dark grey. At 0.7 the floor under a shaft is 0.52 and 0.07 elsewhere: grey pools in black with white rules. Corridors at 0.05 to 0.22 printed solid black under E066 (black below 0.06, closing in up to about 0.26), so they now keep 0.46 at the least (towers and service passages 0.36), and print dark grey with pencil. The undercroft, chamber and cistern basin keep their black.
 - Verdict: kept. The darkest values are tied to `black_point` and `black_range` in `nihei_ink`; if those change, these should be revisited.
 
+## E067: White lines in black, restrained
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("White lines and specks in black")
+- Question: the owner on E066: "Wait, what's with the completely white edges?" Lines flipped to paper white over dark grey (wash above 0.72), part-way along railings and floor edges, and in black they were thick, uniform and glaring.
+- Setup: worked in a git worktree of HEAD (d7798bd) again, the main tree's labyrinth being mid-edit. Inversion only where the black closes in or the wash is above 0.86; in the composite the dark line fades out (black coverage 0.3 to 0.65), a gap, the white line fades in (0.8 to 1); the white line is the line's core only, light grey, broken by world-anchored noise. Sheet `compare/E067-white-lines.png`: E066 default / no white lines (`--set white_lines=0`) / restrained (default) / stronger (`--set white_line_tone=0.8 --set white_line_core=0.4 --set white_line_break=0.25`) on `lab_undercroft`, `lab_corridor_void`, `lab_tower_well`, `lab_far_ledge_axis`, `lab_gallery`, with native crops of the gallery (lines from grey into black) and the corridor; regenerate with `mega_capture --path lab_gallery --width 2560 --height 1440 --set white_lines=0 --out <dir>`.
+- Failure on the way: with inversion only over solid black the sealed corridor (wash about 0.9, not solid) lost its white lines and its black ones vanished into the near-black; wash above 0.86 now counts as very nearly black.
+- Result: no white flashes on grey; in black, thin grey broken lines pick out the main structure and the black dominates. The sealed corridor is navigable but only just: walls, floor edges and the door are faint grey lines; "none" leaves it unreadable except by the slightly lighter floor.
+- Stability (61 frames, 720p; 5x5 error / pops / relative pops, E066 / E067): `lab_far_ledge_yaw` 0.412, 0.123%, 0.243% / 0.335, 0.010%, 0.219%; `lab_axis_walk` 0.330, 0.055%, 0.326% / 0.281, 0.009%, 0.283%; `shaft_spawn_yaw` 0.290, 0.025%, 0.051% / 0.272, 0.010%, 0.021%. Frame time `lab_undercroft` 2.54 / 8.33 ms, `lab_corridor_void` 2.25 / 7.41 ms at 720p / 1440p (noisy).
+- Verdict: restrained as default. Question on the sheet: are the white lines in the black now quiet enough, or would you rather have none?
+
+## E068: Inside the black: specks, texture or nothing
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md`
+- Question: the owner is unsure about the white specks; perhaps grey, blended with the wall, or none.
+- Setup: sheet `compare/E068-speck-options.png`, native crops at 2560x1440 of `lab_undercroft`, `lab_tower_well`, `lab_corridor_void`, `lab_hall_from_arch`: white specks (E066) / none / grey soft specks (`speck_tone` 0.3, `speck_soft` 0.7) / pencil texture in the black (`black_texture` 0.12, no specks) / texture plus a few grey flecks (default: `black_texture` 0.1, `speckle` 0.04, `speck_tone` 0.25, `speck_soft` 0.7). Regenerate with `mega_capture --path lab_tower_well --width 2560 --height 1440 --set speckle=0 --set black_texture=0.12 --out <dir>`.
+- Result: grey specks nearly disappear at 1:1; the texture gives the black a surface of faint graphite strokes with no points of light; a few grey flecks on top add a little grain.
+- Verdict: texture plus few grey flecks as default (not white specks). Question on the sheet: which gives the black areas detail without looking like a starfield?
+
 ## Queued
 
 

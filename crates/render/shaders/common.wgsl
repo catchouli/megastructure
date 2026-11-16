@@ -76,6 +76,8 @@ struct Style {
     paper13: vec4<f32>,         // light wash, light white, light gamma, light sun gain
     paper14: vec4<f32>,         // light far tint, its start (m), its end (m)
     paper15: vec4<f32>,         // black point (light), black range, black patchiness
+    paper16: vec4<f32>,         // white line tone (0: old full white lines), white line core threshold, white line breaks
+    paper17: vec4<f32>,         // speck tone (0: white), speck softness, texture inside black
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;

@@ -1313,10 +1313,10 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_wgsl() {
-        // struct Globals: two mat4x4 and seven vec4. struct Style: fifty-three vec4.
+        // struct Globals: two mat4x4 and seven vec4. struct Style: fifty-five vec4.
         // struct ShadowU: four mat4x4 and two vec4.
         assert_eq!(std::mem::size_of::<Globals>(), 2 * 64 + 7 * 16);
-        assert_eq!(std::mem::size_of::<StyleGpu>(), 53 * 16);
+        assert_eq!(std::mem::size_of::<StyleGpu>(), 55 * 16);
         assert_eq!(std::mem::size_of::<ShadowGpu>(), 4 * 64 + 2 * 16);
     }
 

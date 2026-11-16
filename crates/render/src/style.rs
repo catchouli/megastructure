@@ -477,6 +477,20 @@ pub struct StylePreset {
     /// How much that range varies by patch (0 even, 1 strongly patchy), so black arrives in
     /// pools rather than along one contour of light.
     pub black_patch: f32,
+    /// Restrained white lines in black (E067): their tone, 0..1 of the way to paper. 0 keeps
+    /// the old full-strength white lines (`white_lines` still switches them on at all).
+    pub white_line_tone: f32,
+    /// Only the core of a line turns white: coverage above this (0 the full line, towards 1
+    /// thinner).
+    pub white_line_core: f32,
+    /// Share of a white line broken away (world-anchored noise threshold, 0 none).
+    pub white_line_break: f32,
+    /// Speck tone (E068): how far towards paper a speck goes, 0..1; 0 means white (as before).
+    pub speck_tone: f32,
+    /// Speck softness and size variation, 0 sharp and even (as before).
+    pub speck_soft: f32,
+    /// A faint sheen of pencil texture and paper tooth inside solid black, 0 off.
+    pub black_texture: f32,
 }
 
 impl StylePreset {
@@ -667,6 +681,12 @@ impl StylePreset {
             black_point: 0.03,
             black_range: 0.0,
             black_patch: 0.7,
+            white_line_tone: 0.0,
+            white_line_core: 0.5,
+            white_line_break: 0.35,
+            speck_tone: 0.0,
+            speck_soft: 0.0,
+            black_texture: 0.0,
         }
     }
 
@@ -726,6 +746,8 @@ impl StylePreset {
             paper13: [self.light_wash, self.light_white, self.light_gamma, self.light_sun],
             paper14: [self.light_far, self.light_far_start, self.light_far_end, 0.0],
             paper15: [self.black_point, self.black_range, self.black_patch, 0.0],
+            paper16: [self.white_line_tone, self.white_line_core, self.white_line_break, 0.0],
+            paper17: [self.speck_tone, self.speck_soft, self.black_texture, 0.0],
         }
     }
 }
@@ -913,8 +935,17 @@ impl StylePreset {
             black_point: 0.06,
             black_range: 0.2,
             black_patch: 0.7,
+            // White lines in black, restrained (E067): light grey, core only, broken.
+            white_line_tone: 0.55,
+            white_line_core: 0.55,
+            white_line_break: 0.4,
+            // Inside the black, a faint sheen of pencil texture and a few soft grey flecks
+            // instead of white specks (E068).
+            speck_tone: 0.25,
+            speck_soft: 0.7,
+            black_texture: 0.1,
             wash_speckle: 0.0,
-            speckle: 0.06,
+            speckle: 0.04,
             shade_from: 0.45,
             far_white: 0.45,
             far_pencil_px: 1.0,
@@ -1234,6 +1265,12 @@ impl StylePreset {
         "black_point",
         "black_range",
         "black_patch",
+        "white_line_tone",
+        "white_line_core",
+        "white_line_break",
+        "speck_tone",
+        "speck_soft",
+        "black_texture",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1411,6 +1448,12 @@ impl StylePreset {
             "black_point" => self.black_point = num(value)?,
             "black_range" => self.black_range = num(value)?,
             "black_patch" => self.black_patch = num(value)?,
+            "white_line_tone" => self.white_line_tone = num(value)?,
+            "white_line_core" => self.white_line_core = num(value)?,
+            "white_line_break" => self.white_line_break = num(value)?,
+            "speck_tone" => self.speck_tone = num(value)?,
+            "speck_soft" => self.speck_soft = num(value)?,
+            "black_texture" => self.black_texture = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
@@ -1487,4 +1530,6 @@ pub(crate) struct StyleGpu {
     paper13: [f32; 4],
     paper14: [f32; 4],
     paper15: [f32; 4],
+    paper16: [f32; 4],
+    paper17: [f32; 4],
 }

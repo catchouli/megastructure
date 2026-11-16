@@ -1225,8 +1225,11 @@ fn speck_octave(uv: vec2<f32>, cell: f32, gg: vec2<f32>, salt: u32) -> f32 {
     }
     let centre = (vec2<f32>(ci) + 0.2 + 0.6 * vec2<f32>(u01(pcg(h ^ 1u)), u01(pcg(h ^ 2u)))) * cell;
     let d = length((uv - centre) / gg);
-    let r = S.speckle.y * G.misc.x * (0.5 + u01(pcg(h ^ 3u)));
-    return saturate(r - d + 0.5);
+    // Size varies per speck (more with S.paper17.y, E068), and the edge softens over
+    // S.paper17.y pixels, so soft grey flecks rather than sharp points.
+    let r = S.speckle.y * G.misc.x * (0.5 + u01(pcg(h ^ 3u)) * (1.0 + 2.0 * S.paper17.y));
+    let soft = max(1.0, 1.0 + 2.0 * S.paper17.y * G.misc.x);
+    return saturate((r - d) / soft + 0.5) * mix(1.0, 0.5 + 0.5 * u01(pcg(h ^ 4u)), S.paper17.y);
 }
 
 fn speckle(f: Frag, salt: u32) -> f32 {
@@ -1549,11 +1552,20 @@ fn fs_main(in: VsOut) -> FsOut {
             let edge = S.paper15.x + S.paper15.y * mix(1.0, 0.4 + 1.2 * tb, S.paper15.z);
             let bk = 1.0 - smoothstep(S.paper15.x, max(edge, S.paper15.x + 1e-3), lb);
             wash = 1.0 - (1.0 - wash) * (1.0 - bk);
-            // Lines turn white over solid black and over wash dark enough that black lines would
-            // vanish into it (the near-black of sealed corridors), so the walls, floor edges and
-            // doors stay drawn.
             SPECK_BLACK = max(t.black, smoothstep(0.6, 0.95, bk));
-            t.black = max(t.black, max(smoothstep(0.35, 0.8, bk), smoothstep(0.72, 0.85, wash)));
+            // Surface inside the black (E068, S.paper17.z): a faint sheen of the pencil tile's
+            // darkest level and the paper tooth, in patches, so black has texture without
+            // points of light.
+            if (S.paper17.z > 0.0 && bk > 0.0) {
+                let cv = shade_cov(4.0, vec2<f32>(u1, u2), dot(p, n) + 11.0, lod_u1, lod_v1, duv_x, duv_y);
+                let tooth = ph / max(S.paper2.x * 0.35, 1e-4);
+                let sheen = S.paper17.z * bk * (0.4 + 0.6 * tb) * saturate(0.7 * cv + 0.15 * tooth + 0.1);
+                wash = saturate(wash - sheen);
+            }
+            // Counted as black for the composite only where the black itself is closing in or the
+            // wash is within a few steps of it (E067: not over dark grey, where white lines
+            // glared).
+            t.black = max(t.black, max(smoothstep(0.35, 0.9, bk), smoothstep(0.86, 0.95, wash)));
         }
         if (S.halftone.x > 0.0) {
             // Faded on foreshortened surfaces, where dots would be squeezed into lines.
@@ -1673,7 +1685,9 @@ fn fs_main(in: VsOut) -> FsOut {
     // Palette index 0 (the only one in black and white), band, ao, solid black coverage
     // (read by the composite to turn lines white inside black).
     out.fill = vec4<f32>(0.0, band_of(light) / 3.0, ao, select(0.0, t.black, hatch_on));
-    out.ink = vec4<f32>(select(0.0, t.cov, hatch_on), select(0.0, speck, hatch_on), 0.0, 0.0);
+    // Speck tone (E068): the share of the way to paper a speck goes (1 white, lower grey).
+    let speck_t = speck * select(1.0, S.paper17.x, S.paper17.x > 0.0);
+    out.ink = vec4<f32>(select(0.0, t.cov, hatch_on), select(0.0, speck_t, hatch_on), 0.0, 0.0);
     out.tone = vec2<f32>(select(0.0, wash, hatch_on), 0.5 + 2.0 * ph);
     if (view == VIEW_SHADOW) {
         out.fill = vec4<f32>(0.0, sv.y / 4.0, ao, 0.0);

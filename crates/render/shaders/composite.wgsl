@@ -91,7 +91,23 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         wash = saturate(wash + S.wash3.y * 6.0 * pn * wash * (1.0 - wash));
     }
     let inv = fill.w * S.blacks.w;
-    let ink = vec2<f32>(max(ink4.x, ink4.z * (1.0 - inv)), max(ink4.y, ink4.w * inv));
+    var ink = vec2<f32>(max(ink4.x, ink4.z * (1.0 - inv)), max(ink4.y, ink4.w * inv));
+    if (S.paper16.x > 0.0 && !sky) {
+        // Restrained white lines in black (E067): the dark line fades out as the black closes
+        // in, a gap, then a white line fades in only over (nearly) solid black. It is the
+        // line's core only (thinner than the dark lines), light grey rather than paper
+        // (S.paper16.x), and broken and varied in weight by world-anchored noise
+        // (S.paper16.z), so it reads as a drawn white line or scratch, not an outline.
+        let blk = fill.w;
+        let dark_fade = 1.0 - smoothstep(0.3, 0.65, blk);
+        let wf = smoothstep(0.8, 1.0, blk) * S.blacks.w;
+        let wp = G.camera_pos.xyz + ray * dist;
+        let nb = 0.6 * vnoise3(0x4f1bbcdcu, wp / 0.7) + 0.4 * vnoise3(0x1c8e9f2du, wp / 0.2);
+        let brk = smoothstep(S.paper16.z - 0.08, S.paper16.z + 0.08, nb);
+        let core = saturate((ink4.w - S.paper16.y) / max(1.0 - S.paper16.y, 1e-3));
+        let wl = core * wf * brk * (0.55 + 0.45 * nb);
+        ink = vec2<f32>(max(ink4.x, ink4.z * dark_fade), max(ink4.y, wl * S.paper16.x));
+    }
     let view = G.flags.x;
 
     var c: vec3<f32>;
