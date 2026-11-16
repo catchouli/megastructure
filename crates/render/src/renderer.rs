@@ -452,6 +452,12 @@ pub struct Renderer {
     /// Spatial chunks of the index buffer and of `strokes` (E069).
     chunks: Vec<crate::cull::Chunk>,
     stroke_chunks: Vec<crate::cull::Chunk>,
+    scene_stroke_chunks: Option<Vec<crate::cull::Chunk>>,
+    /// Portal visibility (E072) and the spaces found visible in the last frame (None: no
+    /// portal culling this frame).
+    portals: crate::cull::Portals,
+    visible_spaces: Option<std::collections::HashMap<u32, [f32; 4]>>,
+    portal_culling: bool,
     culling: bool,
     /// Incremented on every upload; with the cascade matrix it keys the cached far cascade.
     scene_gen: u64,
@@ -567,6 +573,13 @@ impl Renderer {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
+        // Point sampler for gathering shadow-map texels in the soft-shadow blocker search (E071).
+        let shadow_point = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sun shadow gather"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
         let shadow_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sun shadow uniform"),
             size: std::mem::size_of::<ShadowGpu>() as u64,
@@ -664,6 +677,12 @@ impl Renderer {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
@@ -681,6 +700,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&paper_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&paper_sampler) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&shade_view) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&shadow_point) },
             ],
         });
         let shadow_mat_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -943,6 +963,10 @@ impl Renderer {
             strokes: Vec::new(),
             chunks: Vec::new(),
             stroke_chunks: Vec::new(),
+            scene_stroke_chunks: None,
+            portals: crate::cull::Portals::default(),
+            visible_spaces: None,
+            portal_culling: true,
             culling: true,
             scene_gen: 0,
             far_cascade_cache: None,
@@ -1069,6 +1093,24 @@ impl Renderer {
         self.far_cascade_cache = None;
     }
 
+    /// The scene's portals and the boxes that locate the camera in a space (E072): with them
+    /// the main passes and strokes draw only spaces visible through portals. Call after
+    /// `upload_scene`; scenes without them (empty slices) are culled by frustum only.
+    pub fn set_visibility(&mut self, portals: &[mega_gen::ScenePortal], boxes: &[mega_gen::SpaceBox]) {
+        self.portals = crate::cull::Portals::new(portals, boxes);
+    }
+
+    /// Portal culling on or off (on by default; only acts when `set_visibility` was given
+    /// portals). The image is the same either way.
+    pub fn set_portal_culling(&mut self, on: bool) {
+        self.portal_culling = on;
+    }
+
+    /// Spaces the portal flood reached in the last frame, or None if it did not run.
+    pub fn visible_space_count(&self) -> Option<usize> {
+        self.visible_spaces.as_ref().map(|v| v.len())
+    }
+
     /// Triangles drawn in the last frame: `[main, cascade 0, 1, 2, 3]` (a cached cascade
     /// counts 0), and the number of spatial chunks.
     pub fn drawn_triangles(&self) -> ([u32; 1 + SHADOW_CASCADES], usize) {
@@ -1148,8 +1190,15 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&mesh.vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             }));
-            // Indices regrouped into spatial chunks for culling (E069).
-            let (indices, chunks) = crate::cull::chunk_triangles(mesh);
+            // Chunks for culling: the scene's own (per space, E072) when it has them, else the
+            // indices regrouped on a grid (E069).
+            let (indices, chunks) = if mesh.chunks.is_empty() {
+                crate::cull::chunk_triangles(mesh)
+            } else {
+                let (c, sc) = crate::cull::scene_chunks(mesh);
+                self.scene_stroke_chunks = Some(sc);
+                (mesh.indices.clone(), c)
+            };
             self.chunks = chunks;
             self.index_buf = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("indices"),
@@ -1169,9 +1218,13 @@ impl Renderer {
         self.bounce_job = None;
         self.bounce_shown = None;
         self.bounds = mesh.bounds().map(|(lo, hi)| (Vec3::from(lo), Vec3::from(hi)));
-        let (strokes, stroke_chunks) = crate::cull::chunk_strokes(&mesh.strokes);
+        let (strokes, stroke_chunks) = match self.scene_stroke_chunks.take() {
+            Some(sc) => (mesh.strokes.clone(), sc),
+            None => crate::cull::chunk_strokes(&mesh.strokes),
+        };
         self.strokes = strokes;
         self.stroke_chunks = stroke_chunks;
+        self.portals = crate::cull::Portals::default();
         self.stroke_buf = storage_buffer(&self.device, "strokes", &self.strokes);
         self.scene_gen += 1;
         self.far_cascade_cache = None;
@@ -1277,9 +1330,14 @@ impl Renderer {
         let fade_end = self.preset.rank_fade_end;
         let reach = fade_end.iter().cloned().fold(0.0f32, f32::max);
         let cull = self.culling;
+        // Portal visibility for this frame (E072), used by the strokes here and the main
+        // passes in `render`.
+        self.visible_spaces = if cull && self.portal_culling && !self.portals.is_empty() { self.portals.visible(view_proj, eye) } else { None };
+        let vis = &self.visible_spaces;
         for c in &self.stroke_chunks {
-            // Whole chunks: outside the frustum, or farther than any rank draws (E069).
-            if cull && (!crate::cull::box_in_planes(&planes, c.lo, c.hi) || crate::cull::box_distance(eye, c.lo, c.hi) > reach) {
+            // Whole chunks: outside the frustum or the visible spaces, or farther than any rank
+            // draws (E069, E072).
+            if cull && (!space_visible(vis, c.space) || !crate::cull::box_in_planes(&planes, c.lo, c.hi) || crate::cull::box_distance(eye, c.lo, c.hi) > reach) {
                 continue;
             }
         for i in c.start as usize..(c.start + c.count) as usize {
@@ -1402,10 +1460,12 @@ impl Renderer {
             })
         };
 
-        // Chunks in the camera frustum, for the main passes (E069).
+        // Chunks in the camera frustum and in a space the portal flood reached, for the main
+        // passes (E069, E072).
         let main_runs = if self.culling {
             let planes = crate::cull::frustum_planes(view_proj, 1.0);
-            crate::cull::visible_runs(&self.chunks, |c| crate::cull::box_in_planes(&planes, c.lo, c.hi))
+            let vis = &self.visible_spaces;
+            crate::cull::visible_runs(&self.chunks, |c| space_visible(vis, c.space) && crate::cull::box_in_planes(&planes, c.lo, c.hi))
         } else {
             vec![(0, self.index_count)]
         };
@@ -1694,5 +1754,14 @@ mod tests {
         for r in 0..4 {
             assert!(p.rank_fade_start[r] < p.rank_fade_end[r]);
         }
+    }
+}
+
+/// Whether a chunk's space was reached by the portal flood (always, with no flood or for grid
+/// chunks).
+fn space_visible(vis: &Option<std::collections::HashMap<u32, [f32; 4]>>, space: u32) -> bool {
+    match vis {
+        None => true,
+        Some(v) => space == crate::cull::ANY_SPACE || v.contains_key(&space),
     }
 }

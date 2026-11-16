@@ -646,6 +646,7 @@ struct ShadowU {
 @group(1) @binding(3) var paper_tex: texture_2d_array<f32>;
 @group(1) @binding(4) var paper_smp: sampler;
 @group(1) @binding(5) var shade_tex: texture_2d_array<f32>;
+@group(1) @binding(6) var shadow_pt: sampler;
 
 fn shadow_size() -> f32 {
     return f32(textureDimensions(shadow_tex).x);
@@ -961,13 +962,16 @@ fn shade_cov(L: f32, uv: vec2<f32>, pn: f32, gu: f32, gv: f32, duvx: vec2<f32>, 
             let st = q / 512.0 + vec2<f32>(u01(pcg(h ^ 1u)), u01(pcg(h ^ 2u)));
             let gx = (rot * duvx / c) / 512.0;
             let gy = (rot * duvy / c) / 512.0;
-            let hi = textureSampleGrad(shade_tex, paper_smp, st, i32(fl), gx, gy).x;
-            var lo_c = 0.0;
-            if (fl >= 1.0) {
-                lo_c = textureSampleGrad(shade_tex, paper_smp, st, i32(fl) - 1, gx, gy).x;
+            // L in (fl, fl + 1]: from level fl (layer fl - 1) to level fl + 1 (layer fl). At a
+            // whole level only one layer is sampled (E071).
+            var c = 0.0;
+            if (fr > 0.0) {
+                c = fr * textureSampleGrad(shade_tex, paper_smp, st, i32(fl), gx, gy).x;
             }
-            // L in (fl, fl + 1]: from level fl (layer fl - 1) to level fl + 1 (layer fl).
-            cov += w * mix(lo_c, hi, fr);
+            if (fl >= 1.0 && fr < 1.0) {
+                c += (1.0 - fr) * textureSampleGrad(shade_tex, paper_smp, st, i32(fl) - 1, gx, gy).x;
+            }
+            cov += w * c;
         }
     }
     return cov * aniso;
@@ -1049,7 +1053,6 @@ fn soft_sun(p: vec3<f32>, n: vec3<f32>, s: vec3<f32>, hard: f32, hard_cascade: f
     var bsum = 0.0;
     var bn = 0.0;
     let slack = 2.0 * abs(dot(plane3.xy, vec2<f32>(1.0) / size)) + 1e-5;
-    let maxc = vec2<i32>(i32(size) - 1);
     for (var j = -1; j <= 1; j++) {
         for (var i = -1; i <= 1; i++) {
             let o = vec2<f32>(f32(i), f32(j)) * rs;
@@ -1057,10 +1060,14 @@ fn soft_sun(p: vec3<f32>, n: vec3<f32>, s: vec3<f32>, hard: f32, hard_cascade: f
             let st = l3.xy * size + o - 0.5;
             let b0 = floor(st);
             let f = st - b0;
+            // The four texels around the tap in one gather (E071): at the shared corner of
+            // texels b0 and b0 + 1, x = (0, 1), y = (1, 1), z = (1, 0), w = (0, 0).
+            let gz = textureGather(shadow_tex, shadow_pt, (b0 + 1.0) / size, 3);
+            let zs = array<f32, 4>(gz.w, gz.z, gz.x, gz.y);
             for (var k = 0; k < 4; k++) {
                 let d = vec2<i32>(k & 1, k >> 1);
                 let wt = select(1.0 - f.x, f.x, d.x == 1) * select(1.0 - f.y, f.y, d.y == 1);
-                let z = textureLoad(shadow_tex, clamp(vec2<i32>(b0) + d, vec2<i32>(0), maxc), 3, 0);
+                let z = zs[k];
                 if (z < zr - slack) {
                     bsum += wt * (zr - z);
                     bn += wt;
@@ -1108,10 +1115,13 @@ fn soft_pcf(ci: u32, p: vec3<f32>, n: vec3<f32>, s: vec3<f32>, r: f32, dpx: vec3
     let plane = cascade_plane(ci, dpx, dpy, cascade_w(ci, p));
     var v = 0.0;
     var ws = 0.0;
-    for (var j = -2; j <= 2; j++) {
-        for (var i = -2; i <= 2; i++) {
-            let o = vec2<f32>(f32(i), f32(j)) * 0.5 * max(r, 0.5) / size;
-            let wt = f32(3 - abs(i)) * f32(3 - abs(j));
+    // S.paper18.w 1: a cheaper 3x3 tent over the same radius (E071 option, not default).
+    let k = select(2, 1, S.paper18.w > 0.5);
+    let step_r = select(0.5, 1.0, S.paper18.w > 0.5);
+    for (var j = -k; j <= k; j++) {
+        for (var i = -k; i <= k; i++) {
+            let o = vec2<f32>(f32(i), f32(j)) * step_r * max(r, 0.5) / size;
+            let wt = f32(k + 1 - abs(i)) * f32(k + 1 - abs(j));
             v += wt * textureSampleCompareLevel(shadow_tex, shadow_cmp, l.xy + o, i32(ci), l.z + dot(plane.xy, o));
             ws += wt;
         }
@@ -1349,12 +1359,33 @@ fn fs_main(in: VsOut) -> FsOut {
 
     // Sun shadow: the filtered visibility is turned into a hard edge at its 0.5 iso-line,
     // anti-aliased over one pixel from its own screen gradient.
-    let sv = sun_visibility(p, n, s, dpdx(p), dpdy(p));
+    // Faces turned away from the sun take no cast shadow (facing is 0 below), so the shadow
+    // maps are not read there (E071). ndl is constant over a flat face, so every pixel of a
+    // quad decides alike and the derivative of sv below stays valid.
+    var sv = vec2<f32>(1.0, 0.0);
+    let sdpx = dpdx(p);
+    let sdpy = dpdy(p);
+    if (ndl > 0.05 || G.sun_params.y <= 0.0 || G.flags.x == VIEW_SHADOW) {
+        sv = sun_visibility(p, n, s, sdpx, sdpy);
+    }
     let gsv = length(vec2<f32>(dpdx(sv.x), dpdy(sv.x)));
     var vis = select(step(0.5, sv.x), saturate((sv.x - 0.5) / gsv + 0.5), gsv > 1e-5);
     let dpx_p = dpdx(p);
     let dpy_p = dpdy(p);
-    if (S.paper3.y > 0.0 && SH.params.x > 0.5 && ndl > 0.05) {
+    // Where both the lit and the shadowed light are already below the black point the
+    // surface is solid black whatever the shadow does (far mode, wash), so the soft edge is not
+    // computed (E071). The darkening factor is the one applied to the tone below.
+    var shade_matters = true;
+    if (S.paper15.y > 0.0 && S.wash.x > 0.0 && S.rule.x > 0.5 && S.paper9.x > 0.5 && G.flags.x != VIEW_SHADOW) {
+        var dk = 1.0;
+        if (S.fall.w > 0.0) { dk *= pow(max(ao, 1e-3), S.fall.w); }
+        if (S.dark.y > 0.0) { dk *= exp(-max(rr - S.dark.x, 0.0) / S.dark.y); }
+        if (S.wash3.w > 0.0) { dk *= exp(-max(G.camera_pos.y - p.y, 0.0) / S.wash3.w); }
+        // Upper bound of the lit light before the attached-shadow blend (indication is off
+        // in this mode only if S.shadow2.z is 0, checked too).
+        shade_matters = S.shadow2.z > 0.0 || max(lit, dark) * dk > S.paper15.x;
+    }
+    if (shade_matters && S.paper3.y > 0.0 && SH.params.x > 0.5 && ndl > 0.05) {
         vis = soft_sun(p, n, s, vis, sv.y, dpx_p, dpy_p);
     }
     let cast_sh = (1.0 - vis) * S.fog2.y;
@@ -1424,7 +1455,10 @@ fn fs_main(in: VsOut) -> FsOut {
     FDPX = dpdx(p);
     FDPY = dpdy(p);
     var near_shadow = amount > 0.0;
-    if (!near_shadow && S.feather.z > 0.0 && S.fog2.y > 0.0 && facing > 0.5) {
+    // The feathered-edge test only matters where shadow strokes are drawn (not with the far
+    // pencil, which draws none; E071).
+    let needs_feather = !(S.rule.x > 0.5 && S.paper9.x > 0.5);
+    if (needs_feather && !near_shadow && S.feather.z > 0.0 && S.fog2.y > 0.0 && facing > 0.5) {
         near_shadow = sun_vis_cheap(p + sax * S.feather.z) < 0.99 || sun_vis_cheap(p - sax * S.feather.z) < 0.99;
     }
     // Continuous tone models: the light, darkened with depth into the structure (ao) and
@@ -1550,12 +1584,17 @@ fn fs_main(in: VsOut) -> FsOut {
         if (cf > 0.0) {
             w0 = 1.0 - (1.0 - w0) * (1.0 - cf * S.paper10.y);
         }
-        let tt = screentone_t(in.clip.xy, dv, p, vec2<f32>(u1, u2), vec2<f32>(lod1, lod_v1), dot(p, n));
-        // The threshold's ramp: one pixel of the threshold map (hard, two-level grain), or
-        // with screentone_soft a ramp that wide in threshold units, so the grain becomes a
-        // continuous modulation of the grey with no hard edges (E036).
-        let ht = saturate((w0 - tt) / max(max(fwidth(tt), 0.05), S.grain.x) + 0.5);
-        wash = mix(w0, ht, S.wash2.y);
+        wash = w0;
+        // Screentone only when asked for (E071: it was evaluated, and discarded, on every
+        // pixel). The branch is on a uniform, so fwidth stays in uniform control flow.
+        if (S.wash2.y > 0.0) {
+            let tt = screentone_t(in.clip.xy, dv, p, vec2<f32>(u1, u2), vec2<f32>(lod1, lod_v1), dot(p, n));
+            // The threshold's ramp: one pixel of the threshold map (hard, two-level grain), or
+            // with screentone_soft a ramp that wide in threshold units, so the grain becomes a
+            // continuous modulation of the grey with no hard edges (E036).
+            let ht = saturate((w0 - tt) / max(max(fwidth(tt), 0.05), S.grain.x) + 0.5);
+            wash = mix(w0, ht, S.wash2.y);
+        }
         // Blacks (E066): where the total light is very low (below S.paper15.x plus a range
         // S.paper15.y that varies by patch), the wash closes to solid ink and the fragment
         // counts as solid black, so contours and strokes turn white over it and specks
@@ -1563,9 +1602,15 @@ fn fs_main(in: VsOut) -> FsOut {
         // clamped well above it), so its shadows stay grey.
         if (S.paper15.y > 0.0) {
             let lb = mix(lit_t, dark_t, amount);
-            let tb = 0.65 * vnoise3(0x27d4eb2fu, p / 3.0) + 0.35 * vnoise3(0x165667b1u, p / 1.3);
-            let edge = S.paper15.x + S.paper15.y * mix(1.0, 0.4 + 1.2 * tb, S.paper15.z);
-            let bk = 1.0 - smoothstep(S.paper15.x, max(edge, S.paper15.x + 1e-3), lb);
+            // The patch noise only where black can occur: the edge is at most point + range *
+            // max(1, 1.6) (E071).
+            var tb = 0.5;
+            var bk = 0.0;
+            if (lb < S.paper15.x + S.paper15.y * 1.6) {
+                tb = 0.65 * vnoise3(0x27d4eb2fu, p / 3.0) + 0.35 * vnoise3(0x165667b1u, p / 1.3);
+                let edge = S.paper15.x + S.paper15.y * mix(1.0, 0.4 + 1.2 * tb, S.paper15.z);
+                bk = 1.0 - smoothstep(S.paper15.x, max(edge, S.paper15.x + 1e-3), lb);
+            }
             wash = 1.0 - (1.0 - wash) * (1.0 - bk);
             SPECK_BLACK = max(t.black, smoothstep(0.6, 0.95, bk));
             // Surface inside the black (E068, S.paper17.z): a faint sheen of the pencil tile's

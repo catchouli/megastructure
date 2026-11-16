@@ -22,7 +22,12 @@ pub struct Chunk {
     pub count: u32,
     pub lo: Vec3,
     pub hi: Vec3,
+    /// The scene's space id ([`ANY_SPACE`] for grid chunks, which portal culling never drops).
+    pub space: u32,
 }
+
+/// Space id of a grid chunk: visible whatever the portal flood finds.
+pub const ANY_SPACE: u32 = u32::MAX - 1;
 
 fn cell_of(p: Vec3) -> (i32, i32, i32) {
     ((p.x / CHUNK_CELL).floor() as i32, (p.y / CHUNK_CELL).floor() as i32, (p.z / CHUNK_CELL).floor() as i32)
@@ -50,7 +55,7 @@ pub fn chunk_triangles(mesh: &MeshData) -> (Vec<u32>, Vec<Chunk>) {
                 indices.push(i);
             }
         }
-        chunks.push(Chunk { start, count: indices.len() as u32 - start, lo, hi });
+        chunks.push(Chunk { start, count: indices.len() as u32 - start, lo, hi, space: ANY_SPACE });
     }
     (indices, chunks)
 }
@@ -76,9 +81,140 @@ pub fn chunk_strokes(strokes: &[Stroke]) -> (Vec<Stroke>, Vec<Chunk>) {
             }
             out.push(s);
         }
-        chunks.push(Chunk { start, count: out.len() as u32 - start, lo, hi });
+        chunks.push(Chunk { start, count: out.len() as u32 - start, lo, hi, space: ANY_SPACE });
     }
     (out, chunks)
+}
+
+/// The scene's own chunks (per space, from the generator), as index and stroke chunks.
+pub fn scene_chunks(mesh: &MeshData) -> (Vec<Chunk>, Vec<Chunk>) {
+    let tri = mesh.chunks.iter().map(|c| Chunk { start: c.index_start, count: c.index_count, lo: Vec3::from(c.min), hi: Vec3::from(c.max), space: c.space }).collect();
+    let st = mesh.chunks.iter().map(|c| Chunk { start: c.stroke_start, count: c.stroke_count, lo: Vec3::from(c.min), hi: Vec3::from(c.max), space: c.space }).collect();
+    (tri, st)
+}
+
+/// Portal visibility (E072): spaces, the portals between them, and boxes to locate the
+/// camera. Built once per scene.
+#[derive(Default)]
+pub struct Portals {
+    portals: Vec<mega_gen::ScenePortal>,
+    by_space: HashMap<u32, Vec<usize>>,
+    boxes: Vec<mega_gen::SpaceBox>,
+}
+
+/// A screen rectangle in NDC: x0, y0, x1, y1.
+type Rect = [f32; 4];
+
+const FULL: Rect = [-1.0, -1.0, 1.0, 1.0];
+
+fn intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let r = [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+    (r[0] < r[2] && r[1] < r[3]).then_some(r)
+}
+
+fn contains(a: Rect, b: Rect) -> bool {
+    a[0] <= b[0] && a[1] <= b[1] && a[2] >= b[2] && a[3] >= b[3]
+}
+
+impl Portals {
+    pub fn new(portals: &[mega_gen::ScenePortal], boxes: &[mega_gen::SpaceBox]) -> Self {
+        let mut by_space: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (i, p) in portals.iter().enumerate() {
+            by_space.entry(p.a).or_default().push(i);
+            by_space.entry(p.b).or_default().push(i);
+        }
+        Self { portals: portals.to_vec(), by_space, boxes: boxes.to_vec() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.boxes.is_empty() || self.portals.is_empty()
+    }
+
+    /// The spaces whose boxes contain `eye`, each box widened by `pad` metres (so a camera
+    /// straddling a doorway counts as in both spaces).
+    pub fn spaces_at(&self, eye: Vec3, pad: f32) -> Vec<u32> {
+        let mut out: Vec<u32> = self
+            .boxes
+            .iter()
+            .filter(|b| (0..3).all(|i| eye[i] >= b.min[i] - pad && eye[i] <= b.max[i] + pad))
+            .map(|b| b.space)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The portal's screen rectangle, clipped to the screen; the whole screen if any corner is
+    /// at or behind the near plane (conservative), None if it is entirely behind.
+    fn rect(view_proj: Mat4, q: &[[f32; 3]; 4]) -> Option<Rect> {
+        let mut r = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        let mut behind = 0;
+        let mut near = false;
+        for c in q {
+            let p = view_proj * Vec3::from(*c).extend(1.0);
+            if p.w <= 0.0 {
+                behind += 1;
+                near = true;
+                continue;
+            }
+            if p.w < 0.2 {
+                near = true;
+            }
+            let (x, y) = (p.x / p.w, p.y / p.w);
+            r = [r[0].min(x), r[1].min(y), r[2].max(x), r[3].max(y)];
+        }
+        if behind == 4 {
+            return None;
+        }
+        if near {
+            return Some(FULL);
+        }
+        intersect(r, FULL)
+    }
+
+    /// Spaces visible from `eye` through portals inside the camera frustum: a flood from the
+    /// camera's spaces, each portal narrowing the screen rectangle seen through it. None when
+    /// the camera is in no space (flying outside, inside a wall): then nothing is culled by
+    /// portals.
+    pub fn visible(&self, view_proj: Mat4, eye: Vec3) -> Option<HashMap<u32, Rect>> {
+        let start = self.spaces_at(eye, 0.3);
+        if start.is_empty() {
+            return None;
+        }
+        let mut seen: HashMap<u32, Rect> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        for s in start {
+            seen.insert(s, FULL);
+            queue.push_back(s);
+        }
+        let mut steps = 0;
+        while let Some(s) = queue.pop_front() {
+            steps += 1;
+            if steps > 20000 {
+                break;
+            }
+            let rs = seen[&s];
+            let Some(list) = self.by_space.get(&s) else { continue };
+            for &i in list {
+                let p = &self.portals[i];
+                let other = if p.a == s { p.b } else { p.a };
+                let Some(pr) = Self::rect(view_proj, &p.quad) else { continue };
+                let Some(r) = intersect(rs, pr) else { continue };
+                match seen.get_mut(&other) {
+                    Some(o) if contains(*o, r) => {}
+                    Some(o) => {
+                        *o = [o[0].min(r[0]), o[1].min(r[1]), o[2].max(r[2]), o[3].max(r[3])];
+                        queue.push_back(other);
+                    }
+                    None => {
+                        seen.insert(other, r);
+                        queue.push_back(other);
+                    }
+                }
+            }
+        }
+        Some(seen)
+    }
 }
 
 fn corners(lo: Vec3, hi: Vec3) -> [Vec4; 8] {
@@ -167,7 +303,7 @@ mod tests {
 
     #[test]
     fn runs_merge_adjacent_chunks() {
-        let c = |s, n| Chunk { start: s, count: n, lo: Vec3::ZERO, hi: Vec3::ZERO };
+        let c = |s, n| Chunk { start: s, count: n, lo: Vec3::ZERO, hi: Vec3::ZERO, space: ANY_SPACE };
         let ch = [c(0, 3), c(3, 6), c(9, 3), c(12, 3)];
         let mut k = 0;
         let runs = visible_runs(&ch, |_| {

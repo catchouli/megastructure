@@ -834,6 +834,21 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Result: plan 128 / 874 / 2,270 / 133 ms; triangles 437k / 546k / 609k / 543k; bounce bake 1.8 to 3.9 s (noisy). The same seven set pieces spread thinner over a bigger region: the spaces barely increase and passages get longer, so plan time grows with route length. More storeys only stretch the tall spaces.
 - Verdict: region size is a parameter; real growth needs districts (L0, L1) with their own set pieces, generated lazily.
 
+## E071: Cheaper forward fragments, same picture
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Fragment cost")
+- Question: bring the labyrinth landmarks to about 7 ms at 3024x1832 (from 9.5 to 10.9) without changing the picture.
+- Setup: worked in a git worktree of 9b436f6 (the generator was mid-edit and its scene changed between builds, which first showed as a 225k-pixel "difference" in the undercroft). Timing: `--timing` now reports the per-pass minimum over the frames, and binaries were compared interleaved, min of 4 runs of 60 frames each (other agents were benchmarking on the same GPU). Steps, each image-diffed against the previous build on `lab_spawn`, `lab_far_ledge_axis`, `lab_undercroft_shaft`, `lab_corridor_slot`, `lab_void_bottom_up`, `lab_hall_exterior_end`, `shaft_spawn`, `shaft_stair_below`, `shaft_gallery_down`: (1) screentone and the feathered-edge test skipped when unused; (2) soft shadow skipped below the black point, gathered blocker search, single pencil sample at whole levels; (3) no shadow-map reads on faces turned from the sun, black-patch noise only where black can occur.
+- Result (frame / forward at 3024x1832, min): base 9.3 to 10.6 / 7.5 to 8.8 ms; step 1 7.5 to 8.8 / 5.7 to 7.0; step 2 7.3 to 8.4 / 5.6 to 6.6; step 3 6.7 to 8.1 / 4.9 to 6.3. All steps identical except one pixel by one level. Not taken (changes the picture): `shadow_soft_fast` (3x3 penumbra) saves 0.25 to 0.45 ms more; a shared pencil sample in black about 0.3 ms. Remaining on the undercroft: soft shadows 1.9 ms, pencil 1.0, paper 0.5, black sheen 0.5, player light 0.3; strokes and contours 1.6.
+- Verdict: kept; three of five views under 7 ms, the undercroft and void-bottom views 7.5 to 8.0 ms.
+
+## E072: Portal visibility
+- Date: 2026-11-16
+- Feature: `features/ink-renderer.md` ("Portal visibility")
+- Setup: the generator's per-space chunks, portals and space boxes (20a1828); a flood from the camera's spaces through portals, narrowing a screen rectangle; frustum test on top; cascades unchanged. `Renderer::set_visibility`; one line in `crates/game/src/app.rs` and in the capture tool. Image check portals on against off at 960x540 on all 22 labyrinth landmarks (views through the arch, windows and grilles, up light shafts, in a duct) and 9 frames each of `lab_axis_walk` and `lab_corridor_walk`.
+- Result: identical on 16 landmarks and all walk frames but one pixel; up to 4 pixels on five; 198 pixels by at most 4 levels on `lab_corridor_vaulted` (a far-side stroke that reached through a crease no longer drawn). Visible spaces 2 to 20, main pass 0.4 to 38% of 437k triangles. GPU frame 0.05 to 0.2 ms faster (frame 6.6 to 8.0 ms at 3024x1832, 4.7 to 5.5 ms at 2560x1440 with the 0.6 player light). Motion unchanged (`lab_axis_walk` 0.142 against 0.141).
+- Verdict: on. Next: cull shadow casters by the sun's `OUTSIDE` portals; finer chunks in large spaces for the cascades.
+
 ## Queued
 
 

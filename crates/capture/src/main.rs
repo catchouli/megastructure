@@ -53,10 +53,12 @@ OPTIONS:
     --shadow-filter <M>  diagnostic shadow map filter: smooth (default), bilinear, hard
     --depth-tol <X>  override the preset's stroke depth tolerance
     --bench <N>      render one frame N times without readback and print ms per frame
-    --timing         with --bench: print the median GPU time per pass (timestamp queries)
+    --timing         with --bench: print the minimum GPU time per pass over the frames
+                     (timestamp queries)
     --prepass        draw a depth prepass first (off by default; no gain on Apple GPUs, E069)
     --no-prepass     no depth prepass (the default)
     --no-cull        diagnostic: draw every triangle in every pass (as before E069)
+    --no-portals     diagnostic: frustum culling only, no portal visibility (E072)
     --width <W>      image width in pixels, default 1280
     --height <H>     image height in pixels, default 720
     --list-paths     print the available path names (with their scenes) and exit
@@ -110,6 +112,7 @@ struct Args {
     no_prepass: bool,
     prepass: bool,
     no_cull: bool,
+    no_portals: bool,
 }
 
 #[derive(Default)]
@@ -155,6 +158,7 @@ fn parse_args() -> Result<Option<Args>> {
     let mut no_prepass = false;
     let mut prepass = false;
     let mut no_cull = false;
+    let mut no_portals = false;
     let mut camera: Option<mega_render::Camera> = None;
     fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
         it.next().ok_or_else(|| anyhow!("{flag} needs a value"))
@@ -237,6 +241,7 @@ fn parse_args() -> Result<Option<Args>> {
             "--no-prepass" => no_prepass = true,
             "--prepass" => prepass = true,
             "--no-cull" => no_cull = true,
+            "--no-portals" => no_portals = true,
             "--no-png" => png = false,
             "--error-png" => error_png = true,
             "--stroke-vis" => {
@@ -301,7 +306,7 @@ fn parse_args() -> Result<Option<Args>> {
             bail!("--sun-dist must be positive");
         }
     }
-    Ok(Some(Args { path, camera, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol, sets, sun, shadow_filter, centre_ink, timing, no_prepass, prepass, no_cull }))
+    Ok(Some(Args { path, camera, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol, sets, sun, shadow_filter, centre_ink, timing, no_prepass, prepass, no_cull, no_portals }))
 }
 
 fn main() {
@@ -371,6 +376,7 @@ fn run() -> Result<()> {
         scene.colliders.len()
     );
     renderer.upload_scene(&scene.mesh);
+    renderer.set_visibility(&scene.portals, &scene.space_boxes);
     renderer.set_preset(args.preset.clone().unwrap_or_else(|| StylePreset::for_scene(&args.scene)));
     let base_sun = Sun::for_scene(&args.scene);
     let centre = scene.mesh.bounds().map(|(lo, hi)| (glam::Vec3::from(lo) + glam::Vec3::from(hi)) * 0.5).unwrap_or_default();
@@ -386,6 +392,7 @@ fn run() -> Result<()> {
     renderer.set_shadow_filter(args.shadow_filter);
     renderer.set_depth_prepass(args.prepass && !args.no_prepass);
     renderer.set_culling(!args.no_cull);
+    renderer.set_portal_culling(!args.no_portals);
     // The bounce bake runs in the background; captures wait for it so every frame is final.
     renderer.wait_for_bounce();
     if let Some(ms) = renderer.bounce_bake_ms() {
@@ -447,7 +454,8 @@ fn run() -> Result<()> {
             if !renderer.enable_timing() {
                 bail!("--timing: this adapter has no timestamp queries");
             }
-            // Per pass, the median over n frames, each submitted and read back on its own.
+            // Per pass, the minimum over n frames (median with MEGA_TIMING_MEDIAN), each
+            // submitted and read back on its own.
             let mut samples: Vec<Vec<(&str, f64)>> = Vec::new();
             for _ in 0..n {
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("timing") });
@@ -466,12 +474,19 @@ fn run() -> Result<()> {
                     continue;
                 }
                 v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let med = v[v.len() / 2];
+                // The minimum: other work sharing the GPU only ever adds time (E071).
+                let med = if std::env::var("MEGA_TIMING_MEDIAN").is_ok() { v[v.len() / 2] } else { v[0] };
                 total += med;
                 line += &format!(" {} {:.3}", samples[0][k].0, med);
             }
             let (d, nch) = renderer.drawn_triangles();
-            println!("{line}; sum {total:.3} ms; triangles drawn main {} cascades {:?} of {} in {nch} chunks", d[0], &d[1..], renderer.triangle_count());
+            println!(
+                "{line}; sum {total:.3} ms; triangles drawn main {} cascades {:?} of {} in {nch} chunks; visible spaces {:?}",
+                d[0],
+                &d[1..],
+                renderer.triangle_count(),
+                renderer.visible_space_count()
+            );
             return Ok(());
         }
         run(10.min(n), &mut renderer)?; // warm-up

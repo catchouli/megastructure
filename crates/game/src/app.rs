@@ -33,6 +33,7 @@ impl App {
         renderer.set_preset(preset);
         renderer.set_sun(Sun::for_scene(scene.name));
         renderer.upload_scene(&scene.mesh);
+        renderer.set_visibility(&scene.portals, &scene.space_boxes);
         Self { sim: Sim::for_scene(scene, mode), renderer, scene_name: scene.name, preset_name }
     }
 

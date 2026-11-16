@@ -497,6 +497,9 @@ pub struct StylePreset {
     pub player_radius: f32,
     /// Its falloff exponent (higher: a smaller bright core, a longer dim tail).
     pub player_falloff: f32,
+    /// 1: soft shadow edges filtered with a 3x3 tent instead of 5x5 (cheaper, slightly coarser
+    /// penumbra; E071 option). 0 the 5x5.
+    pub shadow_soft_fast: f32,
 }
 
 impl StylePreset {
@@ -696,6 +699,7 @@ impl StylePreset {
             player_light: 0.0,
             player_radius: 8.0,
             player_falloff: 1.5,
+            shadow_soft_fast: 0.0,
         }
     }
 
@@ -757,7 +761,7 @@ impl StylePreset {
             paper15: [self.black_point, self.black_range, self.black_patch, 0.0],
             paper16: [self.white_line_tone, self.white_line_core, self.white_line_break, 0.0],
             paper17: [self.speck_tone, self.speck_soft, self.black_texture, 0.0],
-            paper18: [self.player_light, self.player_radius, self.player_falloff, 0.0],
+            paper18: [self.player_light, self.player_radius, self.player_falloff, self.shadow_soft_fast],
         }
     }
 }
@@ -1295,6 +1299,7 @@ impl StylePreset {
         "player_light",
         "player_radius",
         "player_falloff",
+        "shadow_soft_fast",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1481,6 +1486,7 @@ impl StylePreset {
             "player_light" => self.player_light = num(value)?,
             "player_radius" => self.player_radius = num(value)?,
             "player_falloff" => self.player_falloff = num(value)?,
+            "shadow_soft_fast" => self.shadow_soft_fast = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,

@@ -78,7 +78,7 @@ struct Style {
     paper15: vec4<f32>,         // black point (light), black range, black patchiness
     paper16: vec4<f32>,         // white line tone (0: old full white lines), white line core threshold, white line breaks
     paper17: vec4<f32>,         // speck tone (0: white), speck softness, texture inside black
-    paper18: vec4<f32>,         // player light strength, radius (m), falloff exponent
+    paper18: vec4<f32>,         // player light strength, radius (m), falloff exponent, soft shadow 3x3
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;
