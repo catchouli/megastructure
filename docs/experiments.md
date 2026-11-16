@@ -770,6 +770,54 @@ Paths beginning `<captures>/` were temporary capture output and are not kept; re
 - Motion (61 frames, 720p; 5x5 error / pops / relative pops): `lab_corridor_walk` 0.150, 0.000%, 0.003%; `lab_axis_walk` 0.112, 0.000%, 0.017%; `lab_far_ledge_yaw` 0.115, 0.004%, 0.035%; `shaft_spawn_yaw` 0.212, 0.003%; `shaft_hall_walk` 0.165, 0.001%. No shimmer at the pool's edge; lower figures largely reflect the darker image.
 - Verdict: darker as default, player light on. Question on the sheet: is the range now striking, with white as highlights and real black in the depths?
 
+## E210: The labyrinth, round 3
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md`
+- Question: after walking round 2 the owner asked that the openings along corridors lead somewhere, for vents to crawl, and for more detail, within the frame budget until culling lands; and for really dark darks. Does round 3 deliver that?
+- Setup: chunks, portals and space boxes for culling (E211); side rooms, branches and real doors (E212); vents and a crouched reachability profile (E213); a detail pass (conduits, gratings, missing panels, exposed ducts); light with no per-kind minimum and placed accents (E214). Sheet `compare/E210-labyrinth-tour.png` (full frames in `compare/E210-labyrinth-tour/`): views 1 to 6 in the scene's own shading, 7 to 18 lit for review (`--set black_range=0 --set black_point=0 --set ambient=14`, or 45 for the darkest interiors), because enclosed spaces now print black away from the player's light. Regenerate a view with `cargo run --release --bin mega_capture -- --scene labyrinth --camera <x,y,z,yaw,pitch,fov> --width 2560 --height 1440 --out <dir>`. Cameras: spawn `206,79.65,161.8,3.1416,-0.15,1.4`; hall from the arch `194,43.65,106,3.1416,0.15,1.4`; undercroft pools `95,1.65,140,0.61,-0.2,1.4`; undercroft far wall `110,1.65,128,0,0.1,1.4`; vent to a lookout grille `222,60.95,134,-1.5708,0,1.3`; vent outlet ledge `173.6,121.65,158,1.5708,-0.5,1.4`; vent interior `230,49.0,62,1.5708,0.05,1.3`; vent mouth in a corridor `190,43.65,165,0,-0.3,1.4`; vent mouth into the undercroft `90,1.65,158,0,-0.2,1.4`; side rooms `218,79.65,141.2,0,-0.2,1.4`, `170,43.65,153.2,0,-0.2,1.4`, `97.2,1.65,200,1.5708,-0.2,1.4`, `273.2,43.65,206,1.5708,-0.2,1.4`; corridor features `178,37.65,330,1.5708,0.05,1.3`; slot with conduit `214,31.65,322,1.5708,0.05,1.3`; service passage `170,37.65,82,-1.5708,0.05,1.3`; hall duct `194,43.65,106,3.1416,0.45,1.4`; void ducts `192,1.65,140,0.3,1.1,1.5`.
+- Result: 154 spaces (146 walkable), 26 side rooms, 10 vents, cycle rank 16. 437,346 triangles (1.94 times the shaft), 56,498 strokes; build 0.29 s, bounce bake 1.7 to 3.0 s; 10.9 ms a frame at 1440p from the spawn with the render crate's culling. 100 seeds pass both reachability profiles and the sight lines. In the scene's shading the passages, side rooms and vents are black, and the shafts, lit openings and void tops read as accents.
+- Verdict: kept. Question on the sheet: do the openings now lead somewhere, and do the vents feel like secrets worth finding?
+
+## E211: Culling data
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("Culling data"), `features/kit-of-parts.md`
+- Question: what does the renderer need from the generator to cull by space, and can it be added without disturbing other scenes?
+- Setup: `MeshData::chunks` (space id, bounds, contiguous index and stroke ranges, tall spaces in 36 m bands), `Scene::portals` (two space ids and a quad), `Scene::space_boxes` (boxes covering each space, for locating the camera, asked for by the render agent). Built with `MeshBuilder::set_group` and `MeshBuilder::chunk`. Test `chunks_and_portals`.
+- Result: 188 chunks, 265 portals, 1,194 boxes on the default seed; the shaft and test scenes leave them empty. A NaN normal from a vertical pipe first broke the chunk bounds check (fixed in `pipe`).
+- Verdict: kept; the render crate's culling (9b436f6) uses the chunks when present.
+
+## E212: Ways off the passages
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("Ways off the passages")
+- Question: the corridors were lined with door-sized recesses 30 cm deep that read as ways onward. Can most become real, and the rest read as shut?
+- Setup: side rooms through doors in passage walls (four kinds, some doors ajar), branches between passage sides, closed doors with leaves, studs and thresholds, raised niches, missing panels.
+- Result: on the way, a side room's door was blocked by a crossing junction's chamfer block reaching through its wall into the next cell; chamfers are now thin slabs kept inside the room. Branches hanging off spurs counted as loops and showed as cut links; they are spurs now unless both ends are on cycles. Reachability holds for all 100 seeds.
+- Verdict: kept.
+
+## E213: Vents and the crouched profile
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("Vents")
+- Question: can crawlways connect places far apart by the route, with the movement agent's crouch (capsule 0.9 by 0.3 m, step 0.45 m), and be checked by the reachability test?
+- Setup: vents routed by A* from passage sides to passage sides, into the undercroft and cistern, out onto a ledge on the void, and dead ends at grilles; `walk::Profile::CROUCH` in the flood fill; vent-only spaces checked crouched, everything else standing.
+- Result: the first pairing rule (nearest cells of two passages on different arcs) found no pairs; random nearby cells of two unlinked passages give five. The crouched check first refused the 0.3 m lip at every mouth: its lowest clearance sphere touched the step; the crouched profile now checks one sphere from 0.3 to 0.9 m plus a shin point. On the movement agent's advice, vents went from 1.2 to 1.0 m high, out of the ambiguous 1.2 to 1.7 m range. 10 vents on the default seed, 3,400 triangles; all crossed crouched on 100 seeds.
+- Verdict: kept. Not yet: a crawlable vent visibly crossing a big space.
+
+## E214: Light accents with really dark darks
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("Light")
+- Question: with the shading printing openness below about 0.12 black and closing in below 0.45, and the per-kind minimums of E209 dropped, can the dark set pieces still show their size?
+- Setup: three shafts into the undercroft (one against its far wall), two into the cistern (one over a walkway corner), shafts keeping 0.992 a storey, light dropping straight down in the undercroft and cistern (0.97 and 0.96 down, 0.62 and 0.7 sideways). Views `95,1.65,140,0.61,-0.2,1.4` and `110,1.65,128,0,0.1,1.4`.
+- Result: with the old spread the pools under the shafts stayed under the black threshold; with light dropping straight, the floor and piers round each shaft are lit and the far-wall shaft shows a lit patch at the end of the undercroft. Corridors, side rooms and vents are black away from the player's light, as asked.
+- Verdict: kept; the review sheet raises ambient for the interiors.
+
+## E215: Scaling the region
+- Date: 2026-11-16
+- Feature: `features/labyrinth.md` ("Size and growth")
+- Question: how do plan and bake times scale if the region is doubled, and what breaks?
+- Setup: `build_sized` with (96, 88, 26), (136, 124, 26), (192, 176, 26), (96, 88, 52); `cargo test --release -p mega_gen -- --ignored --nocapture labyrinth_scaling`.
+- Result: plan 128 / 874 / 2,270 / 133 ms; triangles 437k / 546k / 609k / 543k; bounce bake 1.8 to 3.9 s (noisy). The same seven set pieces spread thinner over a bigger region: the spaces barely increase and passages get longer, so plan time grows with route length. More storeys only stretch the tall spaces.
+- Verdict: region size is a parameter; real growth needs districts (L0, L1) with their own set pieces, generated lazily.
+
 ## Queued
 
 

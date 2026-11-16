@@ -43,6 +43,11 @@ pub enum SpaceKind {
     Shaft,
     /// A small room before the door of a great space.
     Antechamber,
+    /// A small dead-end room off a passage: a cell, a store room, a shrine or a machine
+    /// closet (`Room::style` 0 to 3).
+    SideRoom,
+    /// A vent: a duct 1.2 m square, crawled through; shortcuts and secrets.
+    Vent,
 }
 
 impl SpaceKind {
@@ -65,11 +70,13 @@ impl SpaceKind {
             SpaceKind::StairLanding => "stair landing",
             SpaceKind::Shaft => "light shaft",
             SpaceKind::Antechamber => "antechamber",
+            SpaceKind::SideRoom => "side room",
+            SpaceKind::Vent => "vent",
         }
     }
 
     pub fn is_passage(self) -> bool {
-        matches!(self, SpaceKind::Corridor | SpaceKind::ServicePassage)
+        matches!(self, SpaceKind::Corridor | SpaceKind::ServicePassage | SpaceKind::Vent)
     }
 
     /// Containers hold other walkable spaces (ledges) but have no floor on the route.
@@ -98,6 +105,8 @@ pub enum LinkKind {
     WallStair,
     /// The grand stair inside the great hall, up to its gallery.
     HallStair,
+    /// A vent mouth (crawled through).
+    VentMouth,
 }
 
 /// Where a space or connection sits in the structure of the graph.
@@ -130,6 +139,8 @@ pub struct Space {
     pub anchors: Vec<Vec3>,
     /// World bounds, filled in by the embedding.
     pub bounds: Option<(Vec3, Vec3)>,
+    /// Reached only by crawling (vents and the ledges they open onto).
+    pub crawl_only: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -148,7 +159,7 @@ pub struct SpaceGraph {
 
 impl SpaceGraph {
     pub fn add(&mut self, sid: impl Into<String>, kind: SpaceKind, role: Role, level: i32) -> usize {
-        self.spaces.push(Space { sid: sid.into(), kind, role, parent: None, level, set_piece: None, anchors: Vec::new(), bounds: None });
+        self.spaces.push(Space { sid: sid.into(), kind, role, parent: None, level, set_piece: None, anchors: Vec::new(), bounds: None, crawl_only: kind == SpaceKind::Vent });
         self.spaces.len() - 1
     }
 
@@ -158,7 +169,7 @@ impl SpaceGraph {
 
     /// Spaces a walker can stand in (everything but containers).
     pub fn walkable(&self) -> impl Iterator<Item = usize> + '_ {
-        self.spaces.iter().enumerate().filter(|(_, s)| !s.kind.is_container()).map(|(i, _)| i)
+        self.spaces.iter().enumerate().filter(|(_, s)| !s.kind.is_container() && s.role != Role::Container).map(|(i, _)| i)
     }
 
     pub fn degree(&self, i: usize) -> usize {

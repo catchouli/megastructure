@@ -1,7 +1,7 @@
 //! Named scenes. Binaries select a scene by name so that new scenes need no changes outside
 //! this crate.
 
-use crate::{Collider, MeshData};
+use crate::{Collider, MeshData, ScenePortal, SpaceBox};
 
 /// A scene ready to upload, with a place to put the camera or player.
 pub struct Scene {
@@ -15,6 +15,12 @@ pub struct Scene {
     /// Solids for the walking controller (boxes and stair ramps). Empty for scenes built
     /// before colliders existed (`test`).
     pub colliders: Vec<Collider>,
+    /// Openings between the spaces of `mesh.chunks`, for portal culling. Empty when the
+    /// scene has no chunks.
+    pub portals: Vec<ScenePortal>,
+    /// Boxes covering each space's interior, to find the space the camera is in. Empty when
+    /// the scene has no chunks.
+    pub space_boxes: Vec<SpaceBox>,
 }
 
 /// Names accepted by [`by_name`]. The first is the default.
@@ -31,16 +37,19 @@ pub fn by_name(name: &str) -> Option<Scene> {
             spawn: [0.0, 1.65, 2.0],
             spawn_yaw: 0.0,
             colliders: Vec::new(),
+            portals: Vec::new(),
+            space_boxes: Vec::new(),
         }),
         "shaft" => {
             let s = crate::shaft::build(crate::shaft::DEFAULT_SEED);
             let (spawn, spawn_yaw) = crate::shaft::spawn();
-            Some(Scene { name: "shaft", mesh: s.mesh, spawn, spawn_yaw, colliders: s.colliders })
+            Some(Scene { name: "shaft", mesh: s.mesh, spawn, spawn_yaw, colliders: s.colliders, portals: Vec::new(), space_boxes: Vec::new() })
         }
         "labyrinth" => {
             let l = crate::labyrinth::build(crate::labyrinth::DEFAULT_SEED);
             let (spawn, spawn_yaw) = l.spawn();
-            Some(Scene { name: "labyrinth", mesh: l.mesh, spawn, spawn_yaw, colliders: l.colliders })
+            let space_boxes = l.plan.space_boxes();
+            Some(Scene { name: "labyrinth", mesh: l.mesh, spawn, spawn_yaw, colliders: l.colliders, portals: l.portals, space_boxes })
         }
         _ => None,
     }

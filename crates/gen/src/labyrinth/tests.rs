@@ -2,36 +2,45 @@ use super::graph::*;
 use super::plan::PortalKind;
 use super::*;
 
-/// Every walkable space's anchors and every door reached from the spawn in collider space.
+/// Every walkable space's anchors and every door reached from the spawn in collider space:
+/// standing for everything but the vents (and what only they lead to), crouched for
+/// everything, vents included.
 fn check_reach(l: &Labyrinth) -> Result<usize, String> {
     let world = walk::World::new(&l.colliders);
     let feet = l.plan.spawn.0 - Vec3::Y * 1.65;
-    let reach = walk::flood(&world, feet);
+    let stand = walk::flood(&world, feet);
+    let crouch = walk::flood_with(&world, feet, &walk::Profile::CROUCH);
     let mut missing = Vec::new();
+    let is_vent = |s: Option<usize>| s.is_some_and(|s| l.plan.graph.spaces[s].kind == SpaceKind::Vent);
     for i in l.plan.graph.walkable() {
         let s = &l.plan.graph.spaces[i];
         if s.anchors.is_empty() {
             missing.push(format!("{} ({}) has no anchors", s.sid, s.kind.name()));
         }
+        let reach = if s.crawl_only { &crouch } else { &stand };
         for a in &s.anchors {
-            if !reach.near(*a, 0.75, 0.4) {
-                missing.push(format!("{} ({}) at {a:?}", s.sid, s.kind.name()));
+            if !reach.near(*a, 0.75, 0.45) {
+                missing.push(format!("{} ({}) at {a:?}{}", s.sid, s.kind.name(), if s.crawl_only { " crouched" } else { "" }));
             }
         }
     }
     for o in l.plan.portals.iter().filter(|o| o.walk && o.kind == PortalKind::Door) {
-        if o.u1 - o.u0 < 2.0 * walk::RADIUS + 0.3 || o.y1 - o.y0 < walk::HEIGHT + 0.2 {
+        let vent = is_vent(o.between[0]) || is_vent(o.between[1]);
+        let (min_w, min_h) = if vent { (0.99, 0.99) } else { (2.0 * walk::RADIUS + 0.3, walk::HEIGHT + 0.2) };
+        if o.u1 - o.u0 < min_w || o.y1 - o.y0 < min_h {
             missing.push(format!("door too small: {o:?}"));
         }
         let um = (o.u0 + o.u1) * 0.5;
         let pm = (o.p0 + o.p1) * 0.5;
         let p = if o.x_plane { Vec3::new(pm, o.y0, um) } else { Vec3::new(um, o.y0, pm) };
-        if !reach.near(p, 0.6, 0.4) {
-            missing.push(format!("door not crossed at {p:?}"));
+        let crawl_only_side = [o.between[0], o.between[1]].iter().any(|s| s.is_some_and(|s| l.plan.graph.spaces[s].crawl_only));
+        let reach = if vent || crawl_only_side { &crouch } else { &stand };
+        if !reach.near(p, 0.6, 0.45) {
+            missing.push(format!("door not crossed at {p:?}{}", if vent { " (vent)" } else { "" }));
         }
     }
     if missing.is_empty() {
-        Ok(reach.count)
+        Ok(stand.count + crouch.count)
     } else {
         Err(format!("seed {:#x}: unreachable: {missing:#?}", l.plan.seed))
     }
@@ -82,19 +91,24 @@ fn graph_has_cycles_spurs_and_height() {
         let mut kinds: Vec<SpaceKind> = g.spaces.iter().map(|s| s.kind).collect();
         kinds.sort();
         kinds.dedup();
-        assert!(kinds.len() >= 14, "seed {seed}: {kinds:?}");
+        assert!(kinds.len() >= 16, "seed {seed}: {kinds:?}");
         let mut lk: Vec<LinkKind> = g.links.iter().map(|l| l.kind).collect();
         lk.sort();
         lk.dedup();
-        assert_eq!(lk.len(), 6, "seed {seed}: {lk:?}");
+        assert!(lk.len() >= 7, "seed {seed}: {lk:?}");
         let levels: Vec<i32> = g.spaces.iter().filter(|s| s.role == Role::Core).map(|s| s.level).collect();
         let span = levels.iter().max().unwrap() - levels.iter().min().unwrap();
         assert!(span >= 10, "seed {seed}: core spans {span} storeys");
-        // Every space connected to the spawn through the graph.
+        // Every space connected to the spawn through the graph; and without the vents,
+        // every space that is not reached only by crawling.
         let seen = g.connected_from(p.spawn_space, &|_| true);
+        let walked = g.connected_from(p.spawn_space, &|l| l.kind != LinkKind::VentMouth);
         for i in g.walkable() {
             assert!(seen[i], "seed {seed}: {} not connected", g.spaces[i].sid);
+            assert!(walked[i] || g.spaces[i].crawl_only, "seed {seed}: {} reached only through vents", g.spaces[i].sid);
         }
+        assert!(g.spaces.iter().filter(|s| s.kind == SpaceKind::Vent && s.role != Role::Container).count() >= 3, "seed {seed}: few vents");
+        assert!(g.spaces.iter().filter(|s| s.kind == SpaceKind::SideRoom).count() >= 4, "seed {seed}: few side rooms");
     }
 }
 
@@ -132,6 +146,48 @@ fn landmarks_are_in_open_space() {
         for m in &lm {
             assert!(!l.colliders.iter().any(|c| c.contains(m.eye.to_array())), "seed {seed}: landmark {} inside a solid at {:?}", m.name, m.eye);
         }
+    }
+}
+
+/// Culling chunks cover the mesh in order, each space's triangles and strokes contiguous, the
+/// deep void cut into height bands; portals join spaces that have chunks.
+#[test]
+fn chunks_and_portals() {
+    let l = build_with(DEFAULT_SEED, false);
+    let m = &l.mesh;
+    assert!(m.chunks.len() > 50, "{} chunks", m.chunks.len());
+    let (mut i, mut s) = (0u32, 0u32);
+    for c in &m.chunks {
+        assert_eq!(c.index_start, i);
+        assert_eq!(c.stroke_start, s);
+        assert_eq!(c.index_count % 3, 0);
+        i += c.index_count;
+        s += c.stroke_count;
+        for &k in &m.indices[c.index_start as usize..(c.index_start + c.index_count) as usize] {
+            let p = m.vertices[k as usize].position;
+            assert!((0..3).all(|a| p[a] >= c.min[a] - 1e-3 && p[a] <= c.max[a] + 1e-3));
+        }
+    }
+    assert_eq!(i as usize, m.indices.len());
+    assert_eq!(s as usize, m.strokes.len());
+    let void = l.plan.rooms.iter().find(|r| r.kind == SpaceKind::Void).unwrap().space as u32;
+    assert!(m.chunks.iter().filter(|c| c.space == void).count() >= 3, "void not banded");
+    let spaces: Vec<u32> = m.chunks.iter().map(|c| c.space).collect();
+    assert!(!l.portals.is_empty());
+    for p in &l.portals {
+        for id in [p.a, p.b] {
+            assert!(id == crate::mesh::OUTSIDE || spaces.contains(&id), "portal to space {id} without chunks");
+        }
+    }
+    m.check_invariants().unwrap();
+    // Boxes to find the camera's space: every space with chunks has some, and the spawn and
+    // the landmarks fall in one.
+    let boxes = l.plan.space_boxes();
+    for &sp in spaces.iter().filter(|&&s| s != crate::mesh::OUTSIDE) {
+        assert!(boxes.iter().any(|b| b.space == sp), "space {sp} has chunks but no boxes");
+    }
+    for eye in std::iter::once(l.plan.spawn.0).chain(l.plan.landmarks().iter().map(|m| m.eye)) {
+        assert!(boxes.iter().any(|b| (0..3).all(|i| eye[i] >= b.min[i] - 1e-3 && eye[i] <= b.max[i] + 1e-3)), "{eye:?} in no space box");
     }
 }
 
@@ -269,14 +325,14 @@ fn labyrinth_diagram() {
             writeln!(s, r##"<line x1="{a}" y1="{b}" x2="{c}" y2="{d}" stroke="#000" stroke-width="{sw}"/>"##).unwrap();
         }
     };
-    let (w, d, h) = (NX as f32 * CELL * k, NZ as f32 * CELL * k, NY as f32 * LEVEL * k);
+    let (w, d, h) = (nx() as f32 * CELL * k, nz() as f32 * CELL * k, ny() as f32 * LEVEL * k);
     let gap = 40.0;
     let mut s = String::new();
     let total_h = d + h + gap * 3.0;
     writeln!(s, r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" font-family="Arial" font-size="15">"#, w + 40.0, total_h).unwrap();
     writeln!(s, r##"<rect width="100%" height="100%" fill="#f4f1ea"/>"##).unwrap();
     let grey = |level: i32| {
-        let t = level as f32 / NY as f32;
+        let t = level as f32 / ny() as f32;
         let v = (220.0 - 190.0 * t) as u8;
         format!("rgb({v},{v},{v})")
     };
@@ -356,3 +412,81 @@ fn labyrinth_diagram() {
 }
 
 
+
+#[test]
+#[ignore]
+fn debug_vent() {
+    let l = build_with(DEFAULT_SEED, false);
+    let world = walk::World::new(&l.colliders);
+    let feet = l.plan.spawn.0 - Vec3::Y * 1.65;
+    let crouch = walk::flood_with(&world, feet, &walk::Profile::CROUCH);
+    let stand = walk::flood(&world, feet);
+    for (x, y, z) in [(222.0, 114.0, 137.0), (222.0, 114.0, 138.0), (222.0, 114.3, 139.5), (222.0, 114.3, 141.0), (222.0, 114.3, 143.0), (250.0, 36.0, 262.0), (250.0, 36.0, 263.0), (250.0, 36.0, 264.0), (250.0, 36.0, 265.4)] {
+        let p = Vec3::new(x, y, z);
+        let tops = world.tops(x, z, y - 1.0, y + 1.0);
+        println!("{p:?} stand {} crouch {} tops {tops:?} clear_c {:?}", stand.near(p, 0.3, 0.45), crouch.near(p, 0.3, 0.45), tops.iter().map(|&t| world.clear_for(Vec3::new(x, t, z), &walk::Profile::CROUCH)).collect::<Vec<_>>());
+    }
+    for z in [140.5f32, 140.0, 139.5] {
+        let tops = world.tops(222.0, z, 113.0, 115.0);
+        println!("z {z} tops {tops:?} clear {:?} reached {:?}", tops.iter().map(|&t| world.clear_for(Vec3::new(222.0, t, z), &walk::Profile::CROUCH)).collect::<Vec<_>>(), tops.iter().map(|&t| crouch.near(Vec3::new(222.0, t, z), 0.1, 0.05)).collect::<Vec<_>>());
+    }
+    for c in &l.colliders {
+        let q = Vec3::new(250.0, 36.9, 263.0);
+        let (cc, axes, half) = c.to_obb();
+        let d = q - Vec3::from(cc);
+        let mut e = Vec3::ZERO;
+        for i in 0..3 {
+            e[i] = (d.dot(Vec3::from(axes[i])).abs() - half[i]).max(0.0);
+        }
+        if e.length() < 0.35 {
+            println!("blocker {c:?}");
+        }
+    }
+    for pass in l.plan.passages.iter().filter(|p| p.kind == SpaceKind::Vent) {
+        println!("vent {} ends {:?}", l.plan.graph.spaces[pass.space].sid, pass.ends.iter().map(|e| (e.cell, e.dir, l.plan.graph.spaces[e.target].sid.clone())).collect::<Vec<_>>());
+    }
+}
+
+/// How plan, geometry and bake times scale with the region:
+/// `cargo test --release -p mega_gen -- --ignored --nocapture labyrinth_scaling`.
+#[test]
+#[ignore]
+fn labyrinth_scaling() {
+    for dims in [DEFAULT_DIMS, (136, 124, 26), (192, 176, 26), (96, 88, 52)] {
+        let t = std::time::Instant::now();
+        let l = std::panic::catch_unwind(|| build_sized(DEFAULT_SEED, dims, true));
+        match l {
+            Ok(l) => {
+                let tb = std::time::Instant::now();
+                let baker = crate::bounce::BounceBaker::new(&l.mesh);
+                let _ = baker.bake(crate::bounce::BounceSun::Direction(Vec3::new(0.3, 0.88, -0.3).normalize()), crate::bounce::BounceSettings::default());
+                let walkable = l.plan.graph.walkable().count();
+                println!("{dims:?}: plan {:.0} ms geom {:.0} light {:.0} ao {:.0} (total {:.0} ms), bounce {:.0} ms; attempts {}, spaces {walkable}, tris {}, strokes {}, colliders {}", l.timings[0], l.timings[1], l.timings[2], l.timings[3], (tb - t).as_secs_f64() * 1000.0, tb.elapsed().as_secs_f64() * 1000.0, l.plan.attempts, l.mesh.indices.len() / 3, l.mesh.strokes.len(), l.colliders.len());
+            }
+            Err(_) => println!("{dims:?}: failed"),
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn debug_budget() {
+    let l = build_with(DEFAULT_SEED, false);
+    let mut by: std::collections::BTreeMap<String, (u32, u32)> = Default::default();
+    for c in &l.mesh.chunks {
+        let k = if c.space == crate::mesh::OUTSIDE { "outside".to_string() } else { l.plan.graph.spaces[c.space as usize].kind.name().to_string() };
+        let e = by.entry(k).or_default();
+        e.0 += c.index_count / 3;
+        e.1 += c.stroke_count;
+    }
+    for (k, (t, s)) in by {
+        println!("{k:16} tris {t:7} strokes {s:6}");
+    }
+}
+
+#[test]
+#[ignore]
+fn debug_culling_counts() {
+    let l = build_with(DEFAULT_SEED, false);
+    println!("chunks {} portals {} boxes {}", l.mesh.chunks.len(), l.portals.len(), l.plan.space_boxes().len());
+}

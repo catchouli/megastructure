@@ -15,7 +15,9 @@
 //! parry works in glam 0.33 types through `glamx`; the game uses glam 0.34, so values cross
 //! this boundary as plain components.
 
-use crate::player::{CAPSULE_HEIGHT, CAPSULE_RADIUS, SKIN, STABLE_RING_REACH, STABLE_RING_SAMPLES};
+#[cfg(test)]
+use crate::player::CAPSULE_HEIGHT;
+use crate::player::{CAPSULE_RADIUS, SKIN, STABLE_RING_REACH, STABLE_RING_SAMPLES};
 use glam::Vec3;
 use mega_gen::Collider;
 use parry3d::bounding_volume::Aabb;
@@ -254,33 +256,39 @@ impl World {
         World { solids, bvh }
     }
 
-    /// The capsule's end-sphere centres for feet at `feet`.
-    fn segment(feet: Vec3) -> (Vec3, Vec3) {
-        (feet + Vec3::Y * CAPSULE_RADIUS, feet + Vec3::Y * (CAPSULE_HEIGHT - CAPSULE_RADIUS))
+    /// The end-sphere centres of a capsule `height` tall with its feet at `feet`.
+    fn segment(feet: Vec3, height: f32) -> (Vec3, Vec3) {
+        (feet + Vec3::Y * CAPSULE_RADIUS, feet + Vec3::Y * (height - CAPSULE_RADIUS))
     }
 
     /// Boxes whose bounds meet the capsule's bounds at `from` and at `to`, grown by `margin`.
-    fn candidates(&self, from: Vec3, to: Vec3, margin: f32) -> impl Iterator<Item = &Solid> + '_ {
+    fn candidates(&self, from: Vec3, to: Vec3, margin: f32, height: f32) -> impl Iterator<Item = &Solid> + '_ {
         let m = Vec3::splat(CAPSULE_RADIUS + margin);
         let lo = from.min(to) - Vec3::new(m.x, margin, m.z);
-        let hi = from.max(to) + Vec3::new(m.x, CAPSULE_HEIGHT + margin, m.z);
+        let hi = from.max(to) + Vec3::new(m.x, height + margin, m.z);
         let query = Aabb::new(pv(lo), pv(hi));
         let hits: Vec<u32> = self.bvh.intersect_aabb(&query).collect();
         hits.into_iter().map(|i| &self.solids[i as usize])
     }
 
-    /// Sweep the capsule with its feet at `feet` along `motion`. The result is the first
-    /// obstacle, with the capsule stopping `SKIN` short of it, or None if the whole motion is
-    /// free. Obstacles the capsule is touching but moving away from or along are ignored.
+    /// Sweep the standing capsule with its feet at `feet` along `motion` (`cast_h`).
+    #[cfg(test)]
     pub fn cast(&self, feet: Vec3, motion: Vec3) -> Option<Hit> {
+        self.cast_h(feet, motion, CAPSULE_HEIGHT)
+    }
+
+    /// Sweep a capsule `height` tall with its feet at `feet` along `motion`. The result is the
+    /// first obstacle, with the capsule stopping `SKIN` short of it, or None if the whole motion
+    /// is free. Obstacles the capsule is touching but moving away from or along are ignored.
+    pub fn cast_h(&self, feet: Vec3, motion: Vec3, height: f32) -> Option<Hit> {
         let len = motion.length();
         if len < 1e-6 {
             return None;
         }
         let dir = motion / len;
         let mut best: Option<Hit> = None;
-        for s in self.candidates(feet, feet + motion, SKIN + 0.01) {
-            let Some(hit) = sweep_one(s, feet, dir, len) else { continue };
+        for s in self.candidates(feet, feet + motion, SKIN + 0.01, height) {
+            let Some(hit) = sweep_one(s, feet, dir, len, height) else { continue };
             let better = match best {
                 None => true,
                 Some(b) => hit.fraction < b.fraction - 1e-6 || (hit.fraction < b.fraction + 1e-6 && hit.normal.dot(dir) < b.normal.dot(dir)),
@@ -292,13 +300,19 @@ impl World {
         best
     }
 
-    /// Push the capsule out of anything it overlaps (a few passes), leaving `SKIN` of gap.
-    /// Touching or standing within the skin is not an overlap. Returns the new feet.
-    pub fn depenetrate(&self, mut feet: Vec3) -> Vec3 {
+    /// Push the standing capsule out of anything it overlaps (`depenetrate_h`).
+    #[cfg(test)]
+    pub fn depenetrate(&self, feet: Vec3) -> Vec3 {
+        self.depenetrate_h(feet, CAPSULE_HEIGHT)
+    }
+
+    /// Push a capsule `height` tall out of anything it overlaps (a few passes), leaving `SKIN`
+    /// of gap. Touching or standing within the skin is not an overlap. Returns the new feet.
+    pub fn depenetrate_h(&self, mut feet: Vec3, height: f32) -> Vec3 {
         for _ in 0..4 {
-            let (a, b) = Self::segment(feet);
+            let (a, b) = Self::segment(feet, height);
             let mut push = Vec3::ZERO;
-            for s in self.candidates(feet, feet, 0.0) {
+            for s in self.candidates(feet, feet, 0.0, height) {
                 let c = s.contact(a, b, CAPSULE_RADIUS);
                 if c.dist < -1e-4 {
                     push += c.normal * (SKIN - c.dist);
@@ -312,11 +326,25 @@ impl World {
         feet
     }
 
-    /// The closest box to the capsule at `feet` (negative gap = overlap), for tests.
+    /// Whether a capsule `height` tall with its feet at `feet` is clear of every collider:
+    /// touching is allowed, overlap beyond 0.1 mm (as `depenetrate_h` counts it) is not. Used
+    /// before standing up.
+    pub fn fits(&self, feet: Vec3, height: f32) -> bool {
+        let (a, b) = Self::segment(feet, height);
+        self.candidates(feet, feet, 0.0, height).all(|s| s.contact(a, b, CAPSULE_RADIUS).dist >= -1e-4)
+    }
+
+    /// The closest box to the standing capsule at `feet` (negative gap = overlap), for tests.
     #[cfg(test)]
     pub fn nearest(&self, feet: Vec3) -> Option<Contact> {
-        let (a, b) = Self::segment(feet);
-        self.candidates(feet, feet, 1.0).map(|s| s.contact(a, b, CAPSULE_RADIUS)).min_by(|x, y| x.dist.partial_cmp(&y.dist).unwrap())
+        self.nearest_h(feet, CAPSULE_HEIGHT)
+    }
+
+    /// The closest box to a capsule `height` tall at `feet`, for tests.
+    #[cfg(test)]
+    pub fn nearest_h(&self, feet: Vec3, height: f32) -> Option<Contact> {
+        let (a, b) = Self::segment(feet, height);
+        self.candidates(feet, feet, 1.0, height).map(|s| s.contact(a, b, CAPSULE_RADIUS)).min_by(|x, y| x.dist.partial_cmp(&y.dist).unwrap())
     }
 
     /// Whether there is a surface straight below the middle of the capsule, within `reach`
@@ -325,7 +353,7 @@ impl World {
     pub fn supported_below(&self, feet: Vec3, reach: f32) -> bool {
         let origin = feet + Vec3::Y * 0.05;
         let floor = feet.y - reach;
-        self.candidates(origin, origin - Vec3::Y * (reach + 0.1), 0.0).any(|s| s.ray_down(origin).is_some_and(|p| matches!(p, Probe::Hit(y) if y >= floor)))
+        self.candidates(origin, origin - Vec3::Y * (reach + 0.1), 0.0, CAPSULE_HEIGHT).any(|s| s.ray_down(origin).is_some_and(|p| matches!(p, Probe::Hit(y) if y >= floor)))
     }
 
     /// Whether the capsule at `feet` stands well inside its ground: around it, at radius
@@ -353,15 +381,21 @@ impl World {
     pub fn overlaps(&self, feet: Vec3) -> bool {
         self.nearest(feet).is_some_and(|c| c.dist < -1e-3)
     }
+
+    /// Whether a capsule `height` tall at `feet` overlaps any collider, for tests.
+    #[cfg(test)]
+    pub fn overlaps_h(&self, feet: Vec3, height: f32) -> bool {
+        self.nearest_h(feet, height).is_some_and(|c| c.dist < -1e-3)
+    }
 }
 
 /// Conservative advancement of the capsule against one box. The capsule is treated as swollen
 /// by `SKIN`, so the sweep stops with that much gap.
-fn sweep_one(s: &Solid, feet: Vec3, dir: Vec3, len: f32) -> Option<Hit> {
+fn sweep_one(s: &Solid, feet: Vec3, dir: Vec3, len: f32, height: f32) -> Option<Hit> {
     let mut t = 0.0f32;
     let mut last: Option<Contact> = None;
     for _ in 0..32 {
-        let (a, b) = World::segment(feet + dir * t);
+        let (a, b) = World::segment(feet + dir * t, height);
         let c = s.contact(a, b, CAPSULE_RADIUS + SKIN);
         let closing = -c.normal.dot(dir);
         if closing <= 1e-5 {
@@ -477,7 +511,7 @@ mod tests {
             let centre = Vec3::new(rng.f(-1.0, 1.0), rng.f(-1.0, 1.0), rng.f(-1.0, 1.0));
             let solid = Solid { centre, axes, half };
             let feet = Vec3::new(rng.f(-3.0, 3.0), rng.f(-3.0, 3.0), rng.f(-3.0, 3.0));
-            let (a, b) = World::segment(feet);
+            let (a, b) = World::segment(feet, CAPSULE_HEIGHT);
             let mine = solid.contact(a, b, CAPSULE_RADIUS);
             if mine.dist < 0.0 {
                 continue;

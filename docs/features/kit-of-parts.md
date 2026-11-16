@@ -72,6 +72,10 @@ A `Ramp` is a stair flight's walking surface: a sloped slab whose top runs from 
 - Thin colliders (any half extent under 0.25 m: railings, stair flights and landings) do not occlude. They are narrower than the wall tessellation, and their AO on a wall became a row of triangles with hairy hatch ends (E009).
 - The bake runs on all cores and is deterministic: each vertex depends only on its own position and normal.
 
+### Culling groups (`MeshBuilder::set_group`, `MeshBuilder::chunk`)
+
+Elements carry no space of their own; a scene calls `set_group(space id)` before emitting a space's elements, then `chunk(band_split, band)` once at the end, which sorts triangles and strokes into contiguous runs per group (cut by height for tall groups) and fills `MeshData::chunks`. Vertices are not moved, so the invariants below still hold. See `labyrinth.md` ("Culling data").
+
 ### Mesh invariants (`MeshData::check_invariants`)
 
 Indices in range; unit normals and hatch axes, hatch in the face; ao in 0..1; triangles wound counter-clockwise about the normal and not degenerate; id 0 unused; each `id_fine` one contiguous run of vertices with one `id_coarse`, and every triangle inside one `id_fine`. Strokes: unit normals, rank 0..3, valid kind, nonzero length. The test scene's older test that every fine id is exactly one 3- or 4-vertex face does not hold for tessellated or curved panels and is not applied to the kit.

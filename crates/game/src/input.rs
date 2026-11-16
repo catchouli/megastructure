@@ -14,6 +14,9 @@ pub struct InputState {
     pub fast: bool,
     /// Space: jump when walking, up when flying.
     pub jump: bool,
+    /// C or Ctrl held: crouch when walking (`crouch` in a script). Ctrl is also `down` when
+    /// flying; C does nothing there.
+    pub crouch: bool,
     /// F pressed (one frame in the windowed game; a script holds it for its segment, and only
     /// the first frame counts): toggle between walking and the fly camera.
     pub toggle_fly: bool,
@@ -43,6 +46,7 @@ impl InputState {
         "fast",
         "walk",
         "jump",
+        "crouch",
         "toggle_fly",
         "reset",
         "screenshot",
@@ -64,6 +68,7 @@ impl InputState {
             "down" => self.down = true,
             "fast" | "walk" => self.fast = true,
             "jump" => self.jump = true,
+            "crouch" => self.crouch = true,
             "toggle_fly" => self.toggle_fly = true,
             "reset" => self.reset = true,
             "screenshot" => self.screenshot = true,

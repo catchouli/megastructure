@@ -96,7 +96,7 @@ fn the_route_from_spawn_to_the_hall_stays_on_the_ground() {
         if name == "run" {
             // The headless output of this script (`megastructure --headless --scene shaft --input
             // ...`), to the digit: any change to the movement shows here.
-            assert_eq!(line, "state frames=1980 x=-1.8345 y=423.0740 z=-102.4368 yaw_deg=180.000 pitch_deg=0.000 mode=walk grounded=true vy=0.0000 died=false deaths=0 resets=0 hspeed=9.6429");
+            assert_eq!(line, "state frames=1980 x=-1.8345 y=423.0740 z=-102.4368 yaw_deg=180.000 pitch_deg=0.000 mode=walk grounded=true vy=0.0000 died=false deaths=0 resets=0 hspeed=9.6429 crouched=false");
         }
     }
 }

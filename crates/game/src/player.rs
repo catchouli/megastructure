@@ -24,6 +24,19 @@ pub const STEP_HEIGHT: f32 = 0.45;
 /// of 0.7 (45.6 degrees); the generator's contract of 40 is kept.
 pub const MAX_SLOPE_DEG: f32 = 40.0;
 
+// --- Crouching (contracts for the generator's vents) -----------------------------------------
+
+/// Capsule height while crouched, metres (contract: a vent's interior is at least 1.0 m high
+/// and 1.0 m wide). Quake 2's duck is 32 of 56 units; this is half the body.
+pub const CROUCH_HEIGHT: f32 = 0.9;
+/// Eye height above the feet while crouched, metres: 0.15 m under the top, as standing.
+pub const CROUCH_EYE_HEIGHT: f32 = 0.75;
+/// Top speed crouched, m/s (Quake 2 halves the wanted speed: 4.8 m/s; a little slower reads as
+/// crawling but still crosses 40 m of vent in 10 s). With Shift it is the walk speed.
+pub const CROUCH_SPEED: f32 = 4.0;
+/// Rate at which the eye follows a crouch or a stand, 1/s (exponential: 95 percent in 0.12 s).
+pub const CROUCH_EYE_RATE: f32 = 25.0;
+
 // --- Quake 2 movement ------------------------------------------------------------------------
 
 /// Metres per Quake 2 unit (player height 56 units scaled to `CAPSULE_HEIGHT`).
@@ -100,6 +113,9 @@ pub const SNAP_DISTANCE: f32 = STEP_HEIGHT;
 /// When a step-up is the only way forward, the forward probe is at least this long, metres, so
 /// the capsule ends up far enough over the edge to be standing on it and not on the corner.
 pub const STEP_MIN_FORWARD: f32 = 0.15;
+/// When a step-up raised as far as there is room is blocked ahead, it is retried this much lower
+/// each time, metres: finer than the 0.1 m of play between a crouched capsule and a vent mouth.
+pub const STEP_RETRY: f32 = 0.05;
 /// Speeds below this are zero on the ground, m/s (Quake 2: 1 unit/s).
 pub const REST_SPEED: f32 = QUAKE_UNIT;
 /// Collide-and-slide iterations per move (Quake 2 `MAX_CLIP_PLANES` 5).

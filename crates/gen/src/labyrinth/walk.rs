@@ -15,6 +15,25 @@ pub const HEIGHT: f32 = 1.8;
 /// Grid spacing of the flood fill.
 pub const SPACING: f32 = 0.5;
 
+/// A walker's limits for the flood fill.
+#[derive(Clone, Copy, Debug)]
+pub struct Profile {
+    pub height: f32,
+    pub radius: f32,
+    /// Largest step between neighbouring places.
+    pub step: f32,
+    /// The capsule is checked from this height above the feet (below it, only the shin point
+    /// must be clear: what is lower is stepped onto).
+    pub lift: f32,
+}
+
+impl Profile {
+    /// Standing: 1.8 m by 0.3 m, step 0.3 m (stricter than the walker's 0.45 m).
+    pub const STAND: Profile = Profile { height: HEIGHT, radius: RADIUS, step: STEP, lift: STEP + RADIUS + 0.05 };
+    /// Crouched, for vents: 0.9 m by 0.3 m, step 0.45 m. Contract with crates/game.
+    pub const CROUCH: Profile = Profile { height: 0.9, radius: 0.3, step: 0.45, lift: 0.6 };
+}
+
 #[derive(Clone, Copy)]
 struct Solid {
     c: Vec3,
@@ -145,17 +164,23 @@ impl World {
     /// Whether a walker can stand with its feet at `p`: the capsule above the step height is
     /// clear of every solid, and nothing solid at shin height.
     pub fn clear(&self, p: Vec3) -> bool {
+        self.clear_for(p, &Profile::STAND)
+    }
+
+    pub fn clear_for(&self, p: Vec3, pr: &Profile) -> bool {
         let mut c = Vec::new();
-        self.near(p - Vec3::new(RADIUS + 0.1, 0.0, RADIUS + 0.1), p + Vec3::new(RADIUS + 0.1, HEIGHT + 0.1, RADIUS + 0.1), &mut c);
-        let shin = p + Vec3::Y * 0.2;
+        let r = pr.radius;
+        self.near(p - Vec3::new(r + 0.1, 0.0, r + 0.1), p + Vec3::new(r + 0.1, pr.height + 0.1, r + 0.1), &mut c);
+        let shin = p + Vec3::Y * 0.15;
+        let (y0, y1) = (pr.lift, (pr.height - r).max(pr.lift));
         for &i in &c {
             let s = &self.solids[i as usize];
             if s.inside(shin) {
                 return false;
             }
             for k in 0..6 {
-                let y = (STEP + RADIUS + 0.05) + k as f32 * (HEIGHT - RADIUS - (STEP + RADIUS + 0.05)) / 5.0;
-                if s.dist(p + Vec3::Y * y) < RADIUS - 0.01 {
+                let y = y0 + k as f32 * (y1 - y0) / 5.0;
+                if s.dist(p + Vec3::Y * y) < r - 0.01 {
                     return false;
                 }
             }
@@ -216,6 +241,12 @@ impl Reach {
 
 /// Flood fill from the feet position `start` (snapped to the nearest top within 0.5 m).
 pub fn flood(world: &World, start: Vec3) -> Reach {
+    flood_with(world, start, &Profile::STAND)
+}
+
+/// Flood fill for a walker profile.
+pub fn flood_with(world: &World, start: Vec3, pr: &Profile) -> Reach {
+    let step = pr.step;
     let k = |v: f32| (v / SPACING).round() as i32;
     let qy = |y: f32| (y * 50.0).round() as i32;
     let (sx, sz) = (k(start.x), k(start.z));
@@ -224,7 +255,7 @@ pub fn flood(world: &World, start: Vec3) -> Reach {
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut queue = VecDeque::new();
     let mut clear_cache: HashMap<(i32, i32, i32), bool> = HashMap::new();
-    let mut is_clear = |world: &World, x: i32, z: i32, y: f32| *clear_cache.entry((x, z, qy(y))).or_insert_with(|| world.clear(Vec3::new(x as f32 * SPACING, y, z as f32 * SPACING)));
+    let mut is_clear = |world: &World, x: i32, z: i32, y: f32| *clear_cache.entry((x, z, qy(y))).or_insert_with(|| world.clear_for(Vec3::new(x as f32 * SPACING, y, z as f32 * SPACING), pr));
     if let Some(y) = y0 {
         if is_clear(world, sx, sz, y) {
             seen.insert((sx, sz, qy(y)));
@@ -237,7 +268,7 @@ pub fn flood(world: &World, start: Vec3) -> Reach {
         places.entry((x, z)).or_default().push(y);
         for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
             let (nx, nz) = (x + dx, z + dz);
-            for ny in world.tops(nx as f32 * SPACING, nz as f32 * SPACING, y - STEP - 0.01, y + STEP + 0.01) {
+            for ny in world.tops(nx as f32 * SPACING, nz as f32 * SPACING, y - step - 0.01, y + step + 0.01) {
                 let key = (nx, nz, qy(ny));
                 if seen.contains(&key) {
                     continue;
@@ -247,8 +278,8 @@ pub fn flood(world: &World, start: Vec3) -> Reach {
                 }
                 if dx != 0 && dz != 0 {
                     // Diagonal: both orthogonal neighbours must be standable too (no corner cutting).
-                    let a = world.tops(nx as f32 * SPACING, z as f32 * SPACING, y.min(ny) - STEP - 0.01, y.max(ny) + STEP + 0.01);
-                    let b = world.tops(x as f32 * SPACING, nz as f32 * SPACING, y.min(ny) - STEP - 0.01, y.max(ny) + STEP + 0.01);
+                    let a = world.tops(nx as f32 * SPACING, z as f32 * SPACING, y.min(ny) - step - 0.01, y.max(ny) + step + 0.01);
+                    let b = world.tops(x as f32 * SPACING, nz as f32 * SPACING, y.min(ny) - step - 0.01, y.max(ny) + step + 0.01);
                     let ok_a = a.iter().any(|&t| is_clear(world, nx, z, t));
                     let ok_b = b.iter().any(|&t| is_clear(world, x, nz, t));
                     if !ok_a || !ok_b {

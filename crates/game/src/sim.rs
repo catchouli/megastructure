@@ -197,6 +197,7 @@ impl Sim {
             yaw: self.camera.yaw,
             shift: input.fast,
             jump: input.jump,
+            crouch: input.crouch,
         };
         let step = FIXED_DT as f64;
         self.accumulator += dt as f64;
@@ -330,6 +331,8 @@ mod tests {
             spawn: [0.0, 1.65, 0.0],
             spawn_yaw: 0.0,
             colliders: vec![Collider::Aabb { min: [-50.0, -2.0, -50.0], max: [50.0, 0.0, 50.0] }],
+            portals: Vec::new(),
+            space_boxes: Vec::new(),
         }
     }
 

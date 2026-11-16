@@ -1,7 +1,7 @@
 //! The coarse cell grid the labyrinth is laid out on: `CELL` metres in plan, `LEVEL` metres a
 //! storey. Spaces own boxes or paths of cells; everything not owned is solid mass.
 
-use super::{CELL, LEVEL, NX, NY, NZ};
+use super::{nx, ny, nz, CELL, LEVEL};
 use glam::Vec3;
 
 /// A horizontal direction on the grid.
@@ -93,7 +93,7 @@ impl Cell {
     }
 
     pub fn in_bounds(self) -> bool {
-        self.x >= 0 && self.x < NX && self.z >= 0 && self.z < NZ && self.y >= 0 && self.y < NY
+        self.x >= 0 && self.x < nx() && self.z >= 0 && self.z < nz() && self.y >= 0 && self.y < ny()
     }
 }
 
@@ -177,6 +177,7 @@ pub enum Occ {
     Reserved,
 }
 
+#[derive(Clone)]
 pub struct Grid {
     occ: Vec<Occ>,
 }
@@ -189,11 +190,11 @@ impl Default for Grid {
 
 impl Grid {
     pub fn new() -> Self {
-        Self { occ: vec![Occ::Free; (NX * NY * NZ) as usize] }
+        Self { occ: vec![Occ::Free; (nx() * ny() * nz()) as usize] }
     }
 
     fn idx(c: Cell) -> usize {
-        ((c.y * NZ + c.z) * NX + c.x) as usize
+        ((c.y * nz() + c.z) * nx() + c.x) as usize
     }
 
     pub fn get(&self, c: Cell) -> Occ {
@@ -227,13 +228,13 @@ impl Grid {
     /// `edge` cells of the region boundary must stay clear unless `touch_edge`.
     pub fn box_free(&self, b: &CBox, margin: i32, touch_edge: bool) -> bool {
         let e = if touch_edge { 0 } else { 1 };
-        if b.x0 < e || b.z0 < e || b.x1 > NX - e || b.z1 > NZ - e || b.y0 < 0 || b.y1 > NY {
+        if b.x0 < e || b.z0 < e || b.x1 > nx() - e || b.z1 > nz() - e || b.y0 < 0 || b.y1 > ny() {
             return false;
         }
         let g = b.grow(margin);
         for y in g.y0..g.y1 {
-            for z in g.z0.max(0)..g.z1.min(NZ) {
-                for x in g.x0.max(0)..g.x1.min(NX) {
+            for z in g.z0.max(0)..g.z1.min(nz()) {
+                for x in g.x0.max(0)..g.x1.min(nx()) {
                     if self.get(Cell::new(x, y, z)) != Occ::Free {
                         return false;
                     }

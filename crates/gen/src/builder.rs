@@ -75,12 +75,14 @@ pub struct MeshBuilder {
     pub colliders: Vec<Collider>,
     next_fine: u32,
     next_coarse: u32,
+    /// Group switches for culling chunks: (group, index count, stroke count) at the switch.
+    groups: Vec<(u32, usize, usize)>,
 }
 
 impl MeshBuilder {
     pub fn new() -> Self {
         // Id 0 is reserved for "nothing" (sky, background), so ids start at 1.
-        Self { mesh: MeshData::default(), colliders: Vec::new(), next_fine: 1, next_coarse: 1 }
+        Self { mesh: MeshData::default(), colliders: Vec::new(), next_fine: 1, next_coarse: 1, groups: Vec::new() }
     }
 
     pub fn finish(self) -> MeshData {
@@ -400,6 +402,93 @@ impl MeshBuilder {
                     self.mesh.indices.extend_from_slice(&[a, c, bb, a, d, c]);
                 }
             }
+        }
+    }
+
+    /// Everything emitted from now on belongs to culling group `g` (a space id).
+    pub fn set_group(&mut self, g: u32) {
+        self.groups.push((g, self.mesh.indices.len(), self.mesh.strokes.len()));
+    }
+
+    /// Reorder triangles and strokes so each group is contiguous and fill `mesh.chunks`.
+    /// Groups taller than `band_split` metres are cut into bands of `band` metres by height
+    /// (by triangle centroid and stroke midpoint). Vertices are not moved, so fine-id runs
+    /// stay contiguous. Without any `set_group` call this does nothing.
+    pub fn chunk(&mut self, band_split: f32, band: f32) {
+        if self.groups.is_empty() {
+            return;
+        }
+        let m = &mut self.mesh;
+        let ntri = m.indices.len() / 3;
+        let group_at = |pos: usize, by_index: bool| -> u32 {
+            let mut g = self.groups[0].0;
+            for &(gg, i, s) in &self.groups {
+                let at = if by_index { i } else { s };
+                if at <= pos {
+                    g = gg;
+                } else {
+                    break;
+                }
+            }
+            g
+        };
+        let pos = |i: u32| glam::Vec3::from(m.vertices[i as usize].position);
+        let tri_g: Vec<u32> = (0..ntri).map(|t| group_at(t * 3, true)).collect();
+        let tri_y: Vec<f32> = (0..ntri).map(|t| (pos(m.indices[t * 3]).y + pos(m.indices[t * 3 + 1]).y + pos(m.indices[t * 3 + 2]).y) / 3.0).collect();
+        let str_g: Vec<u32> = (0..m.strokes.len()).map(|k| group_at(k, false)).collect();
+        let str_y: Vec<f32> = m.strokes.iter().map(|s| (s.a[1] + s.b[1]) * 0.5).collect();
+        // Height range per group, to decide on bands.
+        let mut range: std::collections::BTreeMap<u32, (f32, f32)> = Default::default();
+        for (g, y) in tri_g.iter().zip(&tri_y).chain(str_g.iter().zip(&str_y)) {
+            let e = range.entry(*g).or_insert((f32::MAX, f32::MIN));
+            e.0 = e.0.min(*y);
+            e.1 = e.1.max(*y);
+        }
+        let band_of = |g: u32, y: f32| -> u32 {
+            let (lo, hi) = range[&g];
+            if hi - lo > band_split {
+                ((y - lo) / band).floor().max(0.0) as u32
+            } else {
+                0
+            }
+        };
+        let mut tris: Vec<(u32, u32, usize)> = (0..ntri).map(|t| (tri_g[t], band_of(tri_g[t], tri_y[t]), t)).collect();
+        tris.sort_by_key(|&(g, b, t)| (g, b, t));
+        let mut strs: Vec<(u32, u32, usize)> = (0..m.strokes.len()).map(|k| (str_g[k], band_of(str_g[k], str_y[k]), k)).collect();
+        strs.sort_by_key(|&(g, b, k)| (g, b, k));
+        let old_i = std::mem::take(&mut m.indices);
+        m.indices = tris.iter().flat_map(|&(_, _, t)| old_i[t * 3..t * 3 + 3].iter().copied()).collect();
+        let old_s = std::mem::take(&mut m.strokes);
+        m.strokes = strs.iter().map(|&(_, _, k)| old_s[k]).collect();
+        // Chunks over the union of keys.
+        let mut keys: Vec<(u32, u32)> = tris.iter().map(|&(g, b, _)| (g, b)).chain(strs.iter().map(|&(g, b, _)| (g, b))).collect();
+        keys.sort();
+        keys.dedup();
+        let (mut ti, mut si) = (0usize, 0usize);
+        m.chunks.clear();
+        for (g, b) in keys {
+            let t0 = ti;
+            while ti < tris.len() && (tris[ti].0, tris[ti].1) == (g, b) {
+                ti += 1;
+            }
+            let s0 = si;
+            while si < strs.len() && (strs[si].0, strs[si].1) == (g, b) {
+                si += 1;
+            }
+            let mut lo = glam::Vec3::splat(f32::MAX);
+            let mut hi = glam::Vec3::splat(f32::MIN);
+            for &i in &m.indices[t0 * 3..ti * 3] {
+                let p = glam::Vec3::from(m.vertices[i as usize].position);
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+            for s in &m.strokes[s0..si] {
+                for p in [s.a, s.b] {
+                    lo = lo.min(glam::Vec3::from(p));
+                    hi = hi.max(glam::Vec3::from(p));
+                }
+            }
+            m.chunks.push(crate::mesh::Chunk { space: g, min: lo.to_array(), max: hi.to_array(), index_start: (t0 * 3) as u32, index_count: ((ti - t0) * 3) as u32, stroke_start: s0 as u32, stroke_count: (si - s0) as u32 });
         }
     }
 

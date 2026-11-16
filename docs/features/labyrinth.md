@@ -2,7 +2,17 @@
 
 ## Status
 
-In progress, 2026-11-16 (round 2). First slice of M2 (generator core): a scene `labyrinth`, generated from a seed as a space graph first and geometry second, built from the kit of parts, walkable, checked for reachability and for open sight lines in collider space, over a 100-seed sweep. Round 2 enlarged the region and the core loop, added three set pieces (cistern, stair hall, cleft), light shafts, lantern crossings, antechambers, eight passage sections, door frames and a detail pass. Verified headless only (tests, the sweep, captures, short headless walks). Nobody has walked it in a window yet. Out of scope: decay and breakage, machinery, streaming, the whole-structure exterior, district functions (`ParamSet`).
+In progress, 2026-11-16 (round 3). First slice of M2 (generator core): a scene `labyrinth`, generated from a seed as a space graph first and geometry second, built from the kit of parts, walkable, and checked over a 100-seed sweep. The sweep checks reachability for two walker profiles (standing and crouched), open sight lines, and mesh invariants. Round 3 added:
+
+- culling data: chunks per space, portals, and boxes to find the camera's space;
+- real ways off the passages: side rooms, branches that rejoin, doors that read as doors;
+- vents: crawlways as shortcuts and secrets;
+- a detail pass;
+- exposed ducts;
+- darker light with deliberate accents;
+- region size as a parameter.
+
+Verified headless only (tests, the sweep, captures). Nobody has crawled a vent in a window yet. Out of scope: decay and breakage, machinery, streaming, the whole-structure exterior, district functions.
 
 ## What it is
 
@@ -19,6 +29,11 @@ A block of the megastructure 384 m by 352 m in plan and 156 m tall, mostly solid
 - ledges, loggias, a dark chamber.
 
 There are several routes between most places. The core loop climbs and descends more than ten storeys, takes about a quarter of an hour at a walk, and passes through every set piece.
+
+## Review notes
+
+- 2026-11-16, owner, first look: "The extra detail really helps actually, the labyrinth is basically a way nicer version of the shaft scene!"
+- 2026-11-16, owner, after walking round 2: "I had a really good explore and had a lot of fun. I noticed the corridors have what look like openings that would go out in different directions but they currently don't go anywhere and are very shallow. And also I had the idea of adding vents you can crawl around, which would be really cool too and could be used to connect different areas. In general I'd love to expand the labyrinth and make it much bigger when we're solved the dynamic range and culling, I know we're running out of frame budget right now, and add more detail to the geometry. It's shaping up really nicely, by the way :)" Also on movement (Quake 2 style, railings no longer contain a jump; kept on purpose: "it's way more fun to run around and jump off stuff now") and on light: "I want the darks to be really dark". Round 3 answers the openings (side rooms, branches, real doors), the vents, and the detail; growth waits for culling.
 
 ## Design
 
@@ -91,6 +106,42 @@ Each passage has one section (`PassStyle`), so a route changes character from pa
 
 All passages also have joints and a dado line, closed doors (shallow recesses) along the walls, enclosed stair halls where they change storey, and windows into voids, halls and the outside.
 
+### Ways off the passages (round 3)
+
+The owner found openings along corridors that looked like ways onward and were 30 cm deep. Now:
+
+- **Side rooms** (`SpaceKind::SideRoom`, spurs). Small rooms of 1 by 1 to 2 by 2 cells through a door in a passage's side wall: a cell (bench, raised niche), a store room (shelving, crates), a shrine (stepped plinth, altar, stele, two small columns) or a machine closet (cabinets, pipes floor to ceiling). About a third have the door leaf standing ajar onto the dark room. There are 20 to 30 on the default seed.
+- **Branches.** Short passages leaving a passage's side and rejoining it further on, or joining a neighbouring passage, possibly on another storey. Up to six per seed. They are loops when both ends are on cycles, spurs otherwise.
+- **What stays shut is plainly shut.** Wall features along passages are now:
+  - closed doors (a leaf with rails and studs, a threshold);
+  - raised niches with a sill at 0.95 m, plainly niches;
+  - missing panels showing the structure behind (ribs, a rail, a broken edge).
+- **Windows** into voids and halls remain, and vents have slots onto the big spaces.
+
+### Vents (round 3)
+
+Crawlways (`SpaceKind::Vent`, `PassStyle::Vent`, link kind `VentMouth`), routed by the same A* as passages:
+
+- **Cross-section.** 1.2 m wide and 1.0 m high inside. The floor sits 0.3 m above the storey (a lip stepped into while crouched). The mouths are 1.2 by 1.0 m with a flat top.
+- **Course.** Bends are 90 degree corners with at least one cell (4 m) of straight between them. A storey is changed on a 12 m ramp of 26.6 degrees inside a taller slot.
+- **Detail.** Flanges at every cell, seams on the slopes.
+
+Up to ten per seed, of four sorts:
+
+| Sort | What it does |
+|---|---|
+| Passage to passage | Between two passages not linked to each other, close in space but far apart by the route or on different storeys |
+| Down into the undercroft | From a passage into the undercroft |
+| Cistern to passage | Between the cistern's walkway and a passage |
+| Outlet | Onto a small ledge (1.8 m deep, no railing) high on the deep void's wall, with a view and a drop |
+| Lookout | A dead end: an intact grille in the deep void's or light well's wall, looked through (with a collider) |
+
+At open mouths the grille lies torn off on the floor or hangs from its top edge. Vents are loop or spur links, never the only way to a space on foot: a test checks that every space not reached only by crawling stays connected to the spawn without vent links.
+
+Contract with the crouched walker (`crates/game`): the capsule is 0.9 m tall with radius 0.3 m, a 0.45 m step, 40 degree slopes; a 1.0 m interior is the least. Heights between 1.2 and 1.7 m are avoided so the player is never left wondering why they cannot stand. Exits open into spaces at least 1.8 m high.
+
+Exposed ducts are seen from outside but are not crawlable: a rectangular duct with flanges hung under the great hall's ceiling, and half of the members spanning the voids are ducts instead of beams. (Crawlable vents run through the mass; making some of them visibly cross big spaces is still to do.)
+
 ### Rooms and detail
 
 | Space | Built from |
@@ -103,20 +154,38 @@ All passages also have joints and a dado line, closed doors (shallow recesses) a
 | Stair tower | Flights round an open well, a landing in every corner |
 | Junction, antechamber, chamber, loggia | Plinth and cornice; central pier or chamfered crossing with a lantern ring; beams across antechambers; loggia colonnade |
 | Doors | Frames by weight of what they lead into: heavy (great spaces and their upper levels: jambs 0.8 m, a 1.1 m lintel, a raised threshold), medium, light (service doors), clamped to fit the passage |
-| Floors | Joints every one or two cells and a paved border 1.2 m from the walls |
+| Floors | Joints every one or two cells and a paved border 1.2 m from the walls; in passages, gratings over shallow dark pits in about one cell in twenty |
+| Passage walls | Closed doors, raised niches, missing panels (above); conduits on brackets under the ceiling in four passages in ten (plain, slot, gallery, duct) |
 
 ### Light
 
-Openness (`labyrinth/light.rs`) is propagated on the cell grid from where the sky gets in: the top of every open space (voids, cleft, light well, shafts, lanterns) and the cells behind windows and loggias. It moves cell to cell inside a space, keeping a fraction per kind: 0.985 sideways and 0.962 down in voids, 0.985 down shafts, 0.955 in the hall, 0.95 in the stair hall, 0.9 in corridors, 0.8 in service passages, 0.7 in the undercroft. Through doors and windows it keeps 0.35 to 0.8 by area, down out of a shaft into the room below 0.92, through the arch 0.97. Then each kind has a darkest value:
+Openness (`labyrinth/light.rs`) is propagated on the cell grid from where the sky gets in: the top of every open space (voids, cleft, light well, shafts, lanterns) and the cells behind windows and loggias. It moves cell to cell inside a space, keeping a fraction per kind, sideways and down:
 
-| Kind | Darkest | Why |
+| Kind | Sideways | Down |
 |---|---|---|
-| Corridors, junctions, antechambers, landing, loggias | 0.46 | Stay grey, pencil in shade |
-| Towers, service passages, hall, stair hall | 0.36 | Darker, still above black |
-| Undercroft, chamber, cistern | 0.03 | Fall to black except where light reaches |
-| Everything else | 0.2 | |
+| Voids | 0.985 | 0.962 |
+| Shafts | 0.97 | 0.992 |
+| Great hall | 0.955 | |
+| Stair hall | 0.95 | |
+| Corridors | 0.9 | |
+| Service passages | 0.8 | |
+| Cistern | 0.7 | 0.96 |
+| Undercroft | 0.62 | 0.97 |
+| Vents, side rooms | 0.7 | |
 
-These are set against the shading's dark end. In `nihei_ink` (E066) a light value below 0.06 is solid black, closing in up to about 0.26. So the deepest places (undercroft, cistern basin, chamber) print black with white rules, the light shafts make grey pools on the undercroft floor, and passages print dark grey with pencil (E209). The hall's far end, the stair hall and the void tops are sunlit or pale. The scene's sun is 62 degrees up at azimuth 135 (`Sun::for_scene("labyrinth")`, E204), so it reaches down into the void.
+Light falls straight down a shaft into the dark rooms and stays local, so the shafts make pools. Through doors and windows it keeps 0.35 to 0.8 by area, out of a shaft into the room below 0.95, through the arch 0.97. The floor is 0.03 everywhere.
+
+Round 3 drops the per-kind minimums of E209 ("I want the darks to be really dark"; the renderer has a weak player-carried light). A facing term `0.8 + 0.2 n.y` keeps floors, walls and ceilings a step apart in tone.
+
+The shading now prints openness below about 0.12 fully black, with the black closing in below about 0.45. So enclosed passages, side rooms and vents are black except where the player's light reaches, and light is placed as accents:
+
+- the void tops and the sunlit end of the hall;
+- the stair hall's windows;
+- three shafts into the undercroft (pools round the piers, and one against the far wall so light falls down it);
+- two into the cistern (over the basin, and over a corner of the walkway: a lit landing);
+- lantern crossings.
+
+The sun is 62 degrees up at azimuth 135 (`Sun::for_scene`).
 
 ### Sight lines
 
@@ -129,9 +198,55 @@ The director records views (`Plan::views`) that must stay open:
 
 Beams in voids are rejected if they cross a view. `World::ray_clear` checks each view in collider space: railings and parts under 10 cm do not count, solids do. The check runs in the tests and in the seed sweep.
 
+### Culling data (round 3)
+
+For the renderer's culling, additive and generic (other scenes leave them empty):
+
+- **`MeshData::chunks: Vec<Chunk>`** (`crates/gen/src/mesh.rs`). Each chunk has `space: u32`, `min`/`max` (bounds of its vertices and stroke ends), `index_start`/`index_count` (a contiguous range of `indices`, a multiple of 3) and `stroke_start`/`stroke_count` (a contiguous range of `strokes`). Chunks cover both arrays completely and in order.
+  - Space ids are the volume ids of the plan (`Plan::volume`): a ledge belongs to its void, the gallery to the hall, the landing to the stair hall. `mesh::OUTSIDE` (`u32::MAX`) is the outer skin.
+  - Spaces taller than 60 m are cut into 36 m height bands, several chunks with one id (the deep void, cleft, light well, shafts, lanterns).
+  - Built by `MeshBuilder::set_group` while emitting and `MeshBuilder::chunk(60.0, 36.0)` at the end, which reorders triangles and strokes and leaves vertices in place.
+- **`Scene::portals: Vec<ScenePortal>`**. Each portal has `a`, `b` (space ids, `OUTSIDE` for the sky or outside) and `quad` (four corners in order).
+  - Every door, window and vent mouth, on the plane halfway through its wall.
+  - The giant arch.
+  - The bottom of each light shaft (the ceiling hole into the room below).
+  - The open top of every open space.
+  - From `Plan::scene_portals`.
+- **`Scene::space_boxes: Vec<SpaceBox>`**, to find the space the camera is in. Each box has `space`, `min`, `max`: each room's inner box, each passage cell (stair halls over both storeys, vents at their height), and each walkable doorway's thickness. From `Plan::space_boxes`.
+
+On the default seed: 188 chunks, 265 portals, 1,194 boxes. Tests check:
+
+- the chunks are contiguous, cover the mesh and bound their vertices;
+- the void is cut into at least three bands;
+- every portal joins spaces that have chunks;
+- every such space has boxes;
+- the spawn and every landmark lie in a box.
+
 ### Landmarks
 
 `Plan::landmarks()` gives named cameras (eye, yaw, pitch) at the set pieces and in one passage of each section, computed from the plan. Capture paths built on these follow the generator when it changes, where fixed coordinates go stale (the round-1 `lab_*` paths now point at the wrong places). A test checks every landmark eye is in open space.
+
+### Size and growth (round 3)
+
+The region size and storey count are parameters: `labyrinth::nx()`, `nz()`, `ny()`, thread-local, `DEFAULT_DIMS` (96, 88, 26), set for one build by `build_sized(seed, dims, bake)`. The director scales its placements with the plan size; set-piece sizes do not change.
+
+Measured (`labyrinth_scaling`, default seed, release; bounce bake times vary by 1.5 times between runs):
+
+| Region (cells x, z, storeys) | Plan | Total build | Bounce bake | Walkable spaces | Triangles |
+|---|---|---|---|---|---|
+| 96, 88, 26 (default) | 128 ms | 0.30 s | 1.8 to 2.9 s | 146 | 437,346 |
+| 136, 124, 26 (2 times the plan area) | 874 ms | 1.05 s | 3.9 s | 188 | 546,368 |
+| 192, 176, 26 (4 times) | 2,270 ms | 2.44 s | 2.3 s | 190 | 608,996 |
+| 96, 88, 52 (2 times the storeys) | 133 ms | 0.28 s | 1.8 s | 146 | 542,942 |
+
+What breaks or does not scale:
+
+- The director places the same seven set pieces however big the region is, so a larger region is the same labyrinth spread thinner, with longer passages: plan time grows with route length (A* over more cells), the number of spaces barely grows, and the map gets emptier.
+- Doubling the storeys only stretches the voids and shafts taller (more wall triangles, a longer bounce bake) without adding anything to walk.
+- A* has a cap of 400,000 expansions per route, which very long arcs could reach.
+- The bounce bake grows with triangles and is already 2 to 3 s at load.
+
+Real growth needs the plan's L0 and L1 layers: several districts, each with its own set pieces and director, joined by long connectors, generated lazily (M5).
 
 ## Technical details
 
@@ -142,9 +257,10 @@ Beams in voids are rejected if they cross a view. `World::ray_clear` checks each
 | `CELL`, `LEVEL` | 4 m, 6 m | Grid; a passage stair climbs one `LEVEL` in three cells |
 | `RISERS_PER_LEVEL` | 36 (rise 0.1667 m) | `kit::STAIR_RISE_MIN..MAX`; player step 0.3 m |
 | Narrowest passage | 2.0 m wide, 2.8 m high, doors 1.2 by 2.2 m | Capsule 1.8 m by 0.3 m |
+| `VENT_W`, `VENT_H`, `VENT_LIP` | 1.2 m, 1.0 m, 0.3 m | Crouched capsule 0.9 m by 0.3 m, step 0.45 m |
 | Lowest overhead in a duct | 2.45 m (pipes) | Capsule |
 | Thresholds | 0.12 m | Step 0.3 m |
-| `NX`, `NZ`, `NY` | 96, 88 cells, 26 storeys | Region 384 by 352 by 156 m |
+| `DEFAULT_DIMS` | 96, 88 cells, 26 storeys | Region 384 by 352 by 156 m |
 | `SLAB`, `SKIN` | 0.6 m, 2 m | |
 | `CISTERN_WALK` | 4.5 m | Walkway depth |
 | `DEFAULT_SEED` | `0x1ab_0001` | Scene registry |
@@ -172,11 +288,15 @@ Beams in voids are rejected if they cross a view. `World::ray_clear` checks each
 - Same content hash twice for a seed; another seed differs.
 - Mesh invariants and finite colliders for five seeds; the baked scene has places darker than 0.15 and lighter than 0.8.
 - Graph for six seeds: no core or loop link is a cut link, cycle rank at least 6, spurs exist, at least 30 walkable spaces of at least 14 kinds, all six link kinds, the core spans at least 10 storeys, everything connected to the spawn.
-- **Reachability** for three seeds: a flood fill from the spawn's feet over standing places 0.5 m apart, stepping at most 0.3 m, with a capsule 1.8 m by 0.3 m clear of every collider and no drops. It must reach every walkable space's anchors and cross every walkable door (at least 0.9 by 2.0 m). The anchors include the cistern basin, the stair hall's floor and landing, each tower's bottom and top, and just inside every door.
+- **Reachability, two profiles**, for three seeds. Standing (1.8 m, radius 0.3 m, step 0.3 m) must reach every space not reached only by crawling and cross every walkable door. Crouched (0.9 m, radius 0.3 m, step 0.45 m) must reach every vent and outlet and cross every vent mouth (at least 1.0 by 1.0 m). The method, for the standing case:
+- a flood fill from the spawn's feet over standing places 0.5 m apart, stepping at most 0.3 m, with a capsule 1.8 m by 0.3 m clear of every collider and no drops. It must reach every walkable space's anchors and cross every walkable door (at least 0.9 by 2.0 m). The anchors include the cistern basin, the stair hall's floor and landing, each tower's bottom and top, and just inside every door.
 - **Sight lines** for three seeds, as above.
 - **Landmarks** in open space for three seeds.
 - Stairs: whole treads of 0.30 m, rise 0.15 to 0.18 m, under 40 degrees.
-- Seed sweep (ignored): 100 seeds, invariants, reachability and sight lines all pass; mean 1.26 embedding attempts, at most 4.
+- Chunks, portals and space boxes (above).
+- Graph: at least 3 vents, at least 4 side rooms; no space on foot depends on a vent link.
+- Seed sweep (ignored): 100 seeds, invariants, reachability for both profiles and sight lines all pass; mean 1.22 embedding attempts, at most 4.
+- Ignored tools: `labyrinth_scaling` (above), `debug_budget` (triangles and strokes per kind of space), `debug_vent`.
 
 ```
 cargo test -p mega_gen labyrinth
@@ -185,20 +305,36 @@ SWEEP=100 cargo test --release -p mega_gen -- --ignored --nocapture labyrinth_se
 LABYRINTH_SVG=<file.svg> cargo test --release -p mega_gen -- --ignored labyrinth_diagram
 ```
 
-### Measured (Apple M3 Max, release, default seed, round 2)
+### Measured (Apple M3 Max, release, default seed, round 3)
 
 | | Labyrinth | Shaft |
 |---|---|---|
-| Vertices | 427,240 | 155,106 |
-| Triangles | 412,826 (1.8 times the shaft) | 225,670 |
-| Strokes | 46,618 (about 3,600 drawn from the spawn) | 6,126 |
-| Colliders | 6,095 | 1,288 |
-| Build in `mega_capture` | 190 ms (plan 134, geometry 11, light 2, AO 54) | 19 ms |
-| Bounce bake | 1.95 s | 0.49 s |
-| Frame 2560x1440 at the spawn (`--bench 60`) | 16.1 ms (6.1 ms in round 1; nothing is culled) | |
-| Reachability flood fill | 143 ms, 96,554 places | |
-| Spaces | 108 (102 walkable), cycle rank 7 | |
-| Core loop | about 2.26 km: 15 min walking, 6.3 min running (estimate: passages, tower climbs, a crossing of each room, bridges); loops and spurs add more | |
+| Vertices | 483,557 | 155,106 |
+| Triangles | 437,346 (1.94 times the shaft; the cap this round is 2.5) | 225,670 |
+| Strokes | 56,498 (about 4,700 drawn from the spawn) | 6,126 |
+| Colliders | 8,012 | 1,288 |
+| Build in `mega_capture` | 291 ms (plan 130, geometry 13, light 40, AO 97) | 19 ms |
+| Bounce bake | 1.7 to 3.0 s (varies with machine load) | 0.49 s |
+| Frame 2560x1440 at the spawn (`--bench 60`, with the render crate's culling) | 10.9 ms | |
+| Reachability flood fills (both profiles) | 310 ms | |
+| Spaces | 154 (146 walkable), 167 links, cycle rank 16 | |
+| Core loop | about 2.2 km: 14.7 min walking (estimate); branches, loops, side rooms and vents add more | |
+
+Triangles by kind (`debug_budget`), largest first:
+
+| Kind | Triangles |
+|---|---|
+| Corridors | 69,000 |
+| Great hall | 49,000 |
+| Void | 44,000 |
+| Service passages | 42,000 |
+| Outside | 40,000 |
+| Towers | 40,000 |
+| Light wells | 37,000 |
+| Junctions | 31,000 |
+| Cistern | 24,000 |
+| Side rooms | 16,000 |
+| Vents | 3,400 |
 
 ### Looking at it
 
@@ -212,11 +348,12 @@ cargo run --release --bin megastructure -- --scene labyrinth        # owner only
 
 `--camera` takes the field of view in radians. The E205 tour cameras are in `experiments.md`; `Plan::landmarks()` lists the same places from the plan.
 
-## Review notes
-
-- 2026-11-16, owner, first look: "The extra detail really helps actually, the labyrinth is basically a way nicer version of the shaft scene!" The surface articulation (coursing, voussoirs, buttresses and blocks on the void walls, lined reveals, frames) does real work with the wash and pencil look; round 2 gives new passages and set pieces the same level of detail.
-
 ## Open questions
+
+- Crawlable vents run through the mass; none yet visibly crosses a big space (the exposed ducts there are solid).
+- The cleft and light well got no new ledges or stairs this round.
+- Gallery passages are drawn towards big spaces by the router; the effect is modest.
+- With the darks really dark, most of the labyrinth is black away from the player's light; the review sheet (E210) uses raised ambient for the interiors.
 
 - The frame time has grown to 16 ms at 1440p with everything drawn; culling by space (the plan's AABBs are ready for it) will be needed before the region grows again.
 - The bounce bake is now about 2 s at load.
@@ -230,4 +367,4 @@ cargo run --release --bin megastructure -- --scene labyrinth        # owner only
 
 ## Related experiments
 
-E201 (first slice and tour), E202 (embedding failures and door cells), E203 (void wall clutter), E204 (sun elevation), E205 (round 2 tour), E206 (passage sections), E207 (longer, more tangled core), E208 (sight lines), E209 (light in the dark places).
+E201 (first slice and tour), E202 (embedding failures and door cells), E203 (void wall clutter), E204 (sun elevation), E205 (round 2 tour), E206 (passage sections), E207 (longer, more tangled core), E208 (sight lines), E209 (light in the dark places), E210 (round 3 tour), E211 (culling data), E212 (side rooms, branches, real doors), E213 (vents and the crouched profile), E214 (light accents with really dark darks), E215 (scaling).

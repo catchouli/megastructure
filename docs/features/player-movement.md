@@ -2,17 +2,24 @@
 
 ## Status
 
-Working, 2026-11-16: the movement model was replaced with one modelled on Quake 2's player movement (the owner, 2026-11-16: "the character controller is alright right now, but it feels a tiny bit clumsy. Are you familiar with quake 2? It has a really agile character controller that's a lot of fun to run and jump around with, any chance we can make it work like that?"). The collision primitives, falling, death, the stable spot, the fixed step and interpolation are as before (2026-11-15). Verified by unit tests on hand-built colliders and by scripted runs in the real shaft scene, with no window: the shaft route at run and walk, hopping the bridge and the stair, a strafe-jump bot, falls, and a jump over B1's railing. The feel has not been judged: nothing has been run in a window. The step height contract changed from 0.3 m to 0.45 m.
+Working, 2026-11-16: the movement model was replaced with one modelled on Quake 2's player movement (the owner, 2026-11-16: "the character controller is alright right now, but it feels a tiny bit clumsy. Are you familiar with quake 2? It has a really agile character controller that's a lot of fun to run and jump around with, any chance we can make it work like that?"). The collision primitives, falling, death, the stable spot, the fixed step and interpolation are as before (2026-11-15). Verified by unit tests on hand-built colliders and by scripted runs in the real shaft scene, with no window: the shaft route at run and walk, hopping the bridge and the stair, a strafe-jump bot, falls, and a jump over B1's railing. The step height contract changed from 0.3 m to 0.45 m.
+
+Crouching and crawling added the same day, for vents (the owner, 2026-11-16: "I had the idea of adding vents you can crawl around, which would be really cool too and could be used to connect different areas."). Verified only on hand-built collider worlds (a 1 m slab, a 1 m by 1 m vent with two bends, vent mouths 0.45 m and 1.4 m up), not in the labyrinth scene, whose vents were being built at the same time. Crouching has not been tried in a window.
+
+### Review notes
+
+- 2026-11-16, on the Quake movement and on railings being jumpable: "Yep keep it, controls work well, it's way more fun to run around and jump off stuff now." Railings stay at 1.1 m and jumpable; the jump is unchanged.
 
 ## What it is
 
-First-person running, walking and jumping through the structure, with Quake's quick starts, crisp stops, big jump, air control and strafe-jumping. Falling is physically plain: gravity, air drag and a terminal velocity. Hitting a surface too fast is fatal. Falling into open void simply continues. The fly camera is kept as a debug mode.
+First-person running, walking, jumping and crawling through the structure, with Quake's quick starts, crisp stops, big jump, air control and strafe-jumping, and a crouch that gets the player through 1 m vents. Falling is physically plain: gravity, air drag and a terminal velocity. Hitting a surface too fast is fatal. Falling into open void simply continues. The fly camera is kept as a debug mode.
 
 ## Design
 
 - **Grounded movement.** Running by default, walking with Shift. Full speed in about 0.15 s, a stop in about 0.35 s. Step-up over ledges up to 0.45 m and smooth stair climbing.
 - **Jumping.** Quake's jump in proportion to the body: 1.45 m high, 0.68 s in the air, so ledges up to about 1.9 m can be jumped onto (the step-up works in the air on the way down). No double jump, no climbing, no mantling. The 1.1 m railings can be jumped over.
 - **Air control.** Steering in the air, and strafe-jumping (turning while holding a strafe key, hopping on landing) builds speed beyond the run speed, as in Quake.
+- **Crouching and crawling.** Holding C or Ctrl crouches: the body is half height (0.9 m), the eye drops from 1.65 to 0.75 m over about 0.1 s, and the top speed is 4 m/s. Letting go stands up as soon as there is room, never before. Crouching in the air pulls the legs up instead (the feet rise 0.9 m and the head stays), so a running jump with a crouch reaches a vent mouth 1.4 m up. Vents are at least 1 m high and 1 m wide, with mouths at floor level or up to 0.45 m up (stepped into crouched), or up to 1.4 m (jumped into).
 - **Ledges.** Nothing stops the player at an edge. Walking or jumping off means falling.
 - **Falling.** Gravity with quadratic drag, so speed approaches a terminal velocity instead of growing without bound.
 - **Impact.** On landing, the speed along the surface normal decides the outcome: below a threshold nothing happens, above it the player dies. The threshold is set as a fall height (10 m). A middle band (stumble, camera dip) is optional.
@@ -33,16 +40,19 @@ Bindings are by physical key position, so they do not depend on the keyboard lay
 | Look | Mouse, or the arrow keys (required: the game must be fully playable from the keyboard) | both |
 | Jump | Space (a press; a press up to 0.1 s before landing still jumps) | walking |
 | Walk | Shift (running is the default; `ALWAYS_RUN` swaps them) | walking (fly: five times faster) |
+| Crouch | C or Ctrl, held | walking (fly: Ctrl is down, C does nothing) |
 | Back to the last stable ground | R | walking |
 | Switch between walking and the fly camera | F | both |
-| Up / down | E or Space / Q or Ctrl | flying only; in walking E, Q and Ctrl do nothing |
+| Up / down | E or Space / Q or Ctrl | flying only; in walking E and Q do nothing and Ctrl crouches |
 | Fly speed | Scroll | flying |
 | Screenshot | P or F12 (`screenshots.md`) | both |
 | Quit | Escape | both |
 
-Arrow-key look turns at a fixed angular rate of 90 degrees per second (`ARROW_TURN_RATE_DEG` in `crates/game/src/sim.rs`), independent of frame rate, with pitch clamped as for the mouse, and works alongside mouse look. There is no crouch.
+Arrow-key look turns at a fixed angular rate of 90 degrees per second (`ARROW_TURN_RATE_DEG` in `crates/game/src/sim.rs`), independent of frame rate, with pitch clamped as for the mouse, and works alongside mouse look.
 
-`F` and `R` act on the key press (the rising edge): holding the key does not repeat it. In the windowed game a press shorter than one frame still counts. The stats window shows the horizontal speed while walking.
+C is the crouch key to use on a Mac: macOS takes Ctrl with the arrow keys (switching Spaces) and Ctrl with a click (a right click), so Ctrl-crouch and arrow-key look or mouse look with a button held clash there. Ctrl works on other keyboards.
+
+`F` and `R` act on the key press (the rising edge): holding the key does not repeat it. In the windowed game a press shorter than one frame still counts. The stats window shows the horizontal speed while walking, and "crouched".
 
 ### For the owner: what to try, and what to change
 
@@ -54,8 +64,9 @@ Run `cargo run --release --bin megastructure -- --scene shaft` and try:
 4. Strafe-jumping on the hall floor: hold W and A, sweep the mouse left steadily (about 30 to 45 degrees per second), and tap Space as you land. The speed in the stats window should climb past 9.6 m/s. With the arrow keys the turn is fixed at 90 degrees per second, which is too fast to gain much.
 5. Bunny-hopping along B1 and into a railing: the hop clears the 1.1 m railing and the player falls 400 m and returns to the bridge. Is that wanted?
 6. Jump at a block or ledge up to about 1.9 m high: the feet catch its top on the way down and the player lands on it.
+7. Crawl a vent in the labyrinth (C held): in through a mouth at floor level or one step up, round the bends, and out; let go of C inside and the player should stay crouched until out. Try a high mouth (1.4 m) with a running jump, pressing C at take-off or in the air.
 
-Constants to tweak, all in `crates/game/src/player.rs` under "Quake 2 movement": `RUN_SPEED`, `WALK_SPEED`, `ALWAYS_RUN`, `GROUND_ACCEL` (snappier starts), `FRICTION` and `STOP_SPEED` (stops), `AIR_ACCEL` (air control and strafe-jump gain), `JUMP_SPEED` and `GRAVITY` (jump height is `JUMP_SPEED^2 / 2 GRAVITY`, air time `2 JUMP_SPEED / GRAVITY`), `AUTO_HOP` (hold Space to keep hopping), and `STEP_HEIGHT`. `FATAL_FALL_HEIGHT` sets death by height whatever the gravity.
+Constants to tweak, all in `crates/game/src/player.rs` under "Quake 2 movement": `RUN_SPEED`, `WALK_SPEED`, `ALWAYS_RUN`, `GROUND_ACCEL` (snappier starts), `FRICTION` and `STOP_SPEED` (stops), `AIR_ACCEL` (air control and strafe-jump gain), `JUMP_SPEED` and `GRAVITY` (jump height is `JUMP_SPEED^2 / 2 GRAVITY`, air time `2 JUMP_SPEED / GRAVITY`), `AUTO_HOP` (hold Space to keep hopping), and `STEP_HEIGHT`; and under "Crouching", `CROUCH_SPEED` and `CROUCH_EYE_RATE`. `FATAL_FALL_HEIGHT` sets death by height whatever the gravity.
 
 ## Technical details
 
@@ -94,6 +105,22 @@ Each fixed step does, in order: depenetrate; a jump if one is due; friction and 
 - **Air move.** Gravity and drag (below), then the same slide, with surfaces as they are (a steep slope is slid down). Touching walkable ground while rising slower than `LAND_MAX_RISE` (5.79 m/s, Quake's 180 units/s) is a landing: the vertical speed is lost and the horizontal speed kept (E108). Otherwise the velocity is clipped against what was touched. Coming down against something steep, the step-up is tried in the air too, as Quake 2 does: a ledge whose top is within a step of the feet is landed on instead of slid down. That is why a 1.45 m jump reaches ledges up to about 1.9 m.
 - **Eye.** `eye = feet + 1.65 m + eye_offset`. After a step-up (on the ground or in the air) or a snap down by more than 0.12 m beyond what the slope under the feet accounts for, the offset takes up the jump and decays at 14 per second (exponentially), so a ledge does not pop the picture. Slopes and stairs are never smoothed, at any speed: the eye follows them exactly (E103). Quake 2 smooths steps linearly over 0.1 s on the client; the exponential was kept.
 
+### Crouching
+
+`Walker::crouched` switches the capsule between `CAPSULE_HEIGHT` (1.8 m) and `CROUCH_HEIGHT` (0.9 m), radius 0.3 m in both. Every query (sweeps, the step-up, sticking to the ground, depenetration) uses the current height: `World::cast_h`, `depenetrate_h` and `fits` take it. At the start of each step, before anything moves:
+
+- **Crouch** (key held, standing): on the ground the feet stay and the top comes down; in the air the top stays and the feet come up by 0.9 m (the legs pulled up). The crouched capsule lies inside the standing one, so either is always free. This is the Half-Life and Source duck in the air; Quake 2's duck keeps the feet in both cases. Both get a running jump into a 1.4 m mouth (E111: 11 of 12 trials lifting, 12 of 12 keeping, both carried by the step-up catching the lip); lifting reaches higher, to ledges about 2.35 m plus a step, which is the crouch-jump of those games.
+- **Stand** (key up, crouched): on the ground the top goes up; in the air the feet come down by up to 0.9 m, as far as a downward sweep finds room. Only if the whole standing capsule then `fits` (no overlap beyond 0.1 mm); otherwise it stays crouched and tries again next step. So standing never moves the capsule into anything.
+- **Safety net**: a standing capsule that does not fit where a crouched one does (arriving from the fly camera inside a vent) crouches instead of being pushed out through a wall.
+
+The top speed crouched is `CROUCH_SPEED` (4 m/s; Quake 2 halves the wanted speed, which would be 4.8 m/s), or the walk speed with Shift. Friction, acceleration, jumping, the step-up (0.45 m) and slopes are unchanged; a jump crouched under a vent's ceiling meets the ceiling at once and falls back without harm.
+
+**Eye.** The eye height is `CROUCH_EYE_HEIGHT` (0.75 m) crouched. A crouch or stand changes `crouch_eye` by the difference so the eye does not move at that instant, and `crouch_eye` decays at `CROUCH_EYE_RATE` (25 per second: 63 percent in 0.04 s, 95 percent in 0.12 s). In the air the crouch moves the feet and the eye together, so nothing changes in the picture. While the eye is above its resting height (`crouch_eye` or `eye_offset` positive), it is held no higher than the current capsule could rise from where it is (one sweep upwards), so the eye stays 0.15 m under a capsule that fits and never shows through a ceiling, even when the player crouches at the last moment before a slab (E111).
+
+**Step-up into a mouth.** A step-up first raises the capsule as far as there is room (up to 0.45 m). In front of a vent mouth that is too high: the crouched head goes into the wall above the 1 m mouth, which leaves only 0.1 m of play. If the forward probe is blocked at the full rise, the step is retried `STEP_RETRY` (5 cm) lower each time down to 2 cm, so some rise falls inside any gap at least 9 cm taller than the capsule (E112). This is also what catches a mouth's lip on the way down from a jump.
+
+**Stable spot.** Spots are recorded crouched too (the ring check passes in a 1 m vent: the walls count as solid), with `stable_crouched`; a death or `R` returns there crouched, and the player stands only when there is room. So R in a vent goes back a short way along the vent, not out of it.
+
 ### Falling
 
 `a = g - k * v * |v|` with `k = g / v_t^2` is applied to the whole velocity vector, in the air only. `GRAVITY` is Quake's 800 units/s^2, 25.7 m/s^2 (2.6 g); `TERMINAL_VELOCITY` stays 55 m/s, so drag is 2.6 times stronger than before and the terminal velocity is reached sooner: 73 percent of it after 2 s, and a 400 m fall takes 8.8 s (11 s before). Drag also takes about 0.5 m/s off a 9.6 m/s run during one jump (Quake has no drag), so plain hopping is slightly slower than running. Integration is fixed at `FIXED_DT = 1/60 s`: a midpoint step for the velocity, and the displacement from the average of the old and new velocity, which gives the exact apex for a jump and a speed within 0.1 m/s of the analytic `v_t tanh(g t / v_t)`; the speed is clamped to `TERMINAL_VELOCITY`.
@@ -129,6 +156,10 @@ Tuning and numerical constants:
 | Constant | Value | Meaning |
 |---|---|---|
 | `QUAKE_UNIT` | 1.8 / 56 = 32.1 mm | Metres per Quake 2 unit |
+| `CROUCH_HEIGHT`, `CROUCH_EYE_HEIGHT` | 0.9 m, 0.75 m | Crouched capsule (contract: vents at least 1 m by 1 m) and eye |
+| `CROUCH_SPEED` | 4 m/s | Top speed crouched (Quake 2: half the wanted speed) |
+| `CROUCH_EYE_RATE` | 25 per s | Eye following a crouch or a stand |
+| `STEP_RETRY` | 0.05 m | Lower retries of a blocked step-up |
 | `GROUND_ACCEL`, `AIR_ACCEL` | 10, 1 per s (times the wanted speed) | `pm_accelerate`; Quake 2's air factor |
 | `FRICTION`, `STOP_SPEED` | 6 per s, 3.21 m/s | `pm_friction`, `pm_stopspeed` 100 units/s |
 | `REST_SPEED` | 0.032 m/s | Below this the ground speed is zero (1 unit/s) |
@@ -168,6 +199,7 @@ Unit tests with no GPU, in `walker.rs`, `world.rs` and `sim.rs` on small hand-bu
 - Strafe-jumping: a bot that hops on every landing and keeps the strafe direction at the best angle to the velocity reaches 21 m/s in 5 s; the same bot hopping straight never exceeds the run speed.
 - No tunnelling: a 6 cm wall hit horizontally at 10, 20, 35 and 55 m/s at 24 angles up to 80 degrees off its normal, and a 6 cm plate hit from above at the same speeds at 24 tilts: never through, never inside.
 - A running jump lands on 1.2, 1.6 and 1.8 m blocks and not on 2.1 m; it clears a 1.1 m railing.
+- Crouching (`walker::crouch_tests`): the eye goes down with no snap (first step under half the way, 95 percent within 0.15 s), the feet stay, crouched top speed 4 m/s and 3 m/s with Shift, standing again in the open; standing is stopped by a 1 m slab while crouching gets under it, also when crouching late (x 2.3 and 2.6 for a slab at 3; at 2.6 the eye would reach 1.008 m without the hold), with the eye under 0.9 m and the stance crouched all the way under, and standing as soon as the slab ends with the key already up; a 1 m by 1 m vent with two right-angle bends is crawled (31 m of vent, 9 s from 3 m before its mouth to 3 m past its end), never overlapping a wall and never standing inside, also with the key released half way (stands once out); crouch toggled every step, every second and every third step in the vent, and crouch and jump spammed at its mouth: never inside a wall or out of the vent; jumping crouched in the vent hits the ceiling and carries on; a mouth 0.45 m up is stepped into crouched, walking and running, and not entered standing; a mouth 1.4 m up is entered by 11 of 12 running jumps (crouch at take-off, 10 or 20 steps after, from 0.3 to 1.5 m short; the miss is crouching at take-off 0.3 m short) and by a crouched run and jump; standing up in the air brings the feet down with no jump in the eye; a stable spot in the vent returns crouched; arriving in the vent from the fly camera crouches in place; crawling is deterministic.
 - Stepping into void keeps falling for 15 s with no reset; a scripted run (with hops and strafes) twice is bit-identical; the camera at 240 Hz over the 60 Hz step moves evenly when interpolated and exactly with the eye when not; the exact capsule-box distance matches a brute-force search over 3,000 random poses; modes, `F` and `R` edges, and fixed-step behaviour in `Sim`.
 
 Scenes: `shaft_tests.rs` walks the real shaft with the headless scripts: spawn to the hall at run and at walk speed (grounded on every frame, no death, bridge at y 400, stair top at the hall floor 421.42 m, in the hall, the eye never moving more than the stair slope allows at run speed in one frame); the stair up and down at both speeds, monotonic and never airborne; the feet against the generator's `stair_surface` walking and running; hopping (a press every 0.1 s) along B1, up the stair and down it, 40 hops with no death, no speed gain and never more than the jump's 1.447 m above the last ground; a step off B1 by the fly camera and a 400 m fall in 8.3 to 9.3 s ending in death and a return to the bridge; a running jump over B1's north railing ending the same way; a fall beside the structure that never ends; a ray down every quarter metre of B1; the headless state line of the spawn-to-hall route to the digit; and the stable spot following the player up the stair (R half way up returns within a metre).
@@ -181,16 +213,20 @@ Scenes: `shaft_tests.rs` walks the real shaft with the headless scripts: spawn t
 - Interpolation shows the walker up to one step (17 ms, 16 cm at run speed) behind. Whether that lag is noticeable at 120 Hz is unjudged: nothing was run in a window. Extrapolation would remove it but overshoots at stops and walls; not tried.
 - Nowhere narrower than about 1.3 m between drops can hold a stable spot (the ring check), so there a death or `R` goes back to the last wider place. None exists in the shaft; a narrow catwalk in a later scene would need a smaller ring.
 - A jump tap shorter than one rendered frame is missed in the windowed game (the key is sampled once per frame); F and R are latched, Space is not. With bunny-hopping this matters more than before.
-- **Railings no longer hold the player in** (E109). Railings are 6 cm thick boxes 1.1 m high, lower than the 1.45 m jump, and the air step-up reaches about 1.9 m. A running jump at any railing in the shaft clears it, and so does bunny-hopping into one (hopping down the stair at full speed carries the player across the landing and over its end railing). Death returns the player to the bridge, so it is cheap, but it is a change from "in the shaft the player cannot walk off an edge". Options: keep it (edges are open to a deliberate jump, as the owner wanted walking off an edge to mean falling); taller railings in the generator (about 1.5 m stops a jump, 2 m stops the air step-up as well); a lower `JUMP_SPEED` (an apex under 0.65 m, with the step, keeps 1.1 m railings shut, which is close to the old jump); or no air step-up.
+- Railings (1.1 m) can be jumped over (E109). Decided 2026-11-16: kept (review notes).
 - Pressing into a wall at an angle runs along it faster than the run speed (10.8 m/s at 30 degrees), a consequence of Quake's acceleration rule with the velocity clipped by the wall each step; Quake has the same. Not judged in play.
 - Drag costs about 0.5 m/s per jump at run speed, so plain hopping is slightly slower than running; Quake has no drag. Drag on the vertical component only would remove it but let a run off a ledge carry much further across a long fall.
 - Walking (Shift) reaches its 3 m/s in about 0.28 s, slower than the run's 0.15 s, because `STOP_SPEED` is above the walk speed; Quake's walk (2/3 of the run) does not have this. Raise `WALK_SPEED` or lower `STOP_SPEED` if walking feels sluggish.
 - With the arrow keys (90 degrees per second) strafe-jumping gains little (about 12 m/s at best); it needs a slower, steady turn, which only the mouse gives. A slower arrow-key turn while strafing in the air would make it keyboard-playable; not built.
-- No crouch: the capsule would need a second height with a check for room to stand, and Ctrl is down in fly mode.
+- Crouching at the moment of take-off from 0.3 m in front of a 1.4 m mouth misses it (the lifted feet meet the lip's face while still rising and the speed into the wall is lost); from further back, or crouching a little later, it gets in. Keeping the feet in the air (Quake 2's duck) gets that case in too but reaches less high (E111). Unjudged in play.
+- There is no crouch-slide and no crawl animation of the eye (bob); the crawl is a smooth glide at 4 m/s.
+- Spaces between 1.0 and 1.8 m high must be crouched through; nothing tells the player why they cannot stand, other than the eye staying low.
+- Ctrl-crouch clashes with macOS shortcuts (Ctrl with arrows, Ctrl-click); C is the Mac key.
+- Not tried against the labyrinth's real vents (being built concurrently): drops inside vents, sloped vents and vent mouths on walkways are unchecked.
 - Quake 2 stops a jump for a moment after a hard landing (`PMF_TIME_LAND`); not built, so a hop on landing from any height is allowed.
 - A capsule's round foot perches on a ledge's corner when its centre is up to 0.19 m past the edge, with the feet a few centimetres low, and slips off beyond that. Realistic, and visible only at edges.
-- The windowed path (key handling for F and R, the stats overlay) is untested.
+- The windowed path (key handling for F, R and C, the stats overlay) is untested.
 
 ## Related experiments
 
-E101 (parry shape casts or exact advancement), E102 (step-up with a round foot), E103 (smooth eye on stairs), E104 (where death returns to), E105 (ring of ground under the stable spot), E106 (showing the walker between steps), E107 (Quake 2 movement and its scale), E108 (landing while rising on a slope), E109 (railings and the Quake jump), E110 (eye smoothing beyond the slope).
+E101 (parry shape casts or exact advancement), E102 (step-up with a round foot), E103 (smooth eye on stairs), E104 (where death returns to), E105 (ring of ground under the stable spot), E106 (showing the walker between steps), E107 (Quake 2 movement and its scale), E108 (landing while rising on a slope), E109 (railings and the Quake jump), E110 (eye smoothing beyond the slope), E111 (crouching: feet or head, and the eye under a ceiling), E112 (stepping into a vent mouth).

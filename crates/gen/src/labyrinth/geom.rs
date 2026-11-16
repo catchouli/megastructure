@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 pub fn build(p: &Plan, b: &mut MeshBuilder) {
     for ri in 0..p.rooms.len() {
+        b.set_group(p.volume(p.rooms[ri].space));
         match p.rooms[ri].kind {
             SpaceKind::Void | SpaceKind::LightWell => void_room(p, b, ri),
             SpaceKind::GreatHall => hall(p, b, ri),
@@ -30,18 +31,29 @@ pub fn build(p: &Plan, b: &mut MeshBuilder) {
         }
     }
     for pass in &p.passages {
+        b.set_group(p.volume(pass.space));
         passage(p, b, pass);
     }
     for li in 0..p.ledges.len() {
+        b.set_group(p.volume(p.ledges[li].space));
         ledge(p, b, li);
     }
     bridges_and_stairs(p, b);
+    b.set_group(p.volume(p.rooms[p.arch.hall].space));
     arch(p, b);
     gallery(p, b);
     for o in &p.portals {
+        let side = o.between[0].or(o.between[1]).map(|s| p.volume(s)).unwrap_or(crate::mesh::OUTSIDE);
+        b.set_group(side);
         portal_reveal(b, o);
         door_frame(p, b, o);
+        vent_grille(p, b, o);
     }
+    for sd in p.side_doors.iter().filter(|sd| sd.ajar) {
+        b.set_group(p.volume(sd.room));
+        ajar_leaf(p, b, sd);
+    }
+    b.set_group(crate::mesh::OUTSIDE);
     skin(p, b);
 }
 
@@ -271,7 +283,7 @@ fn void_room(p: &Plan, b: &mut MeshBuilder, ri: usize) {
     let n_beams = if r.kind == SpaceKind::Void { 4 } else { 2 };
     let mut busy_rects: Vec<(Dir, [f32; 4])> = Vec::new();
     let mut placed = 0;
-    for k in (r.b.y0 + 2..NY - 1).rev() {
+    for k in (r.b.y0 + 2..ny() - 1).rev() {
         if placed >= n_beams {
             break;
         }
@@ -293,9 +305,11 @@ fn void_room(p: &Plan, b: &mut MeshBuilder, ri: usize) {
         if p.views.iter().any(|v| segment_hits_box(v.from, v.to, bmin, bmax)) {
             continue;
         }
+        let as_duct = rng.chance(0.5);
+        let span = |b: &mut MeshBuilder, a: Vec3, c: Vec3| if as_duct { exposed_duct(b, a, c, w.max(1.6), dep.min(1.6)) } else { kit::beam(b, a, c, w, dep, 0, 2.0); };
         if along_x {
             let z = (bmin.z + bmax.z) * 0.5;
-            kit::beam(b, Vec3::new(lo.x - 0.5, y, z), Vec3::new(hi.x + 0.5, y, z), w, dep, 0, 2.0);
+            span(b, Vec3::new(lo.x - 0.5, y, z), Vec3::new(hi.x + 0.5, y, z));
             for d in [Dir::XN, Dir::XP] {
                 busy_rects.push((d, [z - w, z + w, y - dep, y + dep]));
             }
@@ -304,7 +318,7 @@ fn void_room(p: &Plan, b: &mut MeshBuilder, ri: usize) {
             if (x - p.arch.x).abs() < 6.0 {
                 continue;
             }
-            kit::beam(b, Vec3::new(x, y, lo.z - 0.5), Vec3::new(x, y, hi.z + 0.5), w, dep, 0, 2.0);
+            span(b, Vec3::new(x, y, lo.z - 0.5), Vec3::new(x, y, hi.z + 0.5));
             for d in [Dir::ZN, Dir::ZP] {
                 busy_rects.push((d, [x - w, x + w, y - dep, y + dep]));
             }
@@ -519,6 +533,20 @@ fn hall(p: &Plan, b: &mut MeshBuilder, ri: usize) {
     }
     for &cz in &zs {
         kit::beam(b, Vec3::new(lo.x, beam_y - 0.1, cz), Vec3::new(hi.x, beam_y - 0.1, cz), 2.2, 3.0, 1, 2.0);
+    }
+    // A duct hung under the ceiling along the hall, beside the wall opposite the gallery.
+    {
+        let side = p.gallery.side.opposite();
+        let x = r.face(side) - side.sign() * 3.5;
+        let y = hi.y - 6.0;
+        exposed_duct(b, Vec3::new(x, y, lo.z + 3.0), Vec3::new(x, y, hi.z - 3.0), 1.6, 1.3);
+        let mut z = lo.z + 6.0;
+        while z < hi.z - 4.0 {
+            for dx in [-0.6f32, 0.6] {
+                kit::beam(b, Vec3::new(x + dx, y + 0.65, z), Vec3::new(x + dx, hi.y - 3.1, z), 0.12, 0.12, 3, 2.0);
+            }
+            z += 8.0;
+        }
     }
     wall_bands(p, b, r, lo.y, 0.9, 0.35, true, 2);
     wall_bands(p, b, r, hi.y - 2.2, 2.2, 0.8, false, 1);
@@ -739,7 +767,9 @@ fn stair_hall(p: &Plan, b: &mut MeshBuilder, ri: usize) {
 
 fn small_room(p: &Plan, b: &mut MeshBuilder, ri: usize) {
     let r = &p.rooms[ri];
-    room_box(p, b, r, &BoxStyle { vertical: 1, floor: 1, ceiling: 1, wall_cells: 1, wall_storeys: 1, floor_cells: 1, step: 1.5, seam_rank: 2 }, &[]);
+    // A lantern's walls rise to the roof: coarser cells there.
+    let step = if r.open_top { 4.0 } else { 1.5 };
+    room_box(p, b, r, &BoxStyle { vertical: 1, floor: 1, ceiling: 1, wall_cells: 1, wall_storeys: 1, floor_cells: 1, step, seam_rank: 2 }, &[]);
     let lo = r.inner_min();
     let hi = r.inner_max();
     let storey_top = if r.open_top { (r.b.y0 + 2) as f32 * LEVEL - SLAB } else { hi.y };
@@ -752,15 +782,19 @@ fn small_room(p: &Plan, b: &mut MeshBuilder, ri: usize) {
         for (cx, cz, sx, sz) in [(lo.x, lo.z, 1.0, 1.0), (hi.x, lo.z, -1.0, 1.0), (hi.x, hi.z, -1.0, -1.0), (lo.x, hi.z, 1.0, -1.0)] {
             let n = Vec3::new(sx, 0.0, sz).normalize();
             let t = Vec3::new(-sz, 0.0, sx).normalize();
-            let c = Vec3::new(cx, (lo.y + storey_top) * 0.5, cz);
-            kit::block(b, c, [t, Vec3::Y, n], Vec3::new(1.9, (storey_top - lo.y) * 0.5, 1.35), [false, false, false, true, false, true], Vec3::Y, 1.5, [Some(1), None, None], true);
+            // A slab across the corner, kept inside the room's walls.
+            let c = Vec3::new(cx, (lo.y + storey_top) * 0.5, cz) + n * 1.2;
+            kit::block(b, c, [t, Vec3::Y, n], Vec3::new(1.7, (storey_top - lo.y) * 0.5, 0.15), [false, false, false, true, false, true], Vec3::Y, 1.5, [Some(1), None, None], true);
         }
         if r.open_top {
             // The ring the lantern rises from.
             wall_bands(p, b, r, storey_top - 0.9, 0.9, 0.7, false, 1);
         }
     }
-    if matches!(r.kind, SpaceKind::Junction | SpaceKind::Antechamber | SpaceKind::Chamber | SpaceKind::Loggia) {
+    if r.kind == SpaceKind::SideRoom {
+        side_room(p, b, r);
+    }
+    if matches!(r.kind, SpaceKind::Junction | SpaceKind::Antechamber | SpaceKind::Chamber | SpaceKind::Loggia | SpaceKind::SideRoom) {
         wall_bands(p, b, r, lo.y, 0.45, 0.18, false, 2);
         if !r.open_top {
             wall_bands(p, b, r, hi.y - 0.7, 0.7, 0.35, false, 2);
@@ -792,6 +826,87 @@ fn small_room(p: &Plan, b: &mut MeshBuilder, ri: usize) {
                 (Vec3::new(o.u0, o.y0, outer), Vec3::new(o.u1, o.y0, outer), Vec3::Z * if o.between[0] == Some(r.space) { 1.0 } else { -1.0 })
             };
             kit::railing(b, a, c, out, 1.3, 1);
+        }
+    }
+}
+
+/// What a side room holds, by its style: 0 a cell (a bench, a raised niche), 1 a store room
+/// (shelving, crates), 2 a shrine (stepped plinth, altar, stele, two small columns), 3 a
+/// machine closet (cabinets, pipes floor to ceiling).
+fn side_room(p: &Plan, b: &mut MeshBuilder, r: &Room) {
+    let lo = r.inner_min();
+    let hi = r.inner_max();
+    let Some(sd) = p.side_doors.iter().find(|sd| sd.room == r.space) else { return };
+    let mut rng = rng(p, r.space, "furnish");
+    // The back wall faces the door; `inw` points from it into the room.
+    let back = sd.dir;
+    let inw = -back.vec();
+    let along = back.along();
+    let face = r.face(back);
+    let (u0, u1) = r.side_span(back);
+    let um = (u0 + u1) * 0.5;
+    let at = |u: f32, y: f32, d: f32| if back.is_x() { Vec3::new(face, y, u) } else { Vec3::new(u, y, face) } + inw * d;
+    let axes = [along, Vec3::Y, inw];
+    let h = hi.y - lo.y;
+    let fl = lo.y;
+    match r.style {
+        0 => {
+            kit::block(b, at(um, fl + 0.25, 0.4), axes, Vec3::new(((u1 - u0) * 0.5 - 0.3).min(1.1), 0.25, 0.4), [true, true, false, true, false, true], along, 1.0, [Some(2), Some(2), Some(2)], true);
+            kit::block(b, at(um - 0.6, fl + 1.6, 0.06), axes, Vec3::new(0.3, 0.4, 0.06), [true, true, true, true, false, true], Vec3::Y, 1.0, [Some(2), Some(2), Some(2)], false);
+        }
+        1 => {
+            // Shelving along the two side walls, crates on the floor.
+            for sg in [-1.0f32, 1.0] {
+                let u = if sg < 0.0 { u0 + 0.3 } else { u1 - 0.3 };
+                let depth = (hi - lo).with_y(0.0).length().min(6.0);
+                let len = ((if back.is_x() { hi.x - lo.x } else { hi.z - lo.z }) - 1.2).max(1.0);
+                let c = at(u, fl + 1.3, 0.6 + len * 0.5);
+                kit::block(b, c, axes, Vec3::new(0.3, 1.3, len * 0.5), [true, true, false, true, true, true], Vec3::Y, 1.0, [Some(2), Some(2), Some(2)], true);
+                for k in 1..5 {
+                    let y = fl + 2.6 * k as f32 / 5.0;
+                    let x = u - sg * 0.301;
+                    let (a, cc) = (at(x, y, 0.6), at(x, y, 0.6 + len));
+                    b.stroke(a, cc, -along * sg, Vec3::Y, StrokeKind::Seam, 2);
+                }
+                let _ = depth;
+            }
+            // Crates between the shelves, clear of the way in.
+            let room_depth = if back.is_x() { hi.x - lo.x } else { hi.z - lo.z };
+            for _ in 0..if room_depth > 4.5 { rng.int(2, 4) } else { 0 } {
+                let (sx, sy, sz) = (rng.range(0.3, 0.6), rng.range(0.3, 0.7), rng.range(0.3, 0.6));
+                let c = at(um + rng.range(-1.0, 1.0), fl + sy, rng.range(1.0, room_depth - 2.6));
+                kit::block(b, c, [Vec3::X, Vec3::Y, Vec3::Z], Vec3::new(sx, sy, sz), [true, true, false, true, true, true], Vec3::Y, 1.0, [Some(2), Some(2), Some(2)], true);
+            }
+        }
+        2 => {
+            for (k, (hw, hy, d)) in [(1.6f32, 0.18f32, 1.2f32), (1.2, 0.36, 0.9)].into_iter().enumerate() {
+                let _ = k;
+                kit::block(b, at(um, fl + hy * 0.5, d * 0.5), axes, Vec3::new(hw, hy * 0.5, d * 0.5), [true, true, false, true, false, true], along, 1.0, [Some(2), Some(2), Some(2)], true);
+            }
+            kit::block(b, at(um, fl + 0.36 + 0.5, 0.45), axes, Vec3::new(0.6, 0.5, 0.35), [true, true, false, true, false, true], along, 1.0, [Some(1), Some(1), Some(1)], true);
+            kit::block(b, at(um, fl + 0.86 + 1.0, 0.12), axes, Vec3::new(0.45, 1.0, 0.1), [true, true, false, true, false, true], Vec3::Y, 1.0, [Some(1), Some(2), Some(2)], false);
+            for sg in [-1.0f32, 1.0] {
+                kit::column_round(b, at(um + sg * 1.3, fl, 0.9), 0.18, (h - 0.2).min(3.2), 10, 1.5, 0.08, 1.0);
+            }
+        }
+        _ => {
+            for k in 0..rng.int(2, 3) {
+                let u = u0 + 0.6 + k as f32 * 1.1;
+                if u > u1 - 0.5 {
+                    break;
+                }
+                let ch = rng.range(1.4, 2.4);
+                let c = at(u, fl + ch * 0.5, 0.35);
+                kit::block(b, c, axes, Vec3::new(0.5, ch * 0.5, 0.35), [true, true, false, true, false, true], Vec3::Y, 1.0, [Some(1), Some(1), Some(2)], true);
+                for j in 1..4 {
+                    let y = fl + ch * j as f32 / 4.0;
+                    b.stroke(at(u - 0.45, y, 0.701), at(u + 0.45, y, 0.701), inw, inw, StrokeKind::Seam, 3);
+                }
+            }
+            for k in 0..3 {
+                let u = u1 - 0.3 - k as f32 * 0.35;
+                pipe(b, at(u, fl, 0.25), at(u, hi.y, 0.25), 0.1);
+            }
         }
     }
 }
@@ -874,14 +989,15 @@ fn pieces(pass: &Passage) -> Vec<Piece> {
     for s in &pass.path {
         match *s {
             Step::Flat(c) => {
-                let y0 = c.y as f32 * LEVEL;
+                let y0 = c.y as f32 * LEVEL + pass.style.floor_off();
                 push(&mut out, Piece { x: c.x, z: c.z, y0, y1: y0 + h, flat: true, conn: [None; 4] });
             }
             Step::Stair { from, dir, up } => {
                 let lo = if up { from.y } else { from.y - 1 };
                 for k in 1..=3 {
                     let c = from.step(dir, k);
-                    push(&mut out, Piece { x: c.x, z: c.z, y0: lo as f32 * LEVEL, y1: (lo + 1) as f32 * LEVEL + h, flat: false, conn: [None; 4] });
+                    let off = pass.style.floor_off();
+                    push(&mut out, Piece { x: c.x, z: c.z, y0: lo as f32 * LEVEL + off, y1: (lo + 1) as f32 * LEVEL + h + off, flat: false, conn: [None; 4] });
                 }
             }
         }
@@ -913,7 +1029,11 @@ fn passage(p: &Plan, b: &mut MeshBuilder, pass: &Passage) {
     let floor_coarse = b.new_coarse();
     let mut rng = rng(p, pass.space, "geom");
     let style = pass.style;
-    let dado = if service || style == PassStyle::Slot { None } else { Some(rng.range(1.0, 1.6)) };
+    let vent = style == PassStyle::Vent;
+    let dado = if service || vent || style == PassStyle::Slot { None } else { Some(rng.range(1.0, 1.6)) };
+    let conduit = !vent && matches!(style, PassStyle::Plain | PassStyle::Slot | PassStyle::Gallery | PassStyle::Duct) && rng.chance(0.4);
+    // Gratings over dark pits in a few floor cells.
+    let gratings: Vec<bool> = (0..pieces(pass).len()).map(|_| !vent && rng.chance(0.05)).collect();
     let straight = |pc: &Piece| {
         let c: Vec<bool> = (0..4).map(|i| pc.conn[i].is_some()).collect();
         (c[0] && c[1] && !c[2] && !c[3]) || (c[2] && c[3] && !c[0] && !c[1])
@@ -986,7 +1106,7 @@ fn passage(p: &Plan, b: &mut MeshBuilder, pass: &Passage) {
             let fine = b.panel();
             for i in 0..3 {
                 for j in 0..3 {
-                    if !open[i][j] {
+                    if !open[i][j] || (up && gratings[k] && i == 1 && j == 1) {
                         continue;
                     }
                     let (x0, x1, z0, z1) = (xs[i], xs[i + 1], zs[j], zs[j + 1]);
@@ -994,6 +1114,23 @@ fn passage(p: &Plan, b: &mut MeshBuilder, pass: &Passage) {
                     let vs = grid_lines(z1 - z0, 2.0, &[]);
                     let n = if up { Vec3::Y } else { -Vec3::Y };
                     b.grid_face(Vec3::new(x0, y, z0), Vec3::X, Vec3::Z, &us, &vs, n, Vec3::X, fine, floor_coarse);
+                }
+            }
+        }
+        if pc.flat && gratings[k] {
+            grating(b, xs[1], xs[2], zs[1], zs[2], pc.y0, floor_coarse);
+        }
+        // Flanges of a vent at each cell boundary it continues through.
+        if vent && pc.flat {
+            for d in [Dir::XP, Dir::ZP] {
+                if pc.conn[d.index()].is_some() {
+                    let (a0, a1) = if d.is_x() { ((xs[3], zs[1]), (xs[3], zs[2])) } else { ((xs[1], zs[3]), (xs[2], zs[3])) };
+                    for (y, nn) in [(pc.y0 + 0.003, Vec3::Y), (pc.y1 - 0.003, -Vec3::Y)] {
+                        b.stroke(Vec3::new(a0.0, y, a0.1), Vec3::new(a1.0, y, a1.1), nn, nn, StrokeKind::Seam, 2);
+                    }
+                    for (u, v) in [a0, a1] {
+                        b.stroke(Vec3::new(u, pc.y0, v), Vec3::new(u, pc.y1, v), Vec3::Y, Vec3::Y, StrokeKind::Seam, 2);
+                    }
                 }
             }
         }
@@ -1032,21 +1169,31 @@ fn passage(p: &Plan, b: &mut MeshBuilder, pass: &Passage) {
         }
         for w in merged {
             let mut hs = holes(p, w.x_plane, w.plane, w.u0, w.u1, w.y0, w.y1);
-            // Closed doors along the walls: shallow door-sized recesses, the human scale.
-            let mut niches = Vec::new();
-            if w.bottom && w.top && (w.thick - t).abs() < 1e-3 && w.u1 - w.u0 >= CELL - 2.0 * t - 0.01 {
+            // Features along the walls, every few cells: closed doors (leaves, studs, a
+            // threshold), raised niches that are plainly niches, and missing panels showing
+            // the structure behind.
+            let mut feats: Vec<([f32; 4], u8)> = Vec::new();
+            if !vent && w.bottom && w.top && (w.thick - t).abs() < 1e-3 && w.u1 - w.u0 >= CELL - 2.0 * t - 0.01 {
                 let mut u = (w.u0 / CELL).floor() * CELL + CELL * 0.5;
                 while u < w.u1 {
-                    let r = [u - 0.8, u + 0.8, w.y0, w.y0 + kit::DOOR_HEIGHT + 0.2];
-                    if r[0] > w.u0 + 0.3 && r[1] < w.u1 - 0.3 && !hs.iter().any(|h| overlaps(h, &[r[0] - 0.6, r[1] + 0.6, r[2], r[3]])) && rng.chance(0.14) {
-                        let dw = if service { kit::DOOR_WIDTH } else { rng.range(1.2, 2.0) };
-                        let dh = if service { kit::DOOR_HEIGHT } else { rng.range(2.2, 3.4) };
-                        niches.push([u - dw * 0.5, u + dw * 0.5, w.y0, w.y0 + dh]);
+                    let roll = rng.f();
+                    let kind = if roll < 0.07 { 0 } else if roll < 0.14 { 1 } else if roll < 0.19 && !service { 2 } else { 9 };
+                    let r = match kind {
+                        0 => {
+                            let dw = if service { kit::DOOR_WIDTH } else { rng.range(1.2, 1.8) };
+                            let dh = if service { kit::DOOR_HEIGHT } else { rng.range(2.2, 3.0) };
+                            [u - dw * 0.5, u + dw * 0.5, w.y0, w.y0 + dh]
+                        }
+                        1 => [u - 0.45, u + 0.45, w.y0 + 0.95, w.y0 + 2.2],
+                        _ => [u - 0.8, u + 0.8, w.y0 + 0.7, w.y0 + 3.0],
+                    };
+                    if kind != 9 && r[0] > w.u0 + 0.3 && r[1] < w.u1 - 0.3 && r[3] < w.y1 - 0.3 && !hs.iter().any(|h| overlaps(h, &[r[0] - 0.6, r[1] + 0.6, r[2] - 0.3, r[3] + 0.3])) {
+                        feats.push((r, kind));
                     }
                     u += CELL;
                 }
             }
-            hs.extend(niches.iter().copied());
+            hs.extend(feats.iter().map(|f| f.0));
             let su = cell_lines(w.u0, w.u1, if service { 1 } else { 2 });
             let mut sv = Vec::new();
             if let (Some(dd), true) = (dado, w.bottom) {
@@ -1054,10 +1201,61 @@ fn passage(p: &Plan, b: &mut MeshBuilder, pass: &Passage) {
             }
             vface(b, w.x_plane, w.plane, w.nsign, w.u0, w.u1, w.y0, w.y1, w.thick, &su, &sv, &hs, 2.0, Some(2), 3);
             let n = if w.x_plane { Vec3::X * w.nsign } else { Vec3::Z * w.nsign };
-            for h in &niches {
+            for &(h, kind) in &feats {
                 let origin = if w.x_plane { Vec3::new(w.plane, 0.0, 0.0) } else { Vec3::new(0.0, 0.0, w.plane) };
-                let f = Frame::new(origin, if w.x_plane { Vec3::Z } else { Vec3::X }, Vec3::Y, n);
-                kit::recess(b, f, Rect2::new(h[0], h[1], h[2], h[3]), (t - 0.08).min(0.35), 1.0, None);
+                let u_ax = if w.x_plane { Vec3::Z } else { Vec3::X };
+                let f = Frame::new(origin, u_ax, Vec3::Y, n);
+                let depth = (t - 0.08).min(0.35);
+                kit::recess(b, f, Rect2::new(h[0], h[1], h[2], h[3]), depth, 1.0, Some(2));
+                let (cu, wd, hh) = ((h[0] + h[1]) * 0.5, h[1] - h[0], h[3] - h[2]);
+                match kind {
+                    0 => {
+                        // A door leaf in the recess: rails, studs, a threshold.
+                        let c = f.at(cu, h[2] + hh * 0.5, -depth + 0.04);
+                        kit::block(b, c, [u_ax, Vec3::Y, n], Vec3::new(wd * 0.5 - 0.04, hh * 0.5 - 0.02, 0.03), [false, false, false, false, false, true], Vec3::Y, 1.0, [None, None, None], false);
+                        for k in 1..4 {
+                            let y = h[2] + hh * k as f32 / 4.0;
+                            b.stroke(f.at(h[0] + 0.06, y, -depth + 0.075), f.at(h[1] - 0.06, y, -depth + 0.075), n, n, StrokeKind::Seam, 2);
+                            for j in 0..4 {
+                                let uu = h[0] + 0.15 + (wd - 0.3) * j as f32 / 3.0;
+                                b.stroke(f.at(uu, y + 0.04, -depth + 0.075), f.at(uu, y + 0.09, -depth + 0.075), n, n, StrokeKind::Seam, 3);
+                            }
+                        }
+                        let tc = f.at(cu, h[2] + 0.04, -depth * 0.5);
+                        kit::block(b, tc, [u_ax, Vec3::Y, n], Vec3::new(wd * 0.5, 0.04, depth * 0.5 + 0.05), [false, false, false, true, false, true], u_ax, 1.0, [Some(3), None, None], false);
+                    }
+                    1 => {
+                        // A sill under the niche.
+                        let c = f.at(cu, h[2] - 0.06, 0.08);
+                        kit::block(b, c, [u_ax, Vec3::Y, n], Vec3::new(wd * 0.5 + 0.12, 0.06, 0.1), [true, true, true, true, false, true], u_ax, 1.0, [Some(2), None, Some(3)], false);
+                    }
+                    _ => {
+                        // Ribs and a rail of the structure behind a missing panel.
+                        for k in 0..3 {
+                            let uu = h[0] + wd * (k as f32 + 0.5) / 3.0;
+                            let c = f.at(uu, h[2] + hh * 0.5, -depth + 0.12);
+                            kit::block(b, c, [u_ax, Vec3::Y, n], Vec3::new(0.07, hh * 0.5, 0.1), [true, true, false, false, false, true], Vec3::Y, 1.0, [None, Some(2), None], false);
+                        }
+                        let c = f.at(cu, h[2] + hh * 0.6, -depth + 0.18);
+                        kit::block(b, c, [u_ax, Vec3::Y, n], Vec3::new(wd * 0.5, 0.06, 0.05), [false, false, true, true, false, true], u_ax, 1.0, [Some(2), None, None], false);
+                        // Broken edge of the panel left in the wall.
+                        b.stroke(f.at(h[0], h[3] - 0.2, 0.002), f.at(h[0] + 0.4, h[3], 0.002), n, n, StrokeKind::Crack, 2);
+                    }
+                }
+            }
+            // A conduit along the wall under the ceiling, on brackets.
+            if conduit && w.bottom && w.top && (w.thick - t).abs() < 1e-3 && w.u1 - w.u0 > 3.0 {
+                let y = w.y1 - 0.5;
+                if !hs.iter().any(|h| h[3] > y - 0.25 && h[2] < y + 0.25) {
+                    let at3 = |u: f32, yy: f32, o: f32| if w.x_plane { Vec3::new(w.plane, yy, u) } else { Vec3::new(u, yy, w.plane) } + n * o;
+                    pipe(b, at3(w.u0 + 0.1, y, 0.22), at3(w.u1 - 0.1, y, 0.22), 0.09);
+                    let mut u = w.u0 + 1.0;
+                    while u < w.u1 - 0.5 {
+                        let u_ax = if w.x_plane { Vec3::Z } else { Vec3::X };
+                        kit::block(b, at3(u, y - 0.12, 0.12), [u_ax, Vec3::Y, n], Vec3::new(0.04, 0.03, 0.12), [true, true, true, true, false, true], u_ax, 1.0, [None, None, None], false);
+                        u += 2.0;
+                    }
+                }
             }
             let at = |u: f32, y: f32| if w.x_plane { Vec3::new(w.plane, y, u) } else { Vec3::new(u, y, w.plane) };
             if w.bottom {
@@ -1085,7 +1283,23 @@ fn passage(p: &Plan, b: &mut MeshBuilder, pass: &Passage) {
             let lo = if up { from.y } else { from.y - 1 };
             let c = from.floor_centre();
             let (foot, d) = if up { (c + dir.vec() * (CELL * 0.5), dir.vec()) } else { (c + dir.vec() * (CELL * 3.5), -dir.vec()) };
-            kit::stair(b, &Stair { foot: foot.with_y(lo as f32 * LEVEL), dir: d, width: w, height: LEVEL, risers: Some(RISERS_PER_LEVEL), max_risers: 18, landing: 1.2, waist: 0.3, wall: None, railing: false, enclosed: true });
+            if style == PassStyle::Vent {
+                // A sloped duct floor, crawled up or slid down.
+                let foot = foot.with_y(lo as f32 * LEVEL + VENT_LIP);
+                let rise = d * (3.0 * CELL) + Vec3::Y * LEVEL;
+                let across = d.cross(Vec3::Y).normalize();
+                let n = across.cross(rise).normalize();
+                let n = if n.y < 0.0 { -n } else { n };
+                let coarse = b.new_coarse();
+                b.rect(foot - across * (w * 0.5), rise, across * w, n, rise, 1.5, coarse);
+                b.collider(crate::mesh::Collider::Ramp { start: foot.to_array(), end: (foot + rise).to_array(), half_width: w * 0.5, thickness: 0.3 });
+                for k in 1..6 {
+                    let p = foot + rise * (k as f32 / 6.0);
+                    b.stroke(p - across * (w * 0.5), p + across * (w * 0.5), n, n, StrokeKind::Seam, 3);
+                }
+            } else {
+                kit::stair(b, &Stair { foot: foot.with_y(lo as f32 * LEVEL), dir: d, width: w, height: LEVEL, risers: Some(RISERS_PER_LEVEL), max_risers: 18, landing: 1.2, waist: 0.3, wall: None, railing: false, enclosed: true });
+            }
         }
     }
     // Members across the passage at cell boundaries on straight runs, by section.
@@ -1171,6 +1385,114 @@ fn passage(p: &Plan, b: &mut MeshBuilder, pass: &Passage) {
     }
 }
 
+/// At each mouth of a vent, a grille: torn off and lying on the floor below the mouth, or
+/// hanging from its top edge.
+fn vent_grille(p: &Plan, b: &mut MeshBuilder, o: &Portal) {
+    let is_vent = |s: Option<usize>| s.is_some_and(|s| p.graph.spaces[s].kind == SpaceKind::Vent);
+    if !(is_vent(o.between[0]) ^ is_vent(o.between[1])) {
+        return;
+    }
+    if !o.walk {
+        // An intact grille across a look-through mouth, with a collider.
+        let pm = if is_vent(o.between[0]) { o.p1 - 0.05 } else { o.p0 + 0.05 };
+        let axis = if o.x_plane { Vec3::X } else { Vec3::Z };
+        let along = if o.x_plane { Vec3::Z } else { Vec3::X };
+        let at = |u: f32, y: f32| if o.x_plane { Vec3::new(pm, y, u) } else { Vec3::new(u, y, pm) };
+        let mut u = o.u0 + 0.12;
+        while u < o.u1 - 0.05 {
+            kit::block(b, at(u, (o.y0 + o.y1) * 0.5), [along, Vec3::Y, axis], Vec3::new(0.02, (o.y1 - o.y0) * 0.5, 0.02), [true, true, false, false, true, true], Vec3::Y, 1.0, [None, Some(3), None], false);
+            u += 0.15;
+        }
+        let c = at((o.u0 + o.u1) * 0.5, (o.y0 + o.y1) * 0.5);
+        b.collider(kit::solid(c, [along, Vec3::Y, axis], Vec3::new((o.u1 - o.u0) * 0.5, (o.y1 - o.y0) * 0.5, 0.04)));
+        return;
+    }
+    // The open side (not the vent) and its face.
+    let (face, out) = if is_vent(o.between[0]) { (o.p1, 1.0f32) } else { (o.p0, -1.0f32) };
+    let axis = if o.x_plane { Vec3::X } else { Vec3::Z };
+    let along = if o.x_plane { Vec3::Z } else { Vec3::X };
+    let um = (o.u0 + o.u1) * 0.5;
+    let w = o.u1 - o.u0;
+    let at = |u: f32, y: f32, d: f32| if o.x_plane { Vec3::new(face, y, u) } else { Vec3::new(u, y, face) } + axis * (out * d);
+    let mut r = Rng::new(crate::seed::hash_ints(p.seed, &[(um * 10.0) as i64, (o.y0 * 10.0) as i64, (face * 10.0) as i64]));
+    let room_floor = o.y0 - VENT_LIP;
+    let (c, axes) = if r.chance(0.5) {
+        // Lying on the floor in front of the mouth, askew.
+        let a = r.range(-0.4, 0.4);
+        let u2 = (along * a.cos() + axis * a.sin()).normalize();
+        let v2 = Vec3::Y.cross(u2).normalize();
+        (at(um, room_floor + 0.03, 0.9), [u2, Vec3::Y, v2])
+    } else {
+        // Hanging from its top edge, swung out.
+        let tilt = r.range(0.5, 1.1);
+        let down = (-Vec3::Y * tilt.cos() + axis * (out * tilt.sin())).normalize();
+        let n = along.cross(down).normalize();
+        (at(um, o.y1, 0.05) + down * (w * 0.5), [along, n, down])
+    };
+    let half = Vec3::new(w * 0.5, 0.025, w * 0.5);
+    kit::block(b, c, axes, half, [true, true, true, true, true, true], axes[0], 1.0, [Some(2), Some(2), Some(2)], false);
+    for k in 1..6 {
+        let s = -w * 0.5 + w * k as f32 / 6.0;
+        b.stroke(c + axes[0] * s - axes[2] * (w * 0.5) + axes[1] * 0.03, c + axes[0] * s + axes[2] * (w * 0.5) + axes[1] * 0.03, axes[1], axes[1], StrokeKind::Seam, 2);
+    }
+}
+
+/// A side room's door leaf standing ajar, swung into the room on its hinge.
+fn ajar_leaf(p: &Plan, b: &mut MeshBuilder, sd: &SideDoor) {
+    let Some(o) = p.portals.iter().find(|o| o.walk && o.between.contains(&Some(sd.room)) && o.between.contains(&Some(sd.passage))) else { return };
+    let room_face = if sd.dir.sign() > 0.0 { o.p1 } else { o.p0 };
+    let into = sd.dir.vec();
+    let along = if o.x_plane { Vec3::Z } else { Vec3::X };
+    let w = o.u1 - o.u0;
+    let h = o.y1 - o.y0;
+    let hinge = if o.x_plane { Vec3::new(room_face, o.y0, o.u0) } else { Vec3::new(o.u0, o.y0, room_face) };
+    let ang: f32 = 1.5;
+    let dir = (along * ang.cos() + into * ang.sin()).normalize();
+    let n = Vec3::Y.cross(dir).normalize();
+    let c = hinge + dir * (w * 0.5) + Vec3::Y * (h * 0.5) + n * 0.03;
+    kit::block(b, c, [dir, Vec3::Y, n], Vec3::new(w * 0.5, h * 0.5 - 0.02, 0.04), [true, true, true, true, true, true], Vec3::Y, 1.0, [Some(2), Some(2), Some(2)], true);
+}
+
+/// A rectangular duct seen from outside, from `a` to `c`: the casing, a flange every 2.5 m,
+/// seams along it. Solid (it can be stood on); not crawlable.
+fn exposed_duct(b: &mut MeshBuilder, a: Vec3, c: Vec3, w: f32, h: f32) {
+    let along = (c - a).normalize();
+    let across = along.cross(Vec3::Y).normalize();
+    let len = (c - a).length();
+    kit::block(b, (a + c) * 0.5, [along, Vec3::Y, across], Vec3::new(len * 0.5, h * 0.5, w * 0.5), [false, false, true, true, true, true], along, 2.0, [Some(1), None, None], true);
+    let n = (len / 2.5).floor() as usize;
+    for k in 1..n {
+        let p = a + along * (len * k as f32 / n as f32);
+        kit::block(b, p, [along, Vec3::Y, across], Vec3::new(0.06, h * 0.5 + 0.07, w * 0.5 + 0.07), [true, true, true, true, true, true], Vec3::Y, 1.0, [None, Some(3), Some(3)], false);
+    }
+    for sg in [-1.0f32, 1.0] {
+        let o = across * (sg * (w * 0.5 + 0.002));
+        b.stroke(a + o + Vec3::Y * (h * 0.15), c + o + Vec3::Y * (h * 0.15), across * sg, across * sg, StrokeKind::Seam, 3);
+    }
+}
+
+/// A grating over a dark pit 1.2 m deep, in the floor rectangle given (the floor's collider
+/// stays, so it is walked on).
+fn grating(b: &mut MeshBuilder, x0: f32, x1: f32, z0: f32, z1: f32, y: f32, coarse: u32) {
+    // Within the floor slab, so the pit never shows in the space below.
+    let d = 0.5;
+    let yb = y - d;
+    b.rect(Vec3::new(x0, yb, z0), Vec3::X * (x1 - x0), Vec3::Z * (z1 - z0), Vec3::Y, Vec3::X, 2.0, coarse);
+    b.rect(Vec3::new(x0, yb, z0), Vec3::Z * (z1 - z0), Vec3::Y * d, Vec3::X, Vec3::Y, 2.0, coarse);
+    b.rect(Vec3::new(x1, yb, z0), Vec3::Z * (z1 - z0), Vec3::Y * d, -Vec3::X, Vec3::Y, 2.0, coarse);
+    b.rect(Vec3::new(x0, yb, z0), Vec3::X * (x1 - x0), Vec3::Y * d, Vec3::Z, Vec3::Y, 2.0, coarse);
+    b.rect(Vec3::new(x0, yb, z1), Vec3::X * (x1 - x0), Vec3::Y * d, -Vec3::Z, Vec3::Y, 2.0, coarse);
+    // Bars one way, a frame round.
+    let mut x = x0 + 0.2;
+    while x < x1 - 0.1 {
+        b.stroke(Vec3::new(x, y + 0.01, z0), Vec3::new(x, y + 0.01, z1), Vec3::Y, Vec3::Y, StrokeKind::Seam, 2);
+        x += 0.2;
+    }
+    for (a, c) in [((x0, z0), (x1, z0)), ((x1, z0), (x1, z1)), ((x1, z1), (x0, z1)), ((x0, z1), (x0, z0))] {
+        b.stroke(Vec3::new(a.0, y + 0.01, a.1), Vec3::new(c.0, y + 0.01, c.1), Vec3::Y, Vec3::Y, StrokeKind::Crease, 1);
+    }
+}
+
 /// A barrel vault over a straight passage piece, smooth shaded, with ribs at its ends.
 fn vault(b: &mut MeshBuilder, pc: &Piece, axis_x: bool, spring: f32, r: f32, coarse: u32) {
     let (along, across) = if axis_x { (Vec3::X, Vec3::Z) } else { (Vec3::Z, Vec3::X) };
@@ -1227,9 +1549,10 @@ fn pipe(b: &mut MeshBuilder, a: Vec3, c: Vec3, r: f32) {
     let coarse = b.new_coarse();
     let fine = b.panel();
     let along = (c - a).normalize();
-    let u = along.cross(Vec3::Y).normalize();
+    let refv = if along.y.abs() > 0.9 { Vec3::X } else { Vec3::Y };
+    let u = along.cross(refv).normalize();
     let v = along.cross(u).normalize();
-    let n = 8;
+    let n = 6;
     let at = |i: usize, j: usize| {
         let th = 2.0 * std::f32::consts::PI * i as f32 / n as f32;
         let dir = u * th.cos() + v * th.sin();
@@ -1291,6 +1614,7 @@ fn ledge(p: &Plan, b: &mut MeshBuilder, li: usize) {
 
 fn bridges_and_stairs(p: &Plan, b: &mut MeshBuilder) {
     for br in &p.bridges {
+        b.set_group(p.volume(p.ledges[br.a].space));
         let (la, lb) = (&p.ledges[br.a], &p.ledges[br.b]);
         let y = la.level as f32 * LEVEL;
         let a = wall_point(la.side, p.rooms[la.room].face(la.side), la.depth, br.u, y);
@@ -1298,6 +1622,7 @@ fn bridges_and_stairs(p: &Plan, b: &mut MeshBuilder) {
         kit::bridge(b, &kit::Bridge { a, c, width: br.width, deck: 0.8, girder: if br.girder { Some((2.4, 1.8)) } else { None }, ribs: Some(4.0), railings: br.railings, rank: 0 });
     }
     for ws in &p.wall_stairs {
+        b.set_group(p.volume(p.ledges[ws.lower].space));
         let l = &p.ledges[ws.lower];
         let r = &p.rooms[l.room];
         let face = r.face(l.side);
@@ -1394,8 +1719,8 @@ fn door_frame(p: &Plan, b: &mut MeshBuilder, o: &Portal) {
 /// The outside of the region: four walls and a roof, with holes where windows, loggias and
 /// the voids open. No colliders (nothing walks out there).
 fn skin(p: &Plan, b: &mut MeshBuilder) {
-    let (x0, x1, z0, z1) = (-SKIN, NX as f32 * CELL + SKIN, -SKIN, NZ as f32 * CELL + SKIN);
-    let (ybot, ytop) = (-60.0, NY as f32 * LEVEL);
+    let (x0, x1, z0, z1) = (-SKIN, nx() as f32 * CELL + SKIN, -SKIN, nz() as f32 * CELL + SKIN);
+    let (ybot, ytop) = (-60.0, ny() as f32 * LEVEL);
     let mut rng = Rng::for_id(p.seed, "skin", layer::ELEMENTS);
     for (d, plane) in [(Dir::XN, x0), (Dir::XP, x1), (Dir::ZN, z0), (Dir::ZP, z1)] {
         let (u0, u1) = if d.is_x() { (z0, z1) } else { (x0, x1) };

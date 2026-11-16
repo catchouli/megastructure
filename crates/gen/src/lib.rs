@@ -13,4 +13,4 @@ pub mod shaft;
 pub mod test_scene;
 
 pub use builder::{auto_hatch, box_ao, AoFn, FaceMask, MeshBuilder};
-pub use mesh::{Collider, MeshData, Stroke, StrokeKind, Vertex};
+pub use mesh::{Chunk, Collider, MeshData, ScenePortal, SpaceBox, Stroke, StrokeKind, Vertex, OUTSIDE};

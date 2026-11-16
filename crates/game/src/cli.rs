@@ -26,7 +26,7 @@ OPTIONS:
     --dt <S>                headless: seconds per frame, default 1/60
     --width <W> --height <H>  headless: image size, default 1280x720
     --input <script>        headless: scripted input, e.g. forward:2,look_right+forward:1.5,idle:0.5
-                            actions: forward back left right up down fast walk jump toggle_fly
+                            actions: forward back left right up down fast walk jump crouch toggle_fly
                             reset screenshot look_left look_right look_up look_down idle
                             (screenshot writes screenshots/<time>.png and .json, or into --out)
     --out <dir>             headless: write frame_NNNN.png here
@@ -42,6 +42,7 @@ OPTIONS:
 CONTROLS (windowed), walking:
     W A S D        move            Space          jump
     Shift          walk (running is the default)
+    C or Ctrl      crouch while held (stands when there is room)
     R              back to the last stable ground
     F              switch between walking and the fly camera, at the current position
     Arrow keys     turn (90 degrees per second)
@@ -243,7 +244,7 @@ mod tests {
         assert!(p("--bogus").is_err());
         assert!(p("--frames 3").is_err());
         assert!(p("--headless --dt 0").is_err());
-        assert!(p("--headless --input crouch:1").is_err());
+        assert!(p("--headless --input duck:1").is_err());
         assert!(p("--mode run").is_err());
         assert!(p("--mode").is_err());
         assert!(p("--headless --frames 0").is_err());

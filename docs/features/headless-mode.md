@@ -42,15 +42,15 @@ megastructure --headless [--frames N] [--dt S] [--width W] [--height H]
 script  = segment { "," segment }
 segment = action { "+" action } ":" seconds
 action  = forward | back | left | right | up | down | fast | walk
-        | jump | toggle_fly | reset | screenshot
+        | jump | crouch | toggle_fly | reset | screenshot
         | look_left | look_right | look_up | look_down | idle
 ```
 
 Segments run in sequence; `+` holds several actions at once (`forward+look_left:1.5`). `idle` holds nothing and cannot be combined. `seconds` is a non-negative number. Whitespace around tokens is ignored. After the script ends the input is idle for any remaining frames.
 
-Durations are converted to frames by rounding the cumulative time over `dt`, so whole-second segments at 1/60 s are exactly 60 frames each. The actions are the keyboard's: `forward`/`back`/`left`/`right` are W S A D, `up` E, `down` Q or Ctrl, `jump` Space, `fast` and `walk` (the same action) Shift, `toggle_fly` F, `reset` R, `screenshot` P (writes a PNG and a sidecar; see `screenshots.md`), and the four `look_*` the arrow keys. Looks turn at 90 degrees per second. `look_right` decreases yaw, since yaw 0 faces +Z and positive yaw turns towards +X.
+Durations are converted to frames by rounding the cumulative time over `dt`, so whole-second segments at 1/60 s are exactly 60 frames each. The actions are the keyboard's: `forward`/`back`/`left`/`right` are W S A D, `up` E, `down` Q or Ctrl, `jump` Space, `crouch` C (or Ctrl when walking), `fast` and `walk` (the same action) Shift, `toggle_fly` F, `reset` R, `screenshot` P (writes a PNG and a sidecar; see `screenshots.md`), and the four `look_*` the arrow keys. Looks turn at 90 degrees per second. `look_right` decreases yaw, since yaw 0 faces +Z and positive yaw turns towards +X.
 
-- **Walking:** `forward` and friends run along the facing at up to 9.64 m/s, 3 m/s with `walk` (Shift; `player-movement.md` has the acceleration and friction); `jump` jumps when on the ground (on the first step it is held; held longer, it does not hop again, and a press up to 0.1 s before landing jumps on landing with no speed lost); `up` and `down` do nothing. Until 2026-11-16 walking was the default and the Shift action was called `run`; scripts using `run` now fail with the list of actions. `reset` returns to the last stable ground and the movement keys are ignored for the next 0.3 s. Walking runs in fixed steps of 1/60 s whatever `--dt` is (a `--dt` of 1/30 runs two steps per frame).
+- **Walking:** `forward` and friends run along the facing at up to 9.64 m/s, 3 m/s with `walk` (Shift; `player-movement.md` has the acceleration and friction); `jump` jumps when on the ground (on the first step it is held; held longer, it does not hop again, and a press up to 0.1 s before landing jumps on landing with no speed lost); `crouch` crouches while held (stands again when it is released and there is room; 4 m/s crouched); `up` and `down` do nothing. Until 2026-11-16 walking was the default and the Shift action was called `run`; scripts using `run` now fail with the list of actions. `reset` returns to the last stable ground and the movement keys are ignored for the next 0.3 s. Walking runs in fixed steps of 1/60 s whatever `--dt` is (a `--dt` of 1/30 runs two steps per frame).
 - **Flying:** moves are in the facing direction at the base speed (8 m/s, five times that with `fast` or `walk`); `up` and `jump` go up, `down` goes down.
 - **`toggle_fly`, `reset` and `screenshot` act on the first frame they are held**, so `toggle_fly:1` toggles once, not sixty times. Give the segment a whole frame at least: at 1/60 s `toggle_fly:0.02` is one frame. Scenes without colliders ignore both.
 
@@ -61,10 +61,10 @@ For example, from the shaft's spawn to the hall (walking the gallery, running th
 On success, one line on stdout:
 
 ```
-state frames=1980 x=-1.8345 y=423.0740 z=-102.4368 yaw_deg=180.000 pitch_deg=0.000 mode=walk grounded=true vy=0.0000 died=false deaths=0 resets=0 hspeed=9.6429
+state frames=1980 x=-1.8345 y=423.0740 z=-102.4368 yaw_deg=180.000 pitch_deg=0.000 mode=walk grounded=true vy=0.0000 died=false deaths=0 resets=0 hspeed=9.6429 crouched=false
 ```
 
-Camera (eye) position in metres, yaw and pitch in degrees, and the number of frames run; then `mode` (`walk` or `fly`), `grounded` (the walker is standing on something; always `false` in a run that never walked), `vy` (the walker's vertical speed in m/s, negative falling; 0 while grounded and in a run that never walked), `died` (whether the player died at any time in the run), `deaths` (how many times), `resets` (how many times `reset` was used) and `hspeed` (the walker's horizontal speed in m/s; added 2026-11-16). PNG paths are reported on stderr as `wrote <path>`, so stdout holds only the state line.
+Camera (eye) position in metres, yaw and pitch in degrees, and the number of frames run; then `mode` (`walk` or `fly`), `grounded` (the walker is standing on something; always `false` in a run that never walked), `vy` (the walker's vertical speed in m/s, negative falling; 0 while grounded and in a run that never walked), `died` (whether the player died at any time in the run), `deaths` (how many times), `resets` (how many times `reset` was used), `hspeed` (the walker's horizontal speed in m/s) and `crouched` (the walker's stance; both added 2026-11-16). PNG paths are reported on stderr as `wrote <path>`, so stdout holds only the state line.
 
 Commands used to check walking in the shaft (add `--width 160 --height 90` to make the offscreen frames cheap; a scripted `--out` still works):
 

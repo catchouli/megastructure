@@ -29,10 +29,33 @@ pub const CELL: f32 = 4.0;
 pub const LEVEL: f32 = 6.0;
 /// Floor slab thickness between storeys.
 pub const SLAB: f32 = 0.6;
-/// Region size in cells (x, z) and storeys.
-pub const NX: i32 = 96;
-pub const NZ: i32 = 88;
-pub const NY: i32 = 26;
+/// Default region size in cells (x, z) and storeys.
+pub const DEFAULT_DIMS: (i32, i32, i32) = (96, 88, 26);
+
+thread_local! {
+    static DIMS: std::cell::Cell<(i32, i32, i32)> = const { std::cell::Cell::new(DEFAULT_DIMS) };
+}
+
+/// Region size in cells along x, along z, and in storeys, for the build running on this
+/// thread ([`build_sized`] sets it; [`DEFAULT_DIMS`] otherwise).
+pub fn nx() -> i32 {
+    DIMS.with(|d| d.get().0)
+}
+pub fn nz() -> i32 {
+    DIMS.with(|d| d.get().1)
+}
+pub fn ny() -> i32 {
+    DIMS.with(|d| d.get().2)
+}
+
+/// Build with a region of another size (cells x, cells z, storeys), for scaling trials. The
+/// director scales its placements with the plan size; storeys add height above.
+pub fn build_sized(seed: u64, dims: (i32, i32, i32), bake: bool) -> Labyrinth {
+    let old = DIMS.with(|d| d.replace(dims));
+    let l = build_with(seed, bake);
+    DIMS.with(|d| d.set(old));
+    l
+}
 /// Thickness of the outer skin beyond the region's edge cells.
 pub const SKIN: f32 = 2.0;
 /// Risers per storey: 36 of 0.1667 m.
@@ -48,6 +71,8 @@ pub struct Labyrinth {
     pub plan: plan::Plan,
     pub mesh: MeshData,
     pub colliders: Vec<Collider>,
+    /// Openings between the spaces of `mesh.chunks`, for portal culling.
+    pub portals: Vec<crate::mesh::ScenePortal>,
     /// Milliseconds spent: planning, geometry, light field, AO bake.
     pub timings: [f64; 4],
 }
@@ -72,10 +97,13 @@ pub fn build_with(seed: u64, bake: bool) -> Labyrinth {
     let mut b = MeshBuilder::new();
     geom::build(&plan, &mut b);
     let t2 = std::time::Instant::now();
+    // Culling chunks: one per space volume, tall ones in bands of 36 m.
+    b.chunk(60.0, 36.0);
+    let portals = plan.scene_portals();
     if !bake {
         let (mesh, colliders) = b.finish_with_colliders();
         let ms = (t2 - t0).as_secs_f64() * 1000.0;
-        return Labyrinth { plan, mesh, colliders, timings: [ms, 0.0, 0.0, 0.0] };
+        return Labyrinth { plan, mesh, colliders, portals, timings: [ms, 0.0, 0.0, 0.0] };
     }
     let field = light::LightField::new(&plan);
     let t3 = std::time::Instant::now();
@@ -89,7 +117,7 @@ pub fn build_with(seed: u64, bake: bool) -> Labyrinth {
     let t4 = std::time::Instant::now();
     let ms = |a: std::time::Instant, c: std::time::Instant| (c - a).as_secs_f64() * 1000.0;
     let (mesh, colliders) = b.finish_with_colliders();
-    Labyrinth { plan, mesh, colliders, timings: [ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4)] }
+    Labyrinth { plan, mesh, colliders, portals, timings: [ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4)] }
 }
 
 #[cfg(test)]

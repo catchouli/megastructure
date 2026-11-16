@@ -121,15 +121,17 @@ mod tests {
         assert!(s.segments[1].input.reset && !s.segments[1].input.fast);
         assert!(s.segments[2].input.toggle_fly);
         assert!(s.segments[3].input.fast && !s.segments[3].input.jump);
+        let s = Script::parse("crouch+forward:1").unwrap();
+        assert!(s.segments[0].input.crouch && s.segments[0].input.forward);
     }
 
     #[test]
     fn rejects_bad_scripts() {
-        for bad in ["", "forward", "forward:", "forward:x", "forward:-1", "forward:nan", "crouch:1", "forward+crouch:1", "forward:1,,back:1", "forward:1,", "idle+forward:1", ":1", "forward:inf", "run:1"] {
+        for bad in ["", "forward", "forward:", "forward:x", "forward:-1", "forward:nan", "duck:1", "forward+duck:1", "forward:1,,back:1", "forward:1,", "idle+forward:1", ":1", "forward:inf", "run:1", "duck:1"] {
             assert!(Script::parse(bad).is_err(), "'{bad}' should fail");
         }
-        let e = Script::parse("crouch:1").unwrap_err().to_string();
-        assert!(e.contains("unknown action 'crouch'") && e.contains("look_right") && e.contains("toggle_fly"), "{e}");
+        let e = Script::parse("duck:1").unwrap_err().to_string();
+        assert!(e.contains("unknown action 'duck'") && e.contains("look_right") && e.contains("toggle_fly"), "{e}");
     }
 
     #[test]

@@ -28,6 +28,8 @@ pub struct WalkInput {
     /// Shift held: walk instead of run (or run instead of walk when `ALWAYS_RUN` is false).
     pub shift: bool,
     pub jump: bool,
+    /// Crouch held (C or Ctrl).
+    pub crouch: bool,
 }
 
 impl WalkInput {
@@ -69,6 +71,12 @@ pub struct Walker {
     pub teleports: u32,
     /// Jumps taken so far.
     pub jumps: u32,
+    /// Crouched: the capsule is `CROUCH_HEIGHT` tall and the eye `CROUCH_EYE_HEIGHT` up.
+    pub crouched: bool,
+    /// Eye correction for a crouch or a stand in progress, metres, easing to zero.
+    pub crouch_eye: f32,
+    /// Whether the stable spot was recorded crouched (in a vent); a return there is crouched.
+    pub stable_crouched: bool,
     /// Jump key state of the previous step, for the rising edge.
     jump_prev: bool,
     /// Seconds a jump press stays valid while waiting for the ground.
@@ -101,8 +109,8 @@ fn horizontal_distance(a: Vec3, b: Vec3) -> f32 {
     horizontal(b - a).length()
 }
 
-/// Move the capsule from `start` by `motion`, sliding along what it meets.
-fn slide(world: &World, start: Vec3, motion: Vec3, mode: Mode) -> Slide {
+/// Move a capsule `height` tall from `start` by `motion`, sliding along what it meets.
+fn slide(world: &World, start: Vec3, motion: Vec3, mode: Mode, height: f32) -> Slide {
     let min_y = min_ground_y();
     let mut out = Slide { pos: start, normals: Vec::new(), wall: false };
     let mut remaining = motion;
@@ -111,7 +119,7 @@ fn slide(world: &World, start: Vec3, motion: Vec3, mode: Mode) -> Slide {
         if remaining.length_squared() < 1e-12 {
             break;
         }
-        let Some(hit) = world.cast(out.pos, remaining) else {
+        let Some(hit) = world.cast_h(out.pos, remaining, height) else {
             out.pos += remaining;
             break;
         };
@@ -231,6 +239,9 @@ impl Walker {
             lockout: 0.0,
             teleports: 0,
             jumps: 0,
+            crouched: false,
+            crouch_eye: 0.0,
+            stable_crouched: false,
             jump_prev: false,
             jump_buffer: 0.0,
         }
@@ -238,13 +249,60 @@ impl Walker {
 
     /// Eye position.
     pub fn eye(&self) -> Vec3 {
-        self.pos + Vec3::Y * (EYE_HEIGHT + self.eye_offset)
+        self.pos + Vec3::Y * (self.eye_height() + self.eye_offset + self.crouch_eye)
+    }
+
+    /// Capsule height in the current stance.
+    pub fn height(&self) -> f32 {
+        if self.crouched {
+            CROUCH_HEIGHT
+        } else {
+            CAPSULE_HEIGHT
+        }
+    }
+
+    /// Eye height above the feet in the current stance (without the smoothing offsets).
+    pub fn eye_height(&self) -> f32 {
+        if self.crouched {
+            CROUCH_EYE_HEIGHT
+        } else {
+            EYE_HEIGHT
+        }
+    }
+
+    /// Crouch or stand as asked, if there is room. On the ground the feet stay and the head
+    /// moves; in the air the head stays and the feet move (pulling the legs up), so crouching
+    /// in a jump lifts the feet by 0.9 m, which is how a vent mouth above a jump is reached.
+    /// Standing needs room for the whole standing capsule; until there is, the walker stays
+    /// crouched. Nothing here moves the capsule into geometry.
+    fn update_stance(&mut self, world: &World, want: bool) {
+        let shrink = CAPSULE_HEIGHT - CROUCH_HEIGHT;
+        let eye_drop = EYE_HEIGHT - CROUCH_EYE_HEIGHT;
+        if want && !self.crouched {
+            // The crouched capsule lies inside the standing one, so it always fits.
+            let lift = if self.grounded { 0.0 } else { shrink };
+            self.pos.y += lift;
+            self.crouched = true;
+            self.crouch_eye += eye_drop - lift;
+        } else if !want && self.crouched {
+            // In the air the feet come down as far as there is room below; on the ground the head
+            // goes up.
+            let lower = if self.grounded { 0.0 } else { world.cast_h(self.pos, Vec3::NEG_Y * shrink, CROUCH_HEIGHT).map_or(shrink, |h| shrink * h.fraction) };
+            let feet = self.pos - Vec3::Y * lower;
+            if world.fits(feet, CAPSULE_HEIGHT) {
+                self.pos = feet;
+                self.crouched = false;
+                self.crouch_eye += lower - eye_drop;
+            }
+        }
     }
 
     /// Put the player's eye at `eye` at rest (leaving fly mode). Death and reset counts and
     /// the stable spot are kept.
     pub fn place_eye(&mut self, eye: Vec3) {
         self.pos = eye - Vec3::Y * EYE_HEIGHT;
+        self.crouched = false;
+        self.crouch_eye = 0.0;
         self.vel = Vec3::ZERO;
         self.grounded = false;
         self.ground_time = 0.0;
@@ -260,6 +318,8 @@ impl Walker {
 
     fn return_to_stable(&mut self) {
         self.pos = self.stable_pos;
+        self.crouched = self.stable_crouched;
+        self.crouch_eye = 0.0;
         self.vel = Vec3::ZERO;
         self.grounded = true;
         self.ground_normal = Vec3::Y;
@@ -278,14 +338,22 @@ impl Walker {
         let raw_jump = input.jump;
         let locked = self.lockout > 0.0;
         self.lockout = (self.lockout - dt).max(0.0);
-        let input = &if locked { WalkInput { yaw: input.yaw, ..Default::default() } } else { *input };
+        // Crouch is a stance, not a movement: it is kept through the lockout.
+        let input = &if locked { WalkInput { yaw: input.yaw, crouch: input.crouch, ..Default::default() } } else { *input };
         // A jump is a key press, not a held key (unless `AUTO_HOP`); a press shortly before
         // landing is kept.
         if input.jump && (!self.jump_prev || AUTO_HOP) {
             self.jump_buffer = JUMP_BUFFER;
         }
         self.jump_prev = raw_jump;
-        self.pos = world.depenetrate(self.pos);
+        self.update_stance(world, input.crouch);
+        if !self.crouched && !world.fits(self.pos, CAPSULE_HEIGHT) && world.fits(self.pos, CROUCH_HEIGHT) {
+            // Standing does not fit here but crouching does (arriving from the fly camera inside
+            // a vent): crouch rather than be pushed out through a wall.
+            self.crouched = true;
+            self.crouch_eye += EYE_HEIGHT - CROUCH_EYE_HEIGHT;
+        }
+        self.pos = world.depenetrate_h(self.pos, self.height());
         self.last_impact = 0.0;
 
         // Wanted direction and speed from the keys and the facing (diagonals are not faster).
@@ -294,7 +362,8 @@ impl Walker {
         let right = Vec3::new(-cy, 0.0, sy);
         let dir = fwd * input.forward + right * input.right;
         let wish_dir = dir.normalize_or_zero();
-        let wish_speed = if wish_dir == Vec3::ZERO { 0.0 } else { input.wish_speed() * dir.length().min(1.0) };
+        let top = if self.crouched { CROUCH_SPEED.min(input.wish_speed()) } else { input.wish_speed() };
+        let wish_speed = if wish_dir == Vec3::ZERO { 0.0 } else { top * dir.length().min(1.0) };
 
         // The jump comes first: the take-off step is an air step with no friction, so a hop
         // pressed on (or just before) landing loses no speed.
@@ -331,6 +400,7 @@ impl Walker {
             self.ground_time += dt;
             if self.ground_time >= STABLE_GROUND_TIME && world.supported_ring(self.pos, STABLE_RING_RADIUS) {
                 self.stable_pos = self.pos;
+                self.stable_crouched = self.crouched;
             }
         } else {
             self.ground_time = 0.0;
@@ -339,13 +409,38 @@ impl Walker {
         if self.eye_offset.abs() < 1e-4 {
             self.eye_offset = 0.0;
         }
+        self.crouch_eye *= (-CROUCH_EYE_RATE * dt).exp();
+        if self.crouch_eye.abs() < 1e-4 {
+            self.crouch_eye = 0.0;
+        }
+        self.keep_eye_under_ceiling(world);
+    }
+
+    /// While the eye lags above its resting height (after crouching, or a step down), keep it
+    /// no higher than the capsule could rise from here, so it never shows through a ceiling:
+    /// the eye is then 0.15 m under the top of a capsule that fits.
+    fn keep_eye_under_ceiling(&mut self, world: &World) {
+        let extra = self.eye_offset + self.crouch_eye;
+        if extra <= 0.0 {
+            return;
+        }
+        let room = world.cast_h(self.pos, Vec3::Y * extra, self.height()).map_or(extra, |h| extra * h.fraction);
+        let mut cut = extra - room;
+        if cut <= 0.0 {
+            return;
+        }
+        let c = cut.min(self.crouch_eye.max(0.0));
+        self.crouch_eye -= c;
+        cut -= c;
+        self.eye_offset -= cut.min(self.eye_offset.max(0.0));
     }
 
     /// Walking: slide along the ground, step up ledges, stay stuck to the ground below.
     fn ground_move(&mut self, world: &World, dt: f32) {
         let motion = horizontal(self.vel) * dt;
         let start = self.pos;
-        let a = slide(world, start, motion, Mode::Ground);
+        let h = self.height();
+        let a = slide(world, start, motion, Mode::Ground, h);
         let mut best = a.pos;
         let mut stepped = false;
         if a.wall {
@@ -370,7 +465,7 @@ impl Walker {
         }
         // Stay on the ground: follow slopes and steps down.
         let down = Vec3::NEG_Y * SNAP_DISTANCE;
-        match world.cast(best, down) {
+        match world.cast_h(best, down, h) {
             Some(h) if h.normal.y >= min_ground_y() => {
                 let p = best + down * h.fraction;
                 // What the slope under the feet accounts for is followed exactly; anything more
@@ -399,27 +494,35 @@ impl Walker {
         let want = motion.length();
         let dir = motion.try_normalize()?;
         let up = Vec3::Y * STEP_HEIGHT;
-        let rise = world.cast(start, up).map_or(STEP_HEIGHT, |h| STEP_HEIGHT * h.fraction);
+        let height = self.height();
+        let rise = world.cast_h(start, up, height).map_or(STEP_HEIGHT, |h| STEP_HEIGHT * h.fraction);
         if rise < 0.02 {
             return None;
         }
-        let raised = start + Vec3::Y * rise;
         let mut lengths = vec![want];
         if want < STEP_MIN_FORWARD {
             lengths.push(STEP_MIN_FORWARD);
         }
         for len in lengths {
-            let s = slide(world, raised, dir * len, Mode::Wall);
-            if horizontal_distance(raised, s.pos) < len - 1e-3 {
-                // Something at this height is in the way too: a wall, not a step.
-                continue;
-            }
-            let down = Vec3::NEG_Y * (rise + SNAP_DISTANCE);
-            match world.cast(s.pos, down) {
-                // The ledge's own height counts, not the capsule's: resting on the corner of a
-                // ledge the sphere sits lower than the top it is touching.
-                Some(h) if h.normal.y >= min_ground_y() && h.point.y - start.y <= STEP_HEIGHT + 0.005 => return Some(s.pos + down * h.fraction),
-                _ => continue,
+            // Raised as far as there is room first; if something at that height is in the way
+            // (the wall above a vent mouth), lower and lower, 5 cm at a time, so a mouth only a
+            // little taller than the capsule is still found (E112).
+            let mut r = rise;
+            while r >= 0.02 {
+                let raised = start + Vec3::Y * r;
+                let s = slide(world, raised, dir * len, Mode::Wall, height);
+                if horizontal_distance(raised, s.pos) < len - 1e-3 {
+                    r -= STEP_RETRY;
+                    continue;
+                }
+                let down = Vec3::NEG_Y * (r + SNAP_DISTANCE);
+                match world.cast_h(s.pos, down, height) {
+                    // The ledge's own height counts, not the capsule's: resting on the corner of
+                    // a ledge the sphere sits lower than the top it is touching.
+                    Some(h) if h.normal.y >= min_ground_y() && h.point.y - start.y <= STEP_HEIGHT + 0.005 => return Some(s.pos + down * h.fraction),
+                    // Through at this height but nothing to stand on: lower would not help.
+                    _ => break,
+                }
             }
         }
         None
@@ -436,7 +539,7 @@ impl Walker {
         }
         let v_avg = (v0 + v1) * 0.5;
         let start = self.pos;
-        let s = slide(world, start, v_avg * dt, Mode::Air);
+        let s = slide(world, start, v_avg * dt, Mode::Air, self.height());
         self.pos = s.pos;
 
         let impact = s.normals.iter().map(|n| -v_avg.dot(*n)).fold(0.0f32, f32::max);
@@ -532,7 +635,7 @@ mod tests {
         assert!((RUN_SPEED - 9.643).abs() < 0.01 && (GRAVITY - 25.71).abs() < 0.01 && (JUMP_SPEED - 8.679).abs() < 0.01);
         // The fatal speed is the speed after the fatal height, with drag: about 21.7 m/s.
         assert!((fatal_impact_speed() - 21.7).abs() < 0.1, "{}", fatal_impact_speed());
-        assert!(WALK_SPEED < STOP_SPEED && STOP_SPEED < RUN_SPEED);
+        const { assert!(WALK_SPEED < STOP_SPEED && STOP_SPEED < RUN_SPEED) };
     }
 
     #[test]
@@ -1264,5 +1367,329 @@ mod tests {
             }
         }
         assert_eq!(w.jumps, 2);
+    }
+}
+
+#[cfg(test)]
+mod crouch_tests {
+    use super::*;
+    use mega_gen::Collider;
+
+    fn aabb(min: [f32; 3], max: [f32; 3]) -> Collider {
+        Collider::Aabb { min, max }
+    }
+
+    fn walker_at(feet: Vec3) -> Walker {
+        Walker::new(feet + Vec3::Y * EYE_HEIGHT)
+    }
+
+    const EAST: f32 = std::f32::consts::FRAC_PI_2;
+
+    fn run(w: &mut Walker, world: &World, input: WalkInput, seconds: f32) {
+        for _ in 0..(seconds / FIXED_DT).round() as usize {
+            w.tick(world, &input);
+        }
+    }
+
+    fn crouch_east() -> WalkInput {
+        WalkInput { forward: 1.0, yaw: EAST, crouch: true, ..Default::default() }
+    }
+
+    /// A 1 m by 1 m vent made of 1 m cells in a solid block between y = 0 and 1 (with a floor
+    /// below and a roof above), `cells` empty, the block spanning x 0..20, z -2..13. Outside it
+    /// (x < 0 and x > 20) is an open floor.
+    fn vent_world(cells: &[(i32, i32)]) -> World {
+        let mut c = vec![aabb([-30.0, -1.0, -30.0], [50.0, 0.0, 30.0]), aabb([0.0, 1.0, -2.0], [20.0, 2.0, 13.0])];
+        for i in 0..20 {
+            for k in -2..13 {
+                if !cells.contains(&(i, k)) {
+                    c.push(aabb([i as f32, 0.0, k as f32], [i as f32 + 1.0, 1.0, k as f32 + 1.0]));
+                }
+            }
+        }
+        World::new(&c)
+    }
+
+    /// East along z = 0 to x = 10, north to z = 10, east to the far side: two right-angle bends.
+    fn bent_vent() -> (World, Vec<Vec3>) {
+        let mut cells: Vec<(i32, i32)> = (0..=10).map(|i| (i, 0)).collect();
+        cells.extend((1..=10).map(|k| (10, k)));
+        cells.extend((11..20).map(|i| (i, 10)));
+        let path = vec![Vec3::new(10.5, 0.0, 0.5), Vec3::new(10.5, 0.0, 10.5), Vec3::new(23.0, 0.0, 10.5)];
+        (vent_world(&cells), path)
+    }
+
+    /// Steer along `path` with `crouch` as given; `check` sees every step. Returns the steps used.
+    fn follow(w: &mut Walker, world: &World, path: &[Vec3], crouch: impl Fn(usize) -> bool, mut check: impl FnMut(usize, &Walker)) -> usize {
+        let mut next = 0;
+        let mut i = 0;
+        while next < path.len() && i < 60 * 60 {
+            let to = path[next] - w.pos;
+            if Vec3::new(to.x, 0.0, to.z).length() < 0.25 {
+                next += 1;
+                continue;
+            }
+            let yaw = to.x.atan2(to.z);
+            w.tick(world, &WalkInput { forward: 1.0, yaw, crouch: crouch(i), ..Default::default() });
+            check(i, w);
+            i += 1;
+        }
+        i
+    }
+
+    #[test]
+    fn crouching_is_quick_on_the_eye_and_crouched_speed_is_lower() {
+        let world = World::new(&[aabb([-50.0, -1.0, -50.0], [50.0, 0.0, 50.0])]);
+        let mut w = walker_at(Vec3::ZERO);
+        run(&mut w, &world, WalkInput::default(), 1.0);
+        let (feet, eye0) = (w.pos, w.eye().y);
+        let mut eyes = vec![eye0];
+        for _ in 0..30 {
+            w.tick(&world, &WalkInput { crouch: true, ..Default::default() });
+            eyes.push(w.eye().y);
+        }
+        assert!(w.crouched && w.pos == feet, "the feet moved: {:?}", w.pos);
+        // No snap: the first step moves the eye by under half the way; 95 percent by 0.15 s.
+        let full = EYE_HEIGHT - CROUCH_EYE_HEIGHT;
+        assert!(eye0 - eyes[1] < 0.5 * full, "first step {}", eye0 - eyes[1]);
+        assert!(eyes[9] - (feet.y + CROUCH_EYE_HEIGHT) < 0.05 * full, "after 0.15 s the eye is at {}", eyes[9]);
+        assert!(eyes.windows(2).all(|p| p[1] <= p[0]));
+        // Crouched top speed, and with Shift the walk speed.
+        run(&mut w, &world, crouch_east(), 1.0);
+        assert!((w.vel.x - CROUCH_SPEED).abs() < 1e-3, "{}", w.vel.x);
+        run(&mut w, &world, WalkInput { shift: true, ..crouch_east() }, 1.0);
+        assert!((w.vel.x - WALK_SPEED).abs() < 1e-3, "{}", w.vel.x);
+        // Standing again in the open: up at once, the eye easing up.
+        let before = w.eye().y;
+        w.tick(&world, &WalkInput { yaw: EAST, ..Default::default() });
+        assert!(!w.crouched && w.eye().y - before < 0.5 * full);
+        run(&mut w, &world, WalkInput::default(), 0.3);
+        assert!((w.eye().y - (w.pos.y + EYE_HEIGHT)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn under_a_one_metre_slab_only_a_crouch_gets_through_and_the_eye_stays_under_it() {
+        let slab = aabb([3.0, 1.0, -5.0], [10.0, 1.5, 5.0]);
+        let world = World::new(&[aabb([-50.0, -1.0, -50.0], [50.0, 0.0, 50.0]), slab]);
+        // Standing: stopped at the slab's edge.
+        let mut w = walker_at(Vec3::ZERO);
+        run(&mut w, &world, WalkInput { forward: 1.0, yaw: EAST, ..Default::default() }, 3.0);
+        assert!(w.pos.x < 3.0 - CAPSULE_RADIUS + 0.01 && !w.crouched, "{:?}", w.pos);
+        // Crouching on the run, early or at the last moment (the standing capsule's front 5 cm
+        // from the slab): through, and the eye never above the slab's
+        // underside while under it, even though the crouch was still easing down.
+        for (start, crouch_at) in [(0.0f32, 0.0f32), (0.0, 2.3), (0.0, 2.6)] {
+            let mut w = walker_at(Vec3::new(start, 0.0, 0.0));
+            run(&mut w, &world, WalkInput::default(), 0.5);
+            let mut under = 0;
+            for _ in 0..240 {
+                let crouch = w.pos.x >= crouch_at && w.pos.x < 9.0;
+                w.tick(&world, &WalkInput { forward: 1.0, yaw: EAST, crouch, ..Default::default() });
+                assert!(!world.overlaps_h(w.pos, w.height()), "inside the slab at {:?}", w.pos);
+                if w.pos.x > 3.0 && w.pos.x < 10.0 {
+                    under += 1;
+                    assert!(w.crouched, "stood under the slab at {:?}", w.pos);
+                    assert!(w.eye().y < 1.0 - 0.1, "eye at {} under the slab (crouch at {crouch_at})", w.eye().y);
+                }
+            }
+            assert!(under > 30 && w.pos.x > 12.0, "crouch at {crouch_at}: ended at {:?}", w.pos);
+            // The key was released at x = 9, under the slab: it stood as soon as there was room.
+            assert!(!w.crouched);
+        }
+    }
+
+    #[test]
+    fn a_bent_vent_is_crawled_through_without_standing_jamming_or_entering_a_wall() {
+        let (world, path) = bent_vent();
+        // Crouch held all the way, then released half way: stays crouched inside, stands outside.
+        for release in [None, Some(300usize)] {
+            let mut w = walker_at(Vec3::new(-3.0, 0.0, 0.5));
+            run(&mut w, &world, WalkInput::default(), 0.5);
+            let mut inside = 0;
+            let steps = follow(&mut w, &world, &path, |i| release.is_none_or(|r| i < r), |_, w| {
+                assert!(!world.overlaps_h(w.pos, w.height()), "in a wall at {:?}", w.pos);
+                assert!(w.pos.y.abs() < 0.01, "left the vent floor: {:?}", w.pos);
+                let in_vent = w.pos.x > -CAPSULE_RADIUS && w.pos.x < 20.0 + CAPSULE_RADIUS;
+                if in_vent {
+                    inside += 1;
+                    assert!(w.crouched, "stood in the vent at {:?}", w.pos);
+                }
+            });
+            // 32 m of vent at 4 m/s, with two corners: about 8 s.
+            let secs = steps as f32 * FIXED_DT;
+            println!("bent vent (release {release:?}): {secs:.2} s, {inside} steps inside");
+            assert!(w.pos.x > 22.0 && secs < 11.0, "stuck at {:?} after {secs} s", w.pos);
+            run(&mut w, &world, WalkInput { crouch: release.is_none(), ..Default::default() }, 0.2);
+            assert_eq!(w.crouched, release.is_none());
+        }
+    }
+
+    #[test]
+    fn crouch_spam_in_a_vent_and_under_a_slab_edge_never_pushes_into_a_wall() {
+        let (world, path) = bent_vent();
+        let mut w = walker_at(Vec3::new(-0.6, 0.0, 0.5));
+        run(&mut w, &world, WalkInput::default(), 0.5);
+        // Toggle every step, every other step, every third, with jumps mixed in.
+        for period in [1usize, 2, 3] {
+            let mut w2 = w;
+            follow(&mut w2, &world, &path[..1], |i| (i / period) % 2 == 0, |i, w| {
+                assert!(!world.overlaps_h(w.pos, w.height()), "period {period} step {i}: in a wall at {:?}, crouched {}", w.pos, w.crouched);
+                assert!(w.pos.y > -0.01 && w.pos.y + w.height() < 1.0 + 0.01 || w.pos.x < -CAPSULE_RADIUS, "period {period}: out of the vent at {:?}", w.pos);
+            });
+        }
+        // Spamming crouch and jump together while standing at the mouth.
+        let mut w = walker_at(Vec3::new(-1.0, 0.0, 0.5));
+        run(&mut w, &world, WalkInput::default(), 0.5);
+        for i in 0..600 {
+            w.tick(&world, &WalkInput { forward: 1.0, yaw: EAST, crouch: i % 2 == 0, jump: i % 3 == 0, ..Default::default() });
+            assert!(!world.overlaps_h(w.pos, w.height()), "step {i}: in a wall at {:?}", w.pos);
+        }
+        assert!(w.deaths == 0);
+    }
+
+    #[test]
+    fn jumping_crouched_in_a_vent_does_not_jam() {
+        let (world, path) = bent_vent();
+        let mut w = walker_at(Vec3::new(-1.0, 0.0, 0.5));
+        run(&mut w, &world, WalkInput::default(), 0.5);
+        follow(&mut w, &world, &path[..1], |_| true, |_, _| {});
+        let (x0, mut hits) = (w.pos.x, 0);
+        // Press jump repeatedly while crawling back west.
+        for i in 0..120 {
+            w.tick(&world, &WalkInput { forward: 1.0, yaw: -EAST, crouch: true, jump: i % 10 == 0, ..Default::default() });
+            assert!(!world.overlaps_h(w.pos, w.height()), "in a wall at {:?}", w.pos);
+            hits += (w.last_impact > 0.0) as u32;
+        }
+        assert!(w.deaths == 0 && w.jumps > 0 && hits > 0);
+        assert!(x0 - w.pos.x > 5.0, "made only {} m with jumps", x0 - w.pos.x);
+        run(&mut w, &world, WalkInput { crouch: true, ..Default::default() }, 0.5);
+        assert!(w.grounded && w.crouched);
+    }
+
+    /// A wall at x = 3..20 with a vent mouth whose floor is `lip` above the ground, 1 m by 1 m.
+    fn mouth_world(lip: f32) -> World {
+        World::new(&[
+            aabb([-50.0, -1.0, -50.0], [50.0, 0.0, 50.0]),
+            aabb([3.0, 0.0, -5.0], [20.0, lip, 5.0]),
+            aabb([3.0, lip + 1.0, -5.0], [20.0, 6.0, 5.0]),
+            aabb([3.0, lip, -5.0], [20.0, lip + 1.0, -0.5]),
+            aabb([3.0, lip, 0.5], [20.0, lip + 1.0, 5.0]),
+        ])
+    }
+
+    #[test]
+    fn a_vent_mouth_045_up_is_stepped_into_crouched() {
+        let world = mouth_world(0.45);
+        for shift in [false, true] {
+            let mut w = walker_at(Vec3::ZERO);
+            run(&mut w, &world, WalkInput::default(), 0.5);
+            run(&mut w, &world, WalkInput { shift, ..crouch_east() }, 5.0);
+            assert!(w.pos.x > 10.0 && (w.pos.y - 0.45).abs() < 0.02 && w.grounded, "shift {shift}: {:?}", w.pos);
+        }
+        // Standing it is not entered.
+        let mut w = walker_at(Vec3::ZERO);
+        run(&mut w, &world, WalkInput { forward: 1.0, yaw: EAST, ..Default::default() }, 3.0);
+        assert!(w.pos.x < 3.0, "{:?}", w.pos);
+    }
+
+    #[test]
+    fn a_vent_mouth_14_up_is_reached_by_a_running_jump_and_a_crouch() {
+        let world = mouth_world(1.4);
+        // Crouch at take-off, near the apex, or before the run; jump from 0.3 to 1.5 m short.
+        let mut ok = 0;
+        let mut tried = 0;
+        for crouch_after in [0usize, 10, 20] {
+            for short in [0.3f32, 0.6, 1.0, 1.5] {
+                let mut w = walker_at(Vec3::ZERO);
+                run(&mut w, &world, WalkInput::default(), 0.5);
+                while w.pos.x < 3.0 - CAPSULE_RADIUS - short {
+                    w.tick(&world, &WalkInput { forward: 1.0, yaw: EAST, ..Default::default() });
+                }
+                w.tick(&world, &WalkInput { forward: 1.0, yaw: EAST, jump: true, ..Default::default() });
+                for i in 0..120 {
+                    w.tick(&world, &WalkInput { forward: 1.0, yaw: EAST, crouch: i >= crouch_after, ..Default::default() });
+                    assert!(!world.overlaps_h(w.pos, w.height()), "in a wall at {:?}", w.pos);
+                }
+                tried += 1;
+                let inside = w.pos.x > 5.0 && (w.pos.y - 1.4).abs() < 0.02 && w.crouched;
+                println!("lip 1.4: crouch {crouch_after} steps after take-off, jump {short} m short: {}", if inside { "in" } else { "out" });
+                ok += inside as u32;
+                assert!(w.deaths == 0);
+            }
+        }
+        // Crouched before the jump (the run is crouched too).
+        let mut w = walker_at(Vec3::ZERO);
+        run(&mut w, &world, WalkInput::default(), 0.5);
+        while w.pos.x < 3.0 - CAPSULE_RADIUS - 0.8 {
+            w.tick(&world, &crouch_east());
+        }
+        w.tick(&world, &WalkInput { jump: true, ..crouch_east() });
+        run(&mut w, &world, crouch_east(), 2.0);
+        assert!(w.pos.x > 5.0 && (w.pos.y - 1.4).abs() < 0.02, "crouched jump: {:?}", w.pos);
+        assert!(ok * 4 >= tried * 3, "only {ok} of {tried} running jumps got in");
+    }
+
+    #[test]
+    fn standing_up_in_the_air_brings_the_feet_down_and_the_eye_does_not_jump() {
+        let world = World::new(&[aabb([-50.0, -1.0, -50.0], [50.0, 0.0, 50.0])]);
+        let mut w = walker_at(Vec3::ZERO);
+        run(&mut w, &world, WalkInput::default(), 0.5);
+        w.tick(&world, &WalkInput { jump: true, ..Default::default() });
+        let mut prev = w.eye().y;
+        for i in 0..80 {
+            let crouch = (5..25).contains(&i);
+            let feet = w.pos.y;
+            w.tick(&world, &WalkInput { crouch, ..Default::default() });
+            // The feet lift by 0.9 m on the crouch and drop back on the release, the eye follows
+            // the jump smoothly.
+            if i == 5 {
+                assert!(w.pos.y - feet > 0.8, "feet did not lift: {} -> {}", feet, w.pos.y);
+            }
+            assert!((w.eye().y - prev).abs() < 0.2, "eye jumped {} at step {i}", w.eye().y - prev);
+            prev = w.eye().y;
+        }
+        assert!(w.grounded && !w.crouched && w.pos.y.abs() < 0.01);
+    }
+
+    #[test]
+    fn a_return_to_a_spot_in_a_vent_is_crouched() {
+        let (world, path) = bent_vent();
+        let mut w = walker_at(Vec3::new(-1.0, 0.0, 0.5));
+        run(&mut w, &world, WalkInput::default(), 0.5);
+        follow(&mut w, &world, &path[..1], |_| true, |_, _| {});
+        run(&mut w, &world, WalkInput { crouch: true, ..Default::default() }, 1.0);
+        assert!(w.stable_crouched && w.stable_pos.x > 5.0, "stable spot {:?}", w.stable_pos);
+        run(&mut w, &world, WalkInput { forward: 1.0, yaw: -EAST, crouch: true, ..Default::default() }, 0.3);
+        // The spot follows the crawling player (always on the ground there).
+        let spot = w.stable_pos;
+        assert!(w.stable_crouched && spot.x > 5.0);
+        w.reset();
+        // R with the key up: back in the vent, crouched, and not able to stand there.
+        run(&mut w, &world, WalkInput::default(), 0.5);
+        assert!(w.crouched && w.pos == spot && !world.overlaps_h(w.pos, w.height()), "crouched {} at {:?}, spot {spot:?}, stable_crouched {}", w.crouched, w.pos, w.stable_crouched);
+    }
+
+    #[test]
+    fn arriving_in_a_vent_from_the_fly_camera_crouches() {
+        let (world, _) = bent_vent();
+        let mut w = walker_at(Vec3::new(-3.0, 0.0, 0.5));
+        w.place_eye(Vec3::new(5.0, EYE_HEIGHT, 0.5));
+        let at = w.pos;
+        run(&mut w, &world, WalkInput::default(), 0.5);
+        assert!(w.crouched && (w.pos - at).length() < 0.01 && !world.overlaps_h(w.pos, w.height()), "{:?} crouched {}", w.pos, w.crouched);
+    }
+
+    #[test]
+    fn crawling_is_deterministic() {
+        let (world, path) = bent_vent();
+        let go = || {
+            let mut w = walker_at(Vec3::new(-3.0, 0.0, 0.5));
+            run(&mut w, &world, WalkInput::default(), 0.5);
+            follow(&mut w, &world, &path, |i| i % 7 != 0, |_, _| {});
+            w
+        };
+        let (a, b) = (go(), go());
+        assert_eq!(a.pos.to_array().map(f32::to_bits), b.pos.to_array().map(f32::to_bits));
+        assert_eq!(a.vel.to_array().map(f32::to_bits), b.vel.to_array().map(f32::to_bits));
     }
 }

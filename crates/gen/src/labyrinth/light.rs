@@ -23,47 +23,35 @@ pub struct LightField {
 }
 
 fn idx(c: Cell) -> usize {
-    ((c.y * NZ + c.z) * NX + c.x) as usize
+    ((c.y * nz() + c.z) * nx() + c.x) as usize
 }
 
 /// Fraction kept per cell moved inside a space of this kind (horizontally, vertically).
 fn keep(kind: SpaceKind) -> (f32, f32) {
     match kind {
         SpaceKind::Void | SpaceKind::LightWell => (0.985, 0.962),
-        SpaceKind::Shaft => (0.97, 0.985),
+        SpaceKind::Shaft => (0.97, 0.992),
+        SpaceKind::Vent | SpaceKind::SideRoom => (0.7, 0.7),
         SpaceKind::StairHall => (0.95, 0.94),
-        SpaceKind::Cistern => (0.85, 0.85),
+        SpaceKind::Cistern => (0.7, 0.96),
         SpaceKind::Antechamber => (0.85, 0.85),
         SpaceKind::GreatHall => (0.955, 0.94),
         SpaceKind::Loggia => (0.9, 0.9),
         SpaceKind::StairTower => (0.9, 0.93),
-        SpaceKind::Undercroft => (0.7, 0.75),
+        SpaceKind::Undercroft => (0.62, 0.97),
         SpaceKind::Corridor => (0.9, 0.9),
         SpaceKind::ServicePassage => (0.8, 0.8),
         _ => (0.82, 0.82),
     }
 }
 
-/// The darkest openness a kind of space falls to.
-fn darkest(kind: SpaceKind) -> f32 {
-    // The shading closes to black below a light of about 0.26 (`black_point` plus
-    // `black_range` in `nihei_ink`, E066), so the passages are kept above it and only the
-    // deepest places may fall below.
-    match kind {
-        SpaceKind::Corridor | SpaceKind::Junction | SpaceKind::Antechamber | SpaceKind::StairLanding | SpaceKind::Loggia => 0.46,
-        SpaceKind::StairTower | SpaceKind::ServicePassage | SpaceKind::StairHall | SpaceKind::GreatHall => 0.36,
-        SpaceKind::Undercroft | SpaceKind::Chamber | SpaceKind::Cistern => OPEN_FLOOR,
-        _ => 0.2,
-    }
-}
-
 impl LightField {
     pub fn new(p: &Plan) -> Self {
-        let n = (NX * NY * NZ) as usize;
+        let n = (nx() * ny() * nz()) as usize;
         let mut owner = vec![u32::MAX; n];
-        for y in 0..NY {
-            for z in 0..NZ {
-                for x in 0..NX {
+        for y in 0..ny() {
+            for z in 0..nz() {
+                for x in 0..nx() {
                     let c = Cell::new(x, y, z);
                     if let Occ::Space(s) = p.grid.get(c) {
                         owner[idx(c)] = s;
@@ -78,7 +66,7 @@ impl LightField {
         for r in p.rooms.iter().filter(|r| r.open_top) {
             for z in r.b.z0..r.b.z1 {
                 for x in r.b.x0..r.b.x1 {
-                    src.push((Cell::new(x, NY - 1, z), 1.0));
+                    src.push((Cell::new(x, ny() - 1, z), 1.0));
                 }
             }
         }
@@ -128,7 +116,7 @@ impl LightField {
                 for x in r.b.x0..r.b.x1 {
                     let (a, c) = (Cell::new(x, r.b.y0, z), Cell::new(x, r.b.y0 - 1, z));
                     if c.in_bounds() {
-                        links.push((a, c, 0.92));
+                        links.push((a, c, 0.95));
                     }
                 }
             }
@@ -189,9 +177,9 @@ impl LightField {
         // Smooth within each space so tone does not kink at cell centres.
         for _ in 0..2 {
             let prev = value.clone();
-            for y in 0..NY {
-                for z in 0..NZ {
-                    for x in 0..NX {
+            for y in 0..ny() {
+                for z in 0..nz() {
+                    for x in 0..nx() {
                         let c = Cell::new(x, y, z);
                         let s = owner[idx(c)];
                         if s == u32::MAX {
@@ -210,11 +198,8 @@ impl LightField {
                 }
             }
         }
-        // Each kind of space has its own darkest value: passages and small rooms stay in grey
-        // (pencil in shade), the undercroft, the chamber and the cistern's basin go to black.
-        for (i, v) in value.iter_mut().enumerate() {
-            let floor = if owner[i] == u32::MAX { OPEN_FLOOR } else { darkest(kind(owner[i])) };
-            *v = v.max(floor);
+        for v in value.iter_mut() {
+            *v = v.max(OPEN_FLOOR);
         }
         Self { value, owner }
     }
@@ -232,9 +217,10 @@ impl LightField {
     /// mostly from above). Outside the region it is open sky.
     pub fn openness(&self, p: Vec3, n: Vec3) -> f32 {
         let q = p + n * 0.45;
-        let facing = 0.86 + 0.14 * n.y;
-        let ext = NX as f32 * CELL;
-        if q.x < 0.0 || q.z < 0.0 || q.x > ext || q.z > NZ as f32 * CELL || q.y > NY as f32 * LEVEL {
+        // Floors, walls and ceilings a step apart in tone, so planes are told apart.
+        let facing = 0.8 + 0.2 * n.y;
+        let ext = nx() as f32 * CELL;
+        if q.x < 0.0 || q.z < 0.0 || q.x > ext || q.z > nz() as f32 * CELL || q.y > ny() as f32 * LEVEL {
             return facing.min(1.0);
         }
         let g = Vec3::new(q.x / CELL - 0.5, q.y / LEVEL - 0.5, q.z / CELL - 0.5);

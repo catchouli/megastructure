@@ -58,6 +58,49 @@ pub struct MeshData {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub strokes: Vec<Stroke>,
+    /// Groups of triangles and strokes for culling, each one contiguous range of `indices`
+    /// and of `strokes`, covering both completely and in order. Empty means the whole mesh
+    /// is one chunk.
+    pub chunks: Vec<Chunk>,
+}
+
+/// Space id of geometry outside every space (the outer skin of a region).
+pub const OUTSIDE: u32 = u32::MAX;
+
+/// A contiguous group of triangles and strokes belonging to one space (or one height band of
+/// a tall space), for culling.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Chunk {
+    /// Stable id of the space (the scene's own numbering; [`OUTSIDE`] for the outer skin).
+    /// Several chunks may share one space (height bands of a tall void).
+    pub space: u32,
+    /// Bounds of the chunk's vertices and stroke ends.
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+    /// Range of `MeshData::indices` (a multiple of 3).
+    pub index_start: u32,
+    pub index_count: u32,
+    /// Range of `MeshData::strokes`.
+    pub stroke_start: u32,
+    pub stroke_count: u32,
+}
+
+/// A convex box covering part of a space's interior, so the renderer can find which space the
+/// camera is in. A space may have several (an L-shaped passage, a stair, a doorway).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpaceBox {
+    pub space: u32,
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+/// An opening between two spaces, for portal culling: the space ids either side and the
+/// opening's quad (four corners in order round it).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScenePortal {
+    pub a: u32,
+    pub b: u32,
+    pub quad: [[f32; 3]; 4],
 }
 
 impl MeshData {
