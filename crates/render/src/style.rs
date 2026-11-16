@@ -491,6 +491,12 @@ pub struct StylePreset {
     pub speck_soft: f32,
     /// A faint sheen of pencil texture and paper tooth inside solid black, 0 off.
     pub black_texture: f32,
+    /// The player's light (E070): strength in light units at the eye, 0 off.
+    pub player_light: f32,
+    /// Its radius in metres (to nothing), varied +-15% by surface noise for a soft edge.
+    pub player_radius: f32,
+    /// Its falloff exponent (higher: a smaller bright core, a longer dim tail).
+    pub player_falloff: f32,
 }
 
 impl StylePreset {
@@ -687,6 +693,9 @@ impl StylePreset {
             speck_tone: 0.0,
             speck_soft: 0.0,
             black_texture: 0.0,
+            player_light: 0.0,
+            player_radius: 8.0,
+            player_falloff: 1.5,
         }
     }
 
@@ -748,6 +757,7 @@ impl StylePreset {
             paper15: [self.black_point, self.black_range, self.black_patch, 0.0],
             paper16: [self.white_line_tone, self.white_line_core, self.white_line_break, 0.0],
             paper17: [self.speck_tone, self.speck_soft, self.black_texture, 0.0],
+            paper18: [self.player_light, self.player_radius, self.player_falloff, 0.0],
         }
     }
 }
@@ -922,7 +932,7 @@ impl StylePreset {
             // it replaces the near laid-line pencil (E052) and the far strokes (E057).
             shade: 0.35,
             // The light end (E062): sky-lit faces print a pale wash, sunlit ones stay paper.
-            light_wash: 0.18,
+            light_wash: 0.36,
             light_white: 1.0,
             light_gamma: 1.3,
             light_sun: 4.0,
@@ -930,10 +940,18 @@ impl StylePreset {
             // of 0.5, a linear curve), and where the total light is very low it closes to solid
             // black in patches, with white contours and specks inside. The open shaft's light
             // never gets that low, so its cast shadows stay grey.
-            wash_max: 0.85,
-            wash_gamma: 1.0,
-            black_point: 0.06,
-            black_range: 0.2,
+            // Shifted to the dark end (E070): typical surfaces dark to mid grey, paper only for
+            // direct sun, solid black wherever the light is near zero.
+            wash_white: 0.95,
+            wash_black: 0.25,
+            wash_max: 0.95,
+            wash_gamma: 0.8,
+            black_point: 0.1,
+            black_range: 0.3,
+            // The player's light, so the immediate surroundings read in the dark (E070).
+            player_light: 0.3,
+            player_radius: 8.0,
+            player_falloff: 1.5,
             black_patch: 0.7,
             // White lines in black, restrained (E067): light grey, core only, broken.
             white_line_tone: 0.55,
@@ -944,8 +962,11 @@ impl StylePreset {
             speck_tone: 0.25,
             speck_soft: 0.7,
             black_texture: 0.1,
+            // The owner's choice (2026-11-16): no white lines and no specks in black; the
+            // pencil sheen stays. The fields and code remain for another try.
+            white_lines: 0.0,
+            speckle: 0.0,
             wash_speckle: 0.0,
-            speckle: 0.04,
             shade_from: 0.45,
             far_white: 0.45,
             far_pencil_px: 1.0,
@@ -1271,6 +1292,9 @@ impl StylePreset {
         "speck_tone",
         "speck_soft",
         "black_texture",
+        "player_light",
+        "player_radius",
+        "player_falloff",
     ];
 
     /// Set one field from text, for tools and experiments (`mega_capture --set name=value`).
@@ -1454,6 +1478,9 @@ impl StylePreset {
             "speck_tone" => self.speck_tone = num(value)?,
             "speck_soft" => self.speck_soft = num(value)?,
             "black_texture" => self.black_texture = num(value)?,
+            "player_light" => self.player_light = num(value)?,
+            "player_radius" => self.player_radius = num(value)?,
+            "player_falloff" => self.player_falloff = num(value)?,
             "paper" => self.paper = parse_list::<3>(name, value)?,
             "ink" => self.ink = parse_list::<3>(name, value)?,
             "fog_colour" => self.fog_colour = parse_list::<3>(name, value)?,
@@ -1532,4 +1559,5 @@ pub(crate) struct StyleGpu {
     paper15: [f32; 4],
     paper16: [f32; 4],
     paper17: [f32; 4],
+    paper18: [f32; 4],
 }

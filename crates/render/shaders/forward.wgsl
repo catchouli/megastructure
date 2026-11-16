@@ -13,7 +13,8 @@ struct VsIn {
 };
 
 struct VsOut {
-    @builtin(position) clip: vec4<f32>,
+    // Invariant so the depth prepass and the forward pass agree exactly (E069).
+    @builtin(position) @invariant clip: vec4<f32>,
     @location(0) world: vec3<f32>,
     @location(1) @interpolate(flat) normal: vec3<f32>,
     @location(2) @interpolate(flat) axis: vec3<f32>,
@@ -1326,9 +1327,23 @@ fn fs_main(in: VsOut) -> FsOut {
     // One bounce of sun and sky light (baked per vertex, docs/features/bounced-light.md). It
     // reaches shaded and cast-shadowed surfaces alike, so it is added after the shadow
     // clamp; 0 with both strengths 0, which leaves the light exactly as before.
-    let bounced = S.bounce.x * S.light.x * G.sun_params.y * in.bounce.x + S.bounce.y * S.light.y * in.bounce.y;
-    var lit = (S.light.x * G.sun_params.y * max(ndl, 0.0) * sun_vis + ambient + noise) * shade + bounced;
-    let dark = clamp((ambient * S.shadow.x + noise) * shade, S.shadow.y, S.shadow.z) + bounced;
+    // G.misc.w fades the bounce in when the background bake first arrives (E069).
+    let bounced = (S.bounce.x * S.light.x * G.sun_params.y * in.bounce.x + S.bounce.y * S.light.y * in.bounce.y) * G.misc.w;
+    // The player's light (E070): a weak point light just below the eye, N.L shaded so floor,
+    // walls and ceiling take different tones, fading to nothing over S.paper18.y metres with
+    // a soft edge made irregular by surface-anchored noise. A small absolute amount, so it
+    // only shows where the light is otherwise near zero.
+    var plight = 0.0;
+    if (S.paper18.x > 0.0) {
+        let lp = G.camera_pos.xyz - vec3<f32>(0.0, 0.25, 0.0);
+        let tl = lp - p;
+        let dl = length(tl);
+        let r = S.paper18.y * (0.85 + 0.3 * vnoise3(0x5bd1e995u, p / 1.7));
+        let fall = pow(1.0 - smoothstep(0.0, r, dl), max(S.paper18.z, 0.1));
+        plight = S.paper18.x * fall * (0.35 + 0.65 * max(dot(n, tl / max(dl, 1e-4)), 0.0));
+    }
+    var lit = (S.light.x * G.sun_params.y * max(ndl, 0.0) * sun_vis + ambient + noise) * shade + bounced + plight;
+    let dark = clamp((ambient * S.shadow.x + noise) * shade, S.shadow.y, S.shadow.z) + bounced + plight;
     // Smooth part of the light only: the shadow edge has its own anti-aliasing below.
     let edge = max(fwidth(lit), 0.004);
 

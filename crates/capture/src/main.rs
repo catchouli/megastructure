@@ -53,6 +53,10 @@ OPTIONS:
     --shadow-filter <M>  diagnostic shadow map filter: smooth (default), bilinear, hard
     --depth-tol <X>  override the preset's stroke depth tolerance
     --bench <N>      render one frame N times without readback and print ms per frame
+    --timing         with --bench: print the median GPU time per pass (timestamp queries)
+    --prepass        draw a depth prepass first (off by default; no gain on Apple GPUs, E069)
+    --no-prepass     no depth prepass (the default)
+    --no-cull        diagnostic: draw every triangle in every pass (as before E069)
     --width <W>      image width in pixels, default 1280
     --height <H>     image height in pixels, default 720
     --list-paths     print the available path names (with their scenes) and exit
@@ -102,6 +106,10 @@ struct Args {
     sun: SunArgs,
     shadow_filter: ShadowFilter,
     centre_ink: bool,
+    timing: bool,
+    no_prepass: bool,
+    prepass: bool,
+    no_cull: bool,
 }
 
 #[derive(Default)]
@@ -143,6 +151,10 @@ fn parse_args() -> Result<Option<Args>> {
     let mut sun = SunArgs::default();
     let mut shadow_filter = ShadowFilter::Smooth;
     let mut centre_ink = false;
+    let mut timing = false;
+    let mut no_prepass = false;
+    let mut prepass = false;
+    let mut no_cull = false;
     let mut camera: Option<mega_render::Camera> = None;
     fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
         it.next().ok_or_else(|| anyhow!("{flag} needs a value"))
@@ -221,6 +233,10 @@ fn parse_args() -> Result<Option<Args>> {
             }
             "--metrics" => metrics = true,
             "--centre-ink" => centre_ink = true,
+            "--timing" => timing = true,
+            "--no-prepass" => no_prepass = true,
+            "--prepass" => prepass = true,
+            "--no-cull" => no_cull = true,
             "--no-png" => png = false,
             "--error-png" => error_png = true,
             "--stroke-vis" => {
@@ -285,7 +301,7 @@ fn parse_args() -> Result<Option<Args>> {
             bail!("--sun-dist must be positive");
         }
     }
-    Ok(Some(Args { path, camera, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol, sets, sun, shadow_filter, centre_ink }))
+    Ok(Some(Args { path, camera, scene, preset, out, frames, t, t0, t1, width, height, view, metrics, png, bench, error_png, hatch_lod, stroke_vis, depth_tol, sets, sun, shadow_filter, centre_ink, timing, no_prepass, prepass, no_cull }))
 }
 
 fn main() {
@@ -325,6 +341,8 @@ fn run() -> Result<()> {
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("capture"),
         required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
+        // For --timing (per-pass GPU time), when the adapter has it.
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
         ..Default::default()
     }))
     .context("failed to create a GPU device")?;
@@ -366,6 +384,13 @@ fn run() -> Result<()> {
     renderer.set_hatch_lod(args.hatch_lod);
     renderer.set_stroke_visibility(args.stroke_vis);
     renderer.set_shadow_filter(args.shadow_filter);
+    renderer.set_depth_prepass(args.prepass && !args.no_prepass);
+    renderer.set_culling(!args.no_cull);
+    // The bounce bake runs in the background; captures wait for it so every frame is final.
+    renderer.wait_for_bounce();
+    if let Some(ms) = renderer.bounce_bake_ms() {
+        println!("bounce bake {ms:.0} ms");
+    }
     if let Some(tol) = args.depth_tol {
         renderer.set_preset(StylePreset { stroke_depth_tol: tol, ..renderer.preset().clone() });
     }
@@ -418,8 +443,36 @@ fn run() -> Result<()> {
             Ok(start.elapsed().as_secs_f64() * 1000.0 / count as f64)
         };
         run(1, &mut renderer)?;
-        if let Some(ms) = renderer.bounce_bake_ms() {
-            println!("bounce bake {ms:.0} ms");
+        if args.timing {
+            if !renderer.enable_timing() {
+                bail!("--timing: this adapter has no timestamp queries");
+            }
+            // Per pass, the median over n frames, each submitted and read back on its own.
+            let mut samples: Vec<Vec<(&str, f64)>> = Vec::new();
+            for _ in 0..n {
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("timing") });
+                renderer.render(&mut encoder, &target_view, &camera);
+                queue.submit([encoder.finish()]);
+                if let Some(t) = renderer.read_timing() {
+                    samples.push(t);
+                }
+            }
+            let mut line = format!("timing {} {}x{}:", args.path, w, h);
+            let mut total = 0.0;
+            for k in 0..samples.first().map_or(0, |s| s.len()) {
+                let mut v: Vec<f64> = samples.iter().map(|s| s[k].1).filter(|x| x.is_finite()).collect();
+                if v.is_empty() {
+                    line += &format!(" {} n/a", samples[0][k].0);
+                    continue;
+                }
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let med = v[v.len() / 2];
+                total += med;
+                line += &format!(" {} {:.3}", samples[0][k].0, med);
+            }
+            let (d, nch) = renderer.drawn_triangles();
+            println!("{line}; sum {total:.3} ms; triangles drawn main {} cascades {:?} of {} in {nch} chunks", d[0], &d[1..], renderer.triangle_count());
+            return Ok(());
         }
         run(10.min(n), &mut renderer)?; // warm-up
         let ms = run(n, &mut renderer)?;
@@ -455,11 +508,7 @@ fn run() -> Result<()> {
         renderer.set_sun(args.sun.at(base_sun, centre, frac));
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
-        let baked = renderer.bounce_bake_ms();
         renderer.render(&mut encoder, &target_view, &camera);
-        if let Some(ms) = renderer.bounce_bake_ms().filter(|_| renderer.bounce_bake_ms() != baked || i == 0) {
-            println!("bounce bake {ms:.0} ms");
-        }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo { texture: &target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             wgpu::TexelCopyBufferInfo {

@@ -2,6 +2,7 @@
 //! `TextureView` you hand it, so the same code serves the window and the offscreen capture.
 
 pub mod camera;
+pub mod cull;
 pub mod paper;
 pub mod paths;
 pub mod renderer;

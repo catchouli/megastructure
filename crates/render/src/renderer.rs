@@ -292,6 +292,9 @@ const BOUNCE_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![6 => F
 /// sun by more than this fraction of its distance.
 const BOUNCE_REBAKE_ANGLE: f32 = 0.25 * std::f32::consts::PI / 180.0;
 
+/// Seconds over which the first bounce bake fades in (E069).
+const BOUNCE_FADE_S: f32 = 0.4;
+
 struct Targets {
     depth_tex: wgpu::Texture,
     depth: wgpu::TextureView,
@@ -401,6 +404,9 @@ pub struct Renderer {
     frame_group: wgpu::BindGroup,
 
     forward_pipeline: wgpu::RenderPipeline,
+    forward_eq_pipeline: wgpu::RenderPipeline,
+    prepass_pipeline: wgpu::RenderPipeline,
+    depth_prepass: bool,
     stroke_pipeline: wgpu::RenderPipeline,
     contour_pipeline: wgpu::RenderPipeline,
     resolve_pipeline: wgpu::RenderPipeline,
@@ -431,12 +437,27 @@ pub struct Renderer {
     bounce_buf: Option<wgpu::Buffer>,
     /// The scene's triangles, kept to build the bounce baker the first time a preset asks
     /// for bounced light.
-    bounce_mesh: Option<MeshData>,
+    bounce_mesh: Option<std::sync::Arc<MeshData>>,
     bounce_baker: Option<BounceBaker>,
     /// The sun the bounce buffer was baked for.
     bounce_sun: Option<BounceSun>,
     bounce_ms: Option<f64>,
+    /// The background bake in flight, if any (E069).
+    bounce_job: Option<std::sync::mpsc::Receiver<(BounceBaker, Vec<[f32; 2]>, BounceSun, f64)>>,
+    /// When the first bake was uploaded (for the fade-in), and whether to skip the fade.
+    bounce_shown: Option<std::time::Instant>,
+    bounce_instant: bool,
+    timing: Option<Timing>,
     strokes: Vec<Stroke>,
+    /// Spatial chunks of the index buffer and of `strokes` (E069).
+    chunks: Vec<crate::cull::Chunk>,
+    stroke_chunks: Vec<crate::cull::Chunk>,
+    culling: bool,
+    /// Incremented on every upload; with the cascade matrix it keys the cached far cascade.
+    scene_gen: u64,
+    far_cascade_cache: Option<(Mat4, u64)>,
+    /// Triangles drawn in the last frame: main pass, and each cascade (drawn 0 if cached).
+    pub(crate) drawn: [u32; 1 + SHADOW_CASCADES],
     stroke_buf: wgpu::Buffer,
     visible_buf: wgpu::Buffer,
     visible: Vec<u32>,
@@ -770,6 +791,54 @@ impl Renderer {
             cache: None,
         });
 
+        // Depth prepass (E069): the same vertex shader, depth only. With it the forward pass
+        // tests Equal and writes no depth, so its heavy fragment shader runs once per pixel
+        // instead of once per overlapping surface. The clip position is @invariant in the
+        // shader, so both passes produce identical depths.
+        let forward_buffers = [
+            Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &VERTEX_ATTRS }),
+            Some(wgpu::VertexBufferLayout { array_stride: 8, step_mode: wgpu::VertexStepMode::Vertex, attributes: &BOUNCE_ATTRS }),
+        ];
+        let prepass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("depth prepass"),
+            layout: Some(&layout("depth prepass", Some(&forward_shadow_layout))),
+            vertex: wgpu::VertexState { module: &forward_src, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &forward_buffers },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, front_face: wgpu::FrontFace::Ccw, cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: None,
+            multiview_mask: None,
+            cache: None,
+        });
+        let forward_eq_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("forward after prepass"),
+            layout: Some(&layout("forward after prepass", Some(&forward_shadow_layout))),
+            vertex: wgpu::VertexState { module: &forward_src, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &forward_buffers },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, front_face: wgpu::FrontFace::Ccw, cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Equal),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &forward_src,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(ID_FORMAT.into()), Some(NORMAL_FORMAT.into()), Some(FILL_FORMAT.into()), Some(INK_FORMAT.into()), Some(TONE_FORMAT.into())],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let ink_target = [Some(wgpu::ColorTargetState { format: INK_FORMAT, blend: Some(MAX_BLEND), write_mask: wgpu::ColorWrites::ALL })];
         let screen_pipeline = |label: &str, module: &wgpu::ShaderModule, vs: &str, layout: &wgpu::PipelineLayout, targets: &[Option<wgpu::ColorTargetState>]| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -835,6 +904,9 @@ impl Renderer {
             style_buf,
             frame_group,
             forward_pipeline,
+            forward_eq_pipeline,
+            prepass_pipeline,
+            depth_prepass: false,
             stroke_pipeline,
             contour_pipeline,
             resolve_pipeline,
@@ -864,7 +936,17 @@ impl Renderer {
             bounce_baker: None,
             bounce_sun: None,
             bounce_ms: None,
+            bounce_job: None,
+            bounce_shown: None,
+            bounce_instant: false,
+            timing: None,
             strokes: Vec::new(),
+            chunks: Vec::new(),
+            stroke_chunks: Vec::new(),
+            culling: true,
+            scene_gen: 0,
+            far_cascade_cache: None,
+            drawn: [0; 1 + SHADOW_CASCADES],
             stroke_buf,
             visible_buf,
             visible: Vec::new(),
@@ -980,6 +1062,26 @@ impl Renderer {
         self.view = view;
     }
 
+    /// Chunk culling (on by default, E069). Off draws every triangle in every pass and every
+    /// cascade every frame, as before; the image is the same.
+    pub fn set_culling(&mut self, on: bool) {
+        self.culling = on;
+        self.far_cascade_cache = None;
+    }
+
+    /// Triangles drawn in the last frame: `[main, cascade 0, 1, 2, 3]` (a cached cascade
+    /// counts 0), and the number of spatial chunks.
+    pub fn drawn_triangles(&self) -> ([u32; 1 + SHADOW_CASCADES], usize) {
+        (self.drawn, self.chunks.len())
+    }
+
+    /// Depth prepass before the forward pass (off by default, E069: on Apple GPUs hidden-surface
+    /// removal already shades each pixel once, and the prepass gained nothing). The image is
+    /// the same either way.
+    pub fn set_depth_prepass(&mut self, on: bool) {
+        self.depth_prepass = on;
+    }
+
     /// Diagnostic: change how the hatch octave is chosen.
     pub fn set_hatch_lod(&mut self, lod: HatchLod) {
         self.hatch_lod = lod;
@@ -1021,6 +1123,10 @@ impl Renderer {
         &self.stroke_buf
     }
 
+    pub fn triangle_count(&self) -> u32 {
+        self.index_count / 3
+    }
+
     pub fn stroke_count(&self) -> u32 {
         self.strokes.len() as u32
     }
@@ -1042,9 +1148,12 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&mesh.vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             }));
+            // Indices regrouped into spatial chunks for culling (E069).
+            let (indices, chunks) = crate::cull::chunk_triangles(mesh);
+            self.chunks = chunks;
             self.index_buf = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("indices"),
-                contents: bytemuck::cast_slice(&mesh.indices),
+                contents: bytemuck::cast_slice(&indices),
                 usage: wgpu::BufferUsages::INDEX,
             }));
             self.index_count = mesh.indices.len() as u32;
@@ -1054,12 +1163,18 @@ impl Renderer {
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             }));
         }
-        self.bounce_mesh = (!mesh.indices.is_empty()).then(|| MeshData { vertices: mesh.vertices.clone(), indices: mesh.indices.clone(), strokes: Vec::new() });
+        self.bounce_mesh = (!mesh.indices.is_empty()).then(|| std::sync::Arc::new(MeshData { vertices: mesh.vertices.clone(), indices: mesh.indices.clone(), ..Default::default() }));
         self.bounce_baker = None;
         self.bounce_sun = None;
+        self.bounce_job = None;
+        self.bounce_shown = None;
         self.bounds = mesh.bounds().map(|(lo, hi)| (Vec3::from(lo), Vec3::from(hi)));
-        self.strokes = mesh.strokes.clone();
-        self.stroke_buf = storage_buffer(&self.device, "strokes", &mesh.strokes);
+        let (strokes, stroke_chunks) = crate::cull::chunk_strokes(&mesh.strokes);
+        self.strokes = strokes;
+        self.stroke_chunks = stroke_chunks;
+        self.stroke_buf = storage_buffer(&self.device, "strokes", &self.strokes);
+        self.scene_gen += 1;
+        self.far_cascade_cache = None;
         let zeros = vec![0u32; mesh.strokes.len()];
         self.visible_buf = storage_buffer(&self.device, "visible strokes", &zeros);
         self.visible.clear();
@@ -1076,10 +1191,18 @@ impl Renderer {
     /// light and the sun has moved since the last bake. Called by `render`; callers may call
     /// it ahead of time (after `set_sun`) to take the bake's cost at a moment of their choice.
     pub fn update_bounce(&mut self) {
+        // A finished background bake: upload it (E069). The first one fades in.
+        if let Some(rx) = &self.bounce_job {
+            match rx.try_recv() {
+                Ok(done) => self.finish_bounce(done),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.bounce_job = None,
+            }
+        }
         if self.preset.bounce <= 0.0 && self.preset.bounce_sky <= 0.0 {
             return;
         }
-        let (Some(mesh), Some(buf)) = (&self.bounce_mesh, &self.bounce_buf) else { return };
+        let Some(mesh) = &self.bounce_mesh else { return };
         // The sun as the shader sees it from the middle of the scene.
         let centre = self.bounds.map(|(lo, hi)| (lo + hi) * 0.5).unwrap_or(Vec3::ZERO);
         let to_sun = self.sun.position - centre;
@@ -1092,12 +1215,53 @@ impl Renderer {
         if !fresh {
             return;
         }
-        let start = std::time::Instant::now();
-        let baker = self.bounce_baker.get_or_insert_with(|| BounceBaker::new(mesh));
-        let data = baker.bake(sun, BounceSettings::default());
-        self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&data));
+        // Bake on a worker thread; the frame draws on with the previous bounce (or none, at
+        // first) until it is done.
+        let mesh = mesh.clone();
+        let baker = self.bounce_baker.take();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let baker = baker.unwrap_or_else(|| BounceBaker::new(&mesh));
+            let data = baker.bake(sun, BounceSettings::default());
+            let _ = tx.send((baker, data, sun, start.elapsed().as_secs_f64() * 1000.0));
+        });
+        self.bounce_job = Some(rx);
+    }
+
+    fn finish_bounce(&mut self, (baker, data, sun, ms): (BounceBaker, Vec<[f32; 2]>, BounceSun, f64)) {
+        if let Some(buf) = &self.bounce_buf {
+            self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&data));
+        }
+        self.bounce_baker = Some(baker);
         self.bounce_sun = Some(sun);
-        self.bounce_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+        self.bounce_ms = Some(ms);
+        self.bounce_job = None;
+        if self.bounce_shown.is_none() {
+            self.bounce_shown = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Starts the bounce bake if needed and blocks until it is done, then shows it at full
+    /// strength at once (no fade): for tools that need the final picture on the first frame.
+    pub fn wait_for_bounce(&mut self) {
+        self.update_bounce();
+        if let Some(rx) = self.bounce_job.take() {
+            if let Ok(done) = rx.recv() {
+                self.finish_bounce(done);
+            }
+        }
+        self.bounce_instant = true;
+    }
+
+    /// How much of the baked bounce is shown: 0 until the first bake arrives, then rising to 1
+    /// over `BOUNCE_FADE_S` so it does not pop in.
+    fn bounce_fade(&self) -> f32 {
+        match self.bounce_shown {
+            None => 0.0,
+            Some(_) if self.bounce_instant => 1.0,
+            Some(t) => (t.elapsed().as_secs_f32() / BOUNCE_FADE_S).min(1.0),
+        }
     }
 
     /// CPU stroke cull: frustum (both endpoints outside one side plane or behind the near
@@ -1111,7 +1275,15 @@ impl Renderer {
         let margin = 1.02;
         let planes = [r3 * margin + r0, r3 * margin - r0, r3 * margin + r1, r3 * margin - r1, r3 - r2];
         let fade_end = self.preset.rank_fade_end;
-        for (i, s) in self.strokes.iter().enumerate() {
+        let reach = fade_end.iter().cloned().fold(0.0f32, f32::max);
+        let cull = self.culling;
+        for c in &self.stroke_chunks {
+            // Whole chunks: outside the frustum, or farther than any rank draws (E069).
+            if cull && (!crate::cull::box_in_planes(&planes, c.lo, c.hi) || crate::cull::box_distance(eye, c.lo, c.hi) > reach) {
+                continue;
+            }
+        for i in c.start as usize..(c.start + c.count) as usize {
+            let s = &self.strokes[i];
             let a = Vec3::from(s.a);
             let b = Vec3::from(s.b);
             let (pa, pb) = (a.extend(1.0), b.extend(1.0));
@@ -1125,6 +1297,7 @@ impl Renderer {
                 continue;
             }
             self.visible.push(i as u32);
+        }
         }
         if !self.visible.is_empty() {
             self.queue.write_buffer(&self.visible_buf, 0, bytemuck::cast_slice(&self.visible));
@@ -1151,13 +1324,19 @@ impl Renderer {
             // A remote sun below the horizon lights nothing (and casts no shadow).
             sun_params: [self.sun.radius, if self.sun.is_up(camera.position) { self.sun.intensity } else { 0.0 }, 0.0, 0.0],
             screen: [w, h, 1.0 / w, 1.0 / h],
-            misc: [h / REFERENCE_HEIGHT, 2.0 * (camera.fov_y * 0.5).tan() / h, self.shadow_filter as u32 as f32, 0.0],
+            misc: [h / REFERENCE_HEIGHT, 2.0 * (camera.fov_y * 0.5).tan() / h, self.shadow_filter as u32 as f32, self.bounce_fade()],
             flags: [self.view.index(), self.color_format.is_srgb() as u32, self.hatch_lod as u32, self.stroke_vis as u32],
         };
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         self.queue.write_buffer(&self.style_buf, 0, bytemuck::bytes_of(&self.preset.to_gpu()));
         self.cull_strokes(view_proj, camera.position);
         self.update_bounce();
+        // GPU timing (E069): per pass, when enabled with `enable_timing`.
+        if let Some(t) = &self.timing {
+            // Passes that do not run this frame leave their slots unwritten; clear them.
+            self.queue.write_buffer(&t.resolve, 0, &[0u8; TIMING_SLOTS as usize * 8]);
+        }
+        let ts = self.timing.as_ref().map(|t| &t.set);
 
         // 0. Sun shadow maps, refitted every frame so the sun may move.
         self.shadow_maps_on = self.sun.is_up(camera.position) && self.vertex_buf.is_some() && self.preset.sun_shadow > 0.0;
@@ -1173,7 +1352,25 @@ impl Renderer {
         }
         self.queue.write_buffer(&self.shadow_uniform, 0, bytemuck::bytes_of(&sg));
         if let (true, Some(vb), Some(ib)) = (self.shadow_maps_on, &self.vertex_buf, &self.index_buf) {
+            let cascades = self.cascades.as_ref().expect("fitted when shadows are on");
             for i in 0..SHADOW_CASCADES {
+                let m = cascades.view_proj[i];
+                // The far cascade is fitted to the scene, so with a still sun its matrix does not
+                // change: keep last frame's map (E069). Exact: same matrix, same scene.
+                let last = i == SHADOW_CASCADES - 1;
+                if last && self.culling && !cascades.perspective && self.far_cascade_cache == Some((m, self.scene_gen)) {
+                    self.drawn[1 + i] = 0;
+                    continue;
+                }
+                let runs = if self.culling {
+                    crate::cull::visible_runs(&self.chunks, |c| crate::cull::box_in_cascade(m, c.lo, c.hi))
+                } else {
+                    vec![(0, self.index_count)]
+                };
+                self.drawn[1 + i] = runs.iter().map(|r| r.1).sum::<u32>() / 3;
+                if last {
+                    self.far_cascade_cache = Some((m, self.scene_gen));
+                }
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("sun shadow"),
                     color_attachments: &[],
@@ -1182,7 +1379,7 @@ impl Renderer {
                         depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: ts.map(|q| wgpu::RenderPassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(2 * i as u32), end_of_pass_write_index: Some(2 * i as u32 + 1) }),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -1190,7 +1387,9 @@ impl Renderer {
                 pass.set_bind_group(0, &self.shadow_mat_groups[i], &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..self.index_count, 0, 0..1);
+                for (start, count) in &runs {
+                    pass.draw_indexed(*start..start + count, 0, 0..1);
+                }
             }
         }
 
@@ -1203,6 +1402,43 @@ impl Renderer {
             })
         };
 
+        // Chunks in the camera frustum, for the main passes (E069).
+        let main_runs = if self.culling {
+            let planes = crate::cull::frustum_planes(view_proj, 1.0);
+            crate::cull::visible_runs(&self.chunks, |c| crate::cull::box_in_planes(&planes, c.lo, c.hi))
+        } else {
+            vec![(0, self.index_count)]
+        };
+        self.drawn[0] = main_runs.iter().map(|r| r.1).sum::<u32>() / 3;
+
+        // 0c. Depth prepass (E069): depth only, so the forward pass shades each pixel once.
+        let prepass = self.depth_prepass && self.vertex_buf.is_some();
+        if prepass {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("depth prepass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.targets.depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: ts.map(|q| wgpu::RenderPassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(8), end_of_pass_write_index: Some(9) }),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if let (Some(vb), Some(ib)) = (&self.vertex_buf, &self.index_buf) {
+                pass.set_pipeline(&self.prepass_pipeline);
+                pass.set_bind_group(0, &self.frame_group, &[]);
+                pass.set_bind_group(1, &self.shadow_group, &[]);
+                pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_vertex_buffer(1, self.bounce_buf.as_ref().expect("created with the vertex buffer").slice(..));
+                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                for (start, count) in &main_runs {
+                    pass.draw_indexed(*start..start + count, 0, 0..1);
+                }
+            }
+        }
+
         // 1. Forward geometry, MRT.
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1210,21 +1446,23 @@ impl Renderer {
                 color_attachments: &[clear(&self.targets.id), clear(&self.targets.normal), clear(&self.targets.fill), clear(&self.targets.ink), clear(&self.targets.tone)],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.targets.depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations { load: if prepass { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(0.0) }, store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: ts.map(|q| wgpu::RenderPassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(10), end_of_pass_write_index: Some(11) }),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             if let (Some(vb), Some(ib)) = (&self.vertex_buf, &self.index_buf) {
-                pass.set_pipeline(&self.forward_pipeline);
+                pass.set_pipeline(if prepass { &self.forward_eq_pipeline } else { &self.forward_pipeline });
                 pass.set_bind_group(0, &self.frame_group, &[]);
                 pass.set_bind_group(1, &self.shadow_group, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_vertex_buffer(1, self.bounce_buf.as_ref().expect("created with the vertex buffer").slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..self.index_count, 0, 0..1);
+                for (start, count) in &main_runs {
+                    pass.draw_indexed(*start..start + count, 0, 0..1);
+                }
             }
         }
 
@@ -1234,7 +1472,7 @@ impl Renderer {
                 label: Some("contours"),
                 color_attachments: &[clear(&self.targets.contour)],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: ts.map(|q| wgpu::RenderPassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(12), end_of_pass_write_index: Some(13) }),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1255,7 +1493,7 @@ impl Renderer {
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: ts.map(|q| wgpu::RenderPassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(14), end_of_pass_write_index: Some(15) }),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1283,7 +1521,7 @@ impl Renderer {
                     ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::WHITE), store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: ts.map(|q| wgpu::RenderPassTimestampWrites { query_set: q, beginning_of_pass_write_index: Some(16), end_of_pass_write_index: Some(17) }),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1292,7 +1530,83 @@ impl Renderer {
             pass.set_bind_group(1, &self.composite_group, &[]);
             pass.draw(0..3, 0..1);
         }
+        if let Some(t) = &self.timing {
+            encoder.resolve_query_set(&t.set, 0..TIMING_SLOTS, &t.resolve, 0);
+            encoder.copy_buffer_to_buffer(&t.resolve, 0, &t.readback, 0, TIMING_SLOTS as u64 * 8);
+        }
     }
+
+    /// Turns on per-pass GPU timing if the device has `Features::TIMESTAMP_QUERY` (request it
+    /// when creating the device); returns whether timing is on. Diagnostics only (E069).
+    pub fn enable_timing(&mut self) -> bool {
+        if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return false;
+        }
+        let set = self.device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("pass timing"), ty: wgpu::QueryType::Timestamp, count: TIMING_SLOTS });
+        let size = TIMING_SLOTS as u64 * 8;
+        let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pass timing resolve"),
+            size,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pass timing readback"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.timing = Some(Timing { set, resolve, readback });
+        true
+    }
+
+    /// GPU milliseconds per pass for the last submitted frame (blocks until it is done):
+    /// shadow cascades 0 to 3, depth prepass, forward, contours, ink lines, composite. None
+    /// without timing.
+    pub fn read_timing(&self) -> Option<Vec<(&'static str, f64)>> {
+        let t = self.timing.as_ref()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        t.readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        rx.recv().ok()?.ok()?;
+        let period = self.queue.get_timestamp_period() as f64 * 1e-6;
+        let v: Vec<u64> = {
+            let data = t.readback.slice(..).get_mapped_range().ok()?;
+            bytemuck::cast_slice::<u8, u64>(&data).to_vec()
+        };
+        t.readback.unmap();
+        let names = ["shadow 0", "shadow 1", "shadow 2", "shadow 3", "depth prepass", "forward", "contours", "ink lines", "composite"];
+        if std::env::var("MEGA_TIMING_RAW").is_ok() {
+            let t0 = v[0];
+            eprintln!("raw: {:?}", v.iter().map(|x| (x.saturating_sub(t0)) as f64 * period).collect::<Vec<_>>());
+        }
+        // Pass i's time is its end minus the previous pass's end: on a tile-based GPU the
+        // start timestamps are taken when the pass's vertex work begins, which overlaps the
+        // previous pass, but the ends are in order. The first pass is measured from its start.
+        let mut out = Vec::new();
+        let mut prev = v[0];
+        for (i, n) in names.iter().enumerate() {
+            let end = v[2 * i + 1];
+            if end == 0 {
+                out.push((*n, f64::NAN));
+                continue;
+            }
+            out.push((*n, end.saturating_sub(prev) as f64 * period));
+            prev = end;
+        }
+        Some(out)
+    }
+}
+
+/// Timestamp slots: nine passes, a begin and an end each.
+const TIMING_SLOTS: u32 = 18;
+
+struct Timing {
+    set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    readback: wgpu::Buffer,
 }
 
 #[cfg(test)]
@@ -1313,10 +1627,10 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_wgsl() {
-        // struct Globals: two mat4x4 and seven vec4. struct Style: fifty-five vec4.
+        // struct Globals: two mat4x4 and seven vec4. struct Style: fifty-six vec4.
         // struct ShadowU: four mat4x4 and two vec4.
         assert_eq!(std::mem::size_of::<Globals>(), 2 * 64 + 7 * 16);
-        assert_eq!(std::mem::size_of::<StyleGpu>(), 55 * 16);
+        assert_eq!(std::mem::size_of::<StyleGpu>(), 56 * 16);
         assert_eq!(std::mem::size_of::<ShadowGpu>(), 4 * 64 + 2 * 16);
     }
 
@@ -1353,7 +1667,7 @@ mod tests {
         assert_eq!(StylePreset::nihei_wash().paper_kind, 0.0);
         for p in [StylePreset::nihei(), StylePreset::nihei_vast(), StylePreset::nihei_wash(), StylePreset::nihei_hybrid()] {
             assert_eq!((p.pencil, p.paper_near_amp, p.far_mode), (0.0, 1.0, 0.0));
-            assert_eq!((p.shade, p.light_wash, p.light_far, p.black_range), (0.0, 0.0, 0.0, 0.0));
+            assert_eq!((p.shade, p.light_wash, p.light_far, p.black_range, p.player_light), (0.0, 0.0, 0.0, 0.0, 0.0));
         }
         assert!((StylePreset::nihei_ink().paper_kind as usize) < crate::paper::PAPER_KINDS.len());
         let ink = StylePreset::nihei_ink();
